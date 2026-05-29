@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, Text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db import Base
+from app.models.mixins import TimestampMixin, UUIDPKMixin
+
+
+class Call(UUIDPKMixin, TimestampMixin, Base):
+    __tablename__ = "calls"
+    __table_args__ = (
+        Index("ix_calls_practice_started", "practice_id", "started_at"),
+    )
+
+    practice_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("practices.id"), nullable=False
+    )
+    retell_call_id: Mapped[str | None] = mapped_column(Text, unique=True)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)  # inbound | outbound
+    from_number: Mapped[str] = mapped_column(Text, nullable=False)
+    to_number: Mapped[str] = mapped_column(Text, nullable=False)
+    patient_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("patients.id")
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str | None] = mapped_column(Text)
+    recording_path: Mapped[str | None] = mapped_column(Text)
+    transcript_jsonb: Mapped[dict | None] = mapped_column(JSONB)
+    sentiment_score: Mapped[float | None] = mapped_column(Float)
+    language_detected: Mapped[str | None] = mapped_column(Text)
