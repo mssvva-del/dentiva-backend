@@ -34,6 +34,6 @@ class Call(UUIDPKMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text)
     recording_path: Mapped[str | None] = mapped_column(Text)
-    transcript_jsonb: Mapped[dict | None] = mapped_column(JSONB)
+    transcript_jsonb: Mapped[dict | list | None] = mapped_column(JSONB)
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     language_detected: Mapped[str | None] = mapped_column(Text)

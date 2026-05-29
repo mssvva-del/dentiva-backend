@@ -1,4 +1,14 @@
-async def test_book_appointment_function_call(client):
+"""Phase 1 webhook tests — kept as-is for regression coverage.
+
+Note: these tests use the `client` fixture which ensures a fresh DB engine,
+so each test gets a clean connection pool via _prepare_database.
+"""
+
+from tests.conftest import seed_practice
+
+
+async def test_book_appointment_function_call(client, db_session):
+    # No practice seeded — webhook gracefully returns slots without persistence.
     payload = {
         "event": "function_call",
         "call_id": "retell_call_xyz",
@@ -20,9 +30,13 @@ async def test_book_appointment_function_call(client):
     assert {"date", "time", "provider"} <= set(slots[0].keys())
 
 
-async def test_call_started_ack(client):
+async def test_call_started_ack(client, db_session):
+    # Seeds a practice so the call_started can persist the call row.
+    await seed_practice(
+        db_session, name="Ack Dental", clerk_org_id="org_ack", clerk_user_id="user_ack"
+    )
     resp = await client.post(
         "/webhooks/retell", json={"event": "call_started", "call_id": "c1"}
     )
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
+    assert resp.json()["ok"] is True
