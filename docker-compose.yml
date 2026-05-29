@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:15
+    container_name: dentiva-db
+    environment:
+      POSTGRES_USER: dentiva
+      POSTGRES_PASSWORD: dentiva
+      POSTGRES_DB: dentiva
+    ports:
+      - "5432:5432"
+    volumes:
+      - dentiva_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dentiva -d dentiva"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dentiva-api
+    env_file:
+      - .env
+    environment:
+      # Override host-based URLs so the container reaches Postgres via the compose
+      # network. App role (dentiva_app) is RLS-enforced; Alembic uses owner role.
+      DATABASE_URL: postgresql+asyncpg://dentiva_app:dentiva_app@db:5432/dentiva
+      DATABASE_URL_SYNC: postgresql+psycopg2://dentiva:dentiva@db:5432/dentiva
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  dentiva_pgdata:
