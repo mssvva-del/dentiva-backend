@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api import retell_llm_relay
 from app.config import get_settings
 from app.routes import bookings, calls, dashboard, practice
 from app.webhooks import retell
@@ -64,3 +65,4 @@ app.include_router(calls.router)
 app.include_router(bookings.router)
 app.include_router(dashboard.router)
 app.include_router(retell.router)
+app.include_router(retell_llm_relay.router)
