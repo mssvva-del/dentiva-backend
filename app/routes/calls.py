@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +11,14 @@ from app.models.booking import Booking
 from app.models.call import Call
 from app.models.patient import Patient
 from app.models.practice import Practice
-from app.schemas.call import CallDetail, CallListResponse, CallSummary, TranscriptTurn
+from app.schemas.call import (
+    ActiveCallsResponse,
+    ActiveCallSummary,
+    CallDetail,
+    CallListResponse,
+    CallSummary,
+    TranscriptTurn,
+)
 from app.utils.redact import redact_name
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
@@ -105,6 +114,44 @@ async def list_calls(
     return CallListResponse(
         calls=summaries, total=total, has_more=(offset + len(rows)) < total
     )
+
+
+@router.get("/active", response_model=ActiveCallsResponse)
+async def list_active_calls(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> ActiveCallsResponse:
+    """Return calls currently in progress (started but not yet ended). Max 10."""
+    rows = (
+        await db.execute(
+            select(Call)
+            .where(Call.practice_id == practice.id, Call.status == "in_progress")
+            .order_by(Call.started_at.asc())
+            .limit(10)
+        )
+    ).scalars().all()
+
+    now = datetime.now(UTC)
+    summaries: list[ActiveCallSummary] = []
+    for call in rows:
+        started = call.started_at
+        # Ensure started_at is timezone-aware for arithmetic.
+        if started.tzinfo is None:
+
+            started = started.replace(tzinfo=UTC)
+        duration = max(0, int((now - started).total_seconds()))
+        summaries.append(
+            ActiveCallSummary(
+                id=str(call.id),
+                retell_call_id=call.retell_call_id,
+                direction=call.direction,
+                from_number=call.from_number,
+                started_at=call.started_at,
+                duration_seconds_so_far=duration,
+            )
+        )
+
+    return ActiveCallsResponse(active_calls=summaries, count=len(summaries))
 
 
 @router.get("/{call_id}", response_model=CallDetail)

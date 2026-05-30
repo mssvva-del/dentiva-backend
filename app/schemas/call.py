@@ -47,3 +47,17 @@ class CallDetail(BaseModel):
     booking_id: str | None
     recording_url: str | None
     transcript: list[TranscriptTurn]
+
+
+class ActiveCallSummary(BaseModel):
+    id: str
+    retell_call_id: str | None
+    direction: str
+    from_number: str
+    started_at: datetime
+    duration_seconds_so_far: int
+
+
+class ActiveCallsResponse(BaseModel):
+    active_calls: list[ActiveCallSummary]
+    count: int
