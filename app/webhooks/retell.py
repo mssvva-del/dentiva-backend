@@ -237,6 +237,16 @@ async def _handle_call_ended(payload: dict) -> dict:
         if transcript_jsonb is not None:
             call.transcript_jsonb = transcript_jsonb
 
+        # Extract recording URL from Retell payload
+        recording_url = call_data.get("recording_url") or payload.get("recording_url")
+        if recording_url:
+            call.recording_path = recording_url  # stored in recording_path column
+
+        # Extract detected language from Retell payload
+        language = call_data.get("detected_language") or call_data.get("language")
+        if language:
+            call.language_detected = language
+
         # Determine outcome: booked if a booking exists for this call.
         booking_result = await session.execute(
             select(Booking.id).where(Booking.source_call_id == call.id)

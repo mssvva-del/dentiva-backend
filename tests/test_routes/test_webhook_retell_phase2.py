@@ -147,6 +147,53 @@ async def test_call_ended_updates_call_row(client, db_session):
     assert isinstance(call.transcript_jsonb, list)
 
 
+async def test_call_ended_saves_recording_url(client, db_session):
+    """call_ended with recording_url in payload saves it to recording_path on the call row."""
+    practice, _ = await seed_practice(
+        db_session, name="Rec Dental", clerk_org_id="org_rec1", clerk_user_id="user_rec1"
+    )
+
+    # Create the call row first.
+    await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "call_started",
+            "call_id": "retell-rec-001",
+            "call": {
+                "from_number": "+15557778888",
+                "to_number": "+15559876543",
+                "start_timestamp": 1748563200000,
+            },
+        },
+    )
+
+    recording_url = "https://storage.retellai.com/recordings/retell-rec-001.mp3"
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "call_ended",
+            "call_id": "retell-rec-001",
+            "call": {
+                "start_timestamp": 1748563200000,
+                "end_timestamp": 1748563320000,
+                "disconnection_reason": "user_hangup",
+                "recording_url": recording_url,
+                "detected_language": "en-US",
+            },
+        },
+    )
+    assert resp.status_code == 200
+
+    await db_session.commit()
+    result = await db_session.execute(
+        select(Call).where(Call.retell_call_id == "retell-rec-001")
+    )
+    call = result.scalar_one_or_none()
+    assert call is not None
+    assert call.recording_path == recording_url
+    assert call.language_detected == "en-US"
+
+
 async def test_call_ended_without_prior_started(client, db_session):
     """call_ended on an unknown call creates a call row gracefully."""
     await seed_practice(
