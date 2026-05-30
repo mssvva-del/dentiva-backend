@@ -30,3 +30,11 @@ class DashboardToday(BaseModel):
     calls_missed: int
     bookings_made_today: int
     upcoming_appointments_today: int
+
+
+class BriefingResponse(BaseModel):
+    text: str
+    stats: DashboardToday
+    peak_hours: list[dict]
+    generated_at: datetime
+    ai_generated: bool
