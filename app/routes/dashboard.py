@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 import httpx
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -12,7 +12,17 @@ from app.dependencies import get_current_practice, get_tenant_db
 from app.models.booking import Booking
 from app.models.call import Call
 from app.models.practice import Practice
-from app.schemas.booking import BriefingResponse, DashboardToday
+from app.schemas.booking import (
+    BriefingResponse,
+    CallsByHourResponse,
+    ConversionResponse,
+    DailyStats,
+    DashboardToday,
+    HourlyCount,
+    ProcedureCount,
+    WeeklyStatsResponse,
+    WeeklyTotals,
+)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -220,4 +230,248 @@ async def get_dashboard_briefing(
         peak_hours=peak_hours,
         generated_at=datetime.now(UTC),
         ai_generated=ai_generated,
+    )
+
+
+@router.get("/weekly", response_model=WeeklyStatsResponse)
+async def get_weekly_stats(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> WeeklyStatsResponse:
+    """Return per-day call and booking stats for the last 7 calendar days (today inclusive).
+
+    TODO: Group by DATE(started_at AT TIME ZONE practice.timezone) once timezone-aware
+    grouping is added. Currently uses UTC dates.
+    """
+    today = datetime.now(UTC).date()
+    # Build the list of the last 7 dates: oldest first, today last.
+    date_range: list[date] = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    window_start = datetime.combine(date_range[0], time.min, tzinfo=UTC)
+    window_end = datetime.combine(today, time.max, tzinfo=UTC)
+
+    # ── Per-day call counts ──────────────────────────────────────────────────
+    _day_trunc = func.date_trunc("day", Call.started_at)
+    call_day_rows = (
+        await db.execute(
+            select(
+                _day_trunc.label("day"),
+                func.count().label("calls_total"),
+                func.sum(
+                    case((Call.status == "missed", 1), else_=0)
+                ).label("calls_missed"),
+                func.sum(
+                    case((Call.status == "completed", 1), else_=0)
+                ).label("calls_answered"),
+                func.coalesce(
+                    func.avg(
+                        case(
+                            (Call.status == "completed", Call.duration_seconds),
+                            else_=None,
+                        )
+                    ),
+                    0,
+                ).label("avg_duration"),
+            )
+            .where(Call.practice_id == practice.id)
+            .where(Call.started_at >= window_start)
+            .where(Call.started_at <= window_end)
+            .group_by(text("1"))
+        )
+    ).all()
+
+    # Build a lookup keyed by date.
+    call_map: dict[date, dict] = {}
+    for row in call_day_rows:
+        d: date = row.day.date()
+        call_map[d] = {
+            "calls_total": int(row.calls_total),
+            "calls_missed": int(row.calls_missed or 0),
+            "calls_answered": int(row.calls_answered or 0),
+            "avg_duration": int(round(float(row.avg_duration or 0))),
+        }
+
+    # ── Per-day booking counts ───────────────────────────────────────────────
+    booking_day_rows = (
+        await db.execute(
+            select(
+                func.date_trunc("day", Booking.created_at).label("day"),
+                func.count().label("bookings_created"),
+            )
+            .where(Booking.practice_id == practice.id)
+            .where(Booking.created_at >= window_start)
+            .where(Booking.created_at <= window_end)
+            .group_by(text("1"))
+        )
+    ).all()
+
+    booking_map: dict[date, int] = {
+        row.day.date(): int(row.bookings_created) for row in booking_day_rows
+    }
+
+    # ── Assemble daily rows (fill gaps with zeros) ───────────────────────────
+    days: list[DailyStats] = []
+    for d in date_range:
+        c = call_map.get(
+            d, {"calls_total": 0, "calls_missed": 0, "calls_answered": 0, "avg_duration": 0}
+        )
+        days.append(
+            DailyStats(
+                date=d,
+                calls_total=c["calls_total"],
+                calls_answered_by_ai=c["calls_answered"],
+                calls_missed=c["calls_missed"],
+                bookings_created=booking_map.get(d, 0),
+                avg_duration_seconds=c["avg_duration"],
+            )
+        )
+
+    # ── Totals ───────────────────────────────────────────────────────────────
+    total_calls = sum(d.calls_total for d in days)
+    total_answered = sum(d.calls_answered_by_ai for d in days)
+    total_missed = sum(d.calls_missed for d in days)
+    total_bookings = sum(d.bookings_created for d in days)
+    ai_answer_rate = round(total_answered / total_calls, 3) if total_calls else 0.0
+
+    return WeeklyStatsResponse(
+        days=days,
+        totals=WeeklyTotals(
+            calls_total=total_calls,
+            calls_answered_by_ai=total_answered,
+            calls_missed=total_missed,
+            bookings_created=total_bookings,
+            ai_answer_rate=ai_answer_rate,
+        ),
+    )
+
+
+@router.get("/calls-by-hour", response_model=CallsByHourResponse)
+async def get_calls_by_hour(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> CallsByHourResponse:
+    """Return call volume by hour-of-day (0–23) aggregated over the last 30 days.
+
+    Used for a heatmap showing peak call hours on the dashboard.
+    """
+    today = datetime.now(UTC).date()
+    window_start = datetime.combine(today - timedelta(days=29), time.min, tzinfo=UTC)
+    window_end = datetime.combine(today, time.max, tzinfo=UTC)
+
+    rows = (
+        await db.execute(
+            select(
+                func.extract("hour", Call.started_at).label("hour"),
+                func.count().label("count"),
+            )
+            .where(Call.practice_id == practice.id)
+            .where(Call.started_at >= window_start)
+            .where(Call.started_at <= window_end)
+            .group_by(func.extract("hour", Call.started_at))
+        )
+    ).all()
+
+    # Build a lookup and fill all 24 hours.
+    hour_map: dict[int, int] = {int(row.hour): int(row.count) for row in rows}  # type: ignore[call-overload]
+    hours: list[HourlyCount] = [
+        HourlyCount(hour=h, count=hour_map.get(h, 0)) for h in range(24)
+    ]
+
+    peak = max(hours, key=lambda x: x.count, default=HourlyCount(hour=0, count=0))
+
+    return CallsByHourResponse(
+        hours=hours,
+        peak_hour=peak.hour,
+        peak_count=peak.count,
+    )
+
+
+@router.get("/conversion", response_model=ConversionResponse)
+async def get_conversion(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> ConversionResponse:
+    """Return booking conversion funnel stats for the last 30 days."""
+    period_days = 30
+    today = datetime.now(UTC).date()
+    window_start = datetime.combine(today - timedelta(days=period_days - 1), time.min, tzinfo=UTC)
+    window_end = datetime.combine(today, time.max, tzinfo=UTC)
+
+    # ── Call aggregates ──────────────────────────────────────────────────────
+    call_agg = (
+        await db.execute(
+            select(
+                func.count().label("calls_total"),
+                func.sum(
+                    case((Call.status == "completed", 1), else_=0)
+                ).label("calls_completed"),
+                func.sum(
+                    case((Call.outcome.isnot(None), 1), else_=0)
+                ).label("calls_with_intent"),
+                func.coalesce(
+                    func.avg(
+                        case(
+                            (Call.status == "completed", Call.duration_seconds),
+                            else_=None,
+                        )
+                    ),
+                    0,
+                ).label("avg_duration"),
+            )
+            .where(Call.practice_id == practice.id)
+            .where(Call.started_at >= window_start)
+            .where(Call.started_at <= window_end)
+        )
+    ).one()
+
+    calls_total = int(call_agg.calls_total or 0)
+    calls_completed = int(call_agg.calls_completed or 0)
+    calls_with_intent = int(call_agg.calls_with_intent or 0)
+    avg_duration = int(round(float(call_agg.avg_duration or 0)))
+
+    # ── Bookings ─────────────────────────────────────────────────────────────
+    bookings_created = (
+        await db.execute(
+            select(func.count())
+            .select_from(Booking)
+            .where(Booking.practice_id == practice.id)
+            .where(Booking.created_at >= window_start)
+            .where(Booking.created_at <= window_end)
+        )
+    ).scalar_one()
+
+    # ── Top procedures ────────────────────────────────────────────────────────
+    procedure_rows = (
+        await db.execute(
+            select(
+                Booking.procedure_type.label("procedure"),
+                func.count().label("count"),
+            )
+            .where(Booking.practice_id == practice.id)
+            .where(Booking.created_at >= window_start)
+            .where(Booking.created_at <= window_end)
+            .where(Booking.procedure_type.isnot(None))
+            .group_by(Booking.procedure_type)
+            .order_by(func.count().desc())
+            .limit(5)
+        )
+    ).all()
+
+    top_procedures = [
+        ProcedureCount(procedure=row.procedure, count=int(row.count))  # type: ignore[call-overload]
+        for row in procedure_rows
+    ]
+
+    conversion_rate = round(bookings_created / calls_total, 3) if calls_total else 0.0
+    ai_answer_rate = round(calls_completed / calls_total, 3) if calls_total else 0.0
+
+    return ConversionResponse(
+        period_days=period_days,
+        calls_total=calls_total,
+        calls_completed=calls_completed,
+        calls_with_booking_intent=calls_with_intent,
+        bookings_created=int(bookings_created),
+        conversion_rate=conversion_rate,
+        ai_answer_rate=ai_answer_rate,
+        avg_call_duration_seconds=avg_duration,
+        top_procedures=top_procedures,
     )

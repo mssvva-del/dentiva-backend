@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel
 
@@ -38,3 +38,56 @@ class BriefingResponse(BaseModel):
     peak_hours: list[dict]
     generated_at: datetime
     ai_generated: bool
+
+
+# ── Analytics schemas ─────────────────────────────────────────────────────────
+
+
+class DailyStats(BaseModel):
+    date: date
+    calls_total: int
+    calls_answered_by_ai: int
+    calls_missed: int
+    bookings_created: int
+    avg_duration_seconds: int
+
+
+class WeeklyTotals(BaseModel):
+    calls_total: int
+    calls_answered_by_ai: int
+    calls_missed: int
+    bookings_created: int
+    ai_answer_rate: float
+
+
+class WeeklyStatsResponse(BaseModel):
+    days: list[DailyStats]
+    totals: WeeklyTotals
+
+
+class HourlyCount(BaseModel):
+    hour: int
+    count: int
+
+
+class CallsByHourResponse(BaseModel):
+    hours: list[HourlyCount]
+    peak_hour: int
+    peak_count: int
+
+
+class ProcedureCount(BaseModel):
+    procedure: str
+    count: int
+
+
+class ConversionResponse(BaseModel):
+    period_days: int
+    calls_total: int
+    calls_completed: int
+    calls_with_booking_intent: int
+    bookings_created: int
+    conversion_rate: float
+    ai_answer_rate: float
+    avg_call_duration_seconds: int
+    top_procedures: list[ProcedureCount]
