@@ -108,6 +108,9 @@ async def list_calls(
                 outcome=call.outcome,
                 booking_id=str(booking) if booking else None,
                 transcript_available=call.transcript_jsonb is not None,
+                call_intent=call.call_intent,
+                patient_sentiment=call.patient_sentiment,
+                escalation_needed=call.escalation_needed,
             )
         )
 
@@ -202,4 +205,7 @@ async def get_call(
         booking_id=str(booking) if booking else None,
         recording_url=recording_url,
         transcript=_parse_transcript(call.transcript_jsonb),
+        call_intent=call.call_intent,
+        patient_sentiment=call.patient_sentiment,
+        escalation_needed=call.escalation_needed,
     )

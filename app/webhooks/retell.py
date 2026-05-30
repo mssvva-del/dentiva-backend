@@ -252,6 +252,51 @@ async def _handle_call_ended(payload: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# call_analyzed handler
+# ---------------------------------------------------------------------------
+
+
+async def _handle_call_analyzed(payload: dict) -> dict:
+    """Store Retell post-call analysis results on the calls row."""
+    retell_call_id = payload.get("call_id") or payload.get("retell_call_id", "")
+    analysis = payload.get("call_analysis") or payload.get("analysis") or {}
+
+    # Extract structured fields
+    call_intent = analysis.get("intent")  # enum string
+    patient_sentiment = analysis.get("patient_sentiment")  # enum string
+    escalation_needed = analysis.get("escalation_needed")  # bool
+    hipaa_compliant = analysis.get("hipaa_compliant")  # bool
+
+    async with _app_db.async_session_factory() as session:
+        result = await session.execute(
+            select(Call).where(Call.retell_call_id == retell_call_id)
+        )
+        call = result.scalar_one_or_none()
+        if call is None:
+            logger.warning("call_analyzed: no call row for retell_call_id=%s", retell_call_id)
+            return {"ok": True, "warning": "call_not_found"}
+
+        if call_intent is not None:
+            call.call_intent = call_intent
+        if patient_sentiment is not None:
+            call.patient_sentiment = patient_sentiment
+        if escalation_needed is not None:
+            call.escalation_needed = escalation_needed
+        if hipaa_compliant is not None:
+            call.hipaa_compliant = hipaa_compliant
+
+        await session.commit()
+
+    logger.info(
+        "call_analyzed stored: retell_call_id=%s intent=%s sentiment=%s",
+        retell_call_id,
+        call_intent,
+        patient_sentiment,
+    )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # book_appointment function_call handler
 # ---------------------------------------------------------------------------
 
@@ -388,6 +433,9 @@ async def retell_webhook(request: Request) -> dict:
 
     if event == "call_ended":
         return await _handle_call_ended(payload)
+
+    if event == "call_analyzed":
+        return await _handle_call_analyzed(payload)
 
     if event == "function_call":
         fn = payload.get("function_name")

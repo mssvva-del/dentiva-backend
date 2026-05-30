@@ -18,6 +18,9 @@ class CallSummary(BaseModel):
     outcome: str | None
     booking_id: str | None
     transcript_available: bool
+    call_intent: str | None = None
+    patient_sentiment: str | None = None
+    escalation_needed: bool | None = None
 
 
 class CallListResponse(BaseModel):
@@ -47,6 +50,9 @@ class CallDetail(BaseModel):
     booking_id: str | None
     recording_url: str | None
     transcript: list[TranscriptTurn]
+    call_intent: str | None = None
+    patient_sentiment: str | None = None
+    escalation_needed: bool | None = None
 
 
 class ActiveCallSummary(BaseModel):

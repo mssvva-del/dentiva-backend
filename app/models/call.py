@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -37,3 +37,7 @@ class Call(UUIDPKMixin, TimestampMixin, Base):
     transcript_jsonb: Mapped[dict | list | None] = mapped_column(JSONB)
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     language_detected: Mapped[str | None] = mapped_column(Text)
+    call_intent: Mapped[str | None] = mapped_column(Text)
+    patient_sentiment: Mapped[str | None] = mapped_column(Text)
+    escalation_needed: Mapped[bool | None] = mapped_column(Boolean)
+    hipaa_compliant: Mapped[bool | None] = mapped_column(Boolean)
