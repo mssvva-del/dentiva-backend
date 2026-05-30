@@ -22,6 +22,7 @@ class BookingSummary(BaseModel):
 class BookingListResponse(BaseModel):
     bookings: list[BookingSummary]
     total: int
+    has_more: bool
 
 
 class DashboardToday(BaseModel):

@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import retell_llm_relay
 from app.config import get_settings
-from app.routes import bookings, calls, dashboard, practice
+from app.routes import bookings, calls, dashboard, patients, practice
 from app.webhooks import retell
 
 logging.basicConfig(level=get_settings().log_level.upper())
@@ -63,6 +63,7 @@ async def health() -> dict:
 app.include_router(practice.router)
 app.include_router(calls.router)
 app.include_router(bookings.router)
+app.include_router(patients.router)
 app.include_router(dashboard.router)
 app.include_router(retell.router)
 app.include_router(retell_llm_relay.router)

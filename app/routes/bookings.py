@@ -22,6 +22,8 @@ async def list_bookings(
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     status: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> BookingListResponse:
@@ -45,7 +47,9 @@ async def list_bookings(
     ).scalar_one()
 
     rows = (
-        await db.execute(base.order_by(Booking.appointment_at.asc()))
+        await db.execute(
+            base.order_by(Booking.appointment_at.asc()).limit(limit).offset(offset)
+        )
     ).scalars().all()
 
     summaries: list[BookingSummary] = []
@@ -70,7 +74,11 @@ async def list_bookings(
             )
         )
 
-    return BookingListResponse(bookings=summaries, total=total)
+    return BookingListResponse(
+        bookings=summaries,
+        total=total,
+        has_more=(offset + len(summaries)) < total,
+    )
 
 
 @router.get("/{booking_id}", response_model=BookingSummary)
