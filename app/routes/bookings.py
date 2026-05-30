@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import csv
+import io
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,6 +81,67 @@ async def list_bookings(
         bookings=summaries,
         total=total,
         has_more=(offset + len(summaries)) < total,
+    )
+
+
+@router.get("/export")
+async def export_bookings(
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    status: str | None = Query(default=None),
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> StreamingResponse:
+    """Export bookings as CSV. Returns all matching bookings (no pagination)."""
+    today = datetime.now(UTC).date()
+    start = from_date or today
+    end = to_date or (today + timedelta(days=30))
+    start_dt = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
+    end_dt = datetime.combine(end, datetime.max.time(), tzinfo=UTC)
+
+    base = (
+        select(Booking)
+        .where(Booking.practice_id == practice.id)
+        .where(Booking.appointment_at >= start_dt)
+        .where(Booking.appointment_at <= end_dt)
+    )
+    if status:
+        base = base.where(Booking.status == status)
+
+    rows = (
+        await db.execute(base.order_by(Booking.appointment_at.asc()))
+    ).scalars().all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    # HIPAA: не экспортируем полные имена, только redacted
+    writer.writerow([
+        "ID", "Patient", "Appointment Date", "Duration (min)",
+        "Procedure", "Provider", "Status", "Source", "Created At"
+    ])
+    for b in rows:
+        patient = (
+            await db.execute(select(Patient).where(Patient.id == b.patient_id))
+        ).scalar_one_or_none()
+        name = redact_name(patient.first_name, patient.last_name) if patient else "—"
+        writer.writerow([
+            str(b.id),
+            name,
+            b.appointment_at.strftime("%Y-%m-%d %H:%M") if b.appointment_at else "",
+            b.duration_minutes,
+            b.procedure_type,
+            b.provider_name or "—",
+            b.status,
+            b.source or "—",
+            b.created_at.strftime("%Y-%m-%d") if b.created_at else "",
+        ])
+
+    output.seek(0)
+    filename = f"bookings_{start.isoformat()}_{end.isoformat()}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 
