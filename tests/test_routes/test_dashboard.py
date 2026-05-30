@@ -183,3 +183,52 @@ async def test_get_conversion(client, db_session):
     assert "avg_call_duration_seconds" in data
     assert "top_procedures" in data
     assert isinstance(data["top_procedures"], list)
+
+
+# ── /roi ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dashboard_roi_requires_auth(client):
+    resp = await client.get("/api/dashboard/roi")
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_dashboard_roi(client, db_session):
+    org_id = _uid("org_roi")
+    user_id = _uid("user_roi")
+    await seed_practice(
+        db_session,
+        name="ROI Dental",
+        clerk_org_id=org_id,
+        clerk_user_id=user_id,
+    )
+
+    resp = await client.get(
+        "/api/dashboard/roi",
+        headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Required keys
+    assert data["period_days"] == 30
+    assert "calls_handled_by_ai" in data
+    assert "calls_missed" in data
+    assert "bookings_by_ai" in data
+    assert "total_talk_time_minutes" in data
+    assert "minutes_saved" in data
+    assert "cost_saved_usd" in data
+    assert "revenue_protected_usd" in data
+    assert "ai_answer_rate_pct" in data
+
+    # Values must be non-negative
+    assert data["cost_saved_usd"] >= 0
+    assert data["revenue_protected_usd"] >= 0
+    assert data["calls_handled_by_ai"] >= 0
+    assert data["calls_missed"] >= 0
+    assert data["bookings_by_ai"] >= 0
+    assert data["total_talk_time_minutes"] >= 0
+    assert data["minutes_saved"] >= 0
+    assert 0.0 <= data["ai_answer_rate_pct"] <= 100.0

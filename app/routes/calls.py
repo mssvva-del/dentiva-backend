@@ -61,6 +61,7 @@ async def list_calls(
     offset: int = Query(default=0, ge=0),
     direction: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    search: str | None = Query(default=None),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> CallListResponse:
@@ -69,6 +70,11 @@ async def list_calls(
         base = base.where(Call.direction == direction)
     if status:
         base = base.where(Call.status == status)
+    if search:
+        search_pattern = f"%{search}%"
+        base = base.where(
+            Call.from_number.ilike(search_pattern) | Call.to_number.ilike(search_pattern)
+        )
 
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))

@@ -91,3 +91,15 @@ class ConversionResponse(BaseModel):
     ai_answer_rate: float
     avg_call_duration_seconds: int
     top_procedures: list[ProcedureCount]
+
+
+class ROIResponse(BaseModel):
+    period_days: int
+    calls_handled_by_ai: int
+    calls_missed: int
+    bookings_by_ai: int
+    total_talk_time_minutes: int
+    minutes_saved: int
+    cost_saved_usd: float
+    revenue_protected_usd: float
+    ai_answer_rate_pct: float

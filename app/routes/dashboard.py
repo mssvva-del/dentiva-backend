@@ -20,6 +20,7 @@ from app.schemas.booking import (
     DashboardToday,
     HourlyCount,
     ProcedureCount,
+    ROIResponse,
     WeeklyStatsResponse,
     WeeklyTotals,
 )
@@ -474,4 +475,88 @@ async def get_conversion(
         ai_answer_rate=ai_answer_rate,
         avg_call_duration_seconds=avg_duration,
         top_procedures=top_procedures,
+    )
+
+
+@router.get("/roi", response_model=ROIResponse)
+async def dashboard_roi(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> ROIResponse:
+    """Return ROI metrics for the last 30 days."""
+    period_days = 30
+    today = datetime.now(UTC).date()
+    window_start = datetime.combine(today - timedelta(days=period_days - 1), time.min, tzinfo=UTC)
+    window_end = datetime.combine(today, time.max, tzinfo=UTC)
+
+    # ── Calls handled by AI (all completed / non-in_progress calls) ──────────
+    calls_handled_by_ai = (
+        await db.execute(
+            select(func.count())
+            .select_from(Call)
+            .where(Call.practice_id == practice.id)
+            .where(Call.started_at >= window_start)
+            .where(Call.started_at <= window_end)
+            .where(Call.status != "in_progress")
+        )
+    ).scalar_one()
+
+    # ── Missed calls ─────────────────────────────────────────────────────────
+    calls_missed = (
+        await db.execute(
+            select(func.count())
+            .select_from(Call)
+            .where(Call.practice_id == practice.id)
+            .where(Call.started_at >= window_start)
+            .where(Call.started_at <= window_end)
+            .where(Call.status == "missed")
+        )
+    ).scalar_one()
+
+    # ── Bookings created by AI call ───────────────────────────────────────────
+    bookings_by_ai = (
+        await db.execute(
+            select(func.count())
+            .select_from(Booking)
+            .where(Booking.practice_id == practice.id)
+            .where(Booking.created_at >= window_start)
+            .where(Booking.created_at <= window_end)
+            .where(Booking.source == "ai_call")
+        )
+    ).scalar_one()
+
+    # ── Talk time aggregates from completed calls ─────────────────────────────
+    talk_agg = (
+        await db.execute(
+            select(
+                func.coalesce(func.sum(Call.duration_seconds), 0).label("total_duration"),
+            )
+            .where(Call.practice_id == practice.id)
+            .where(Call.started_at >= window_start)
+            .where(Call.started_at <= window_end)
+            .where(Call.status == "completed")
+        )
+    ).one()
+
+    total_talk_time_minutes = int(round(float(talk_agg.total_duration or 0) / 60))
+
+    # ── Derived metrics ───────────────────────────────────────────────────────
+    minutes_saved = total_talk_time_minutes
+    cost_saved_usd = round(minutes_saved / 60 * 25, 2)
+    revenue_protected_usd = round(int(bookings_by_ai) * 150, 2)
+    ai_answer_rate_pct = round(
+        int(calls_handled_by_ai) / max(int(calls_handled_by_ai) + int(calls_missed), 1) * 100,
+        1,
+    )
+
+    return ROIResponse(
+        period_days=period_days,
+        calls_handled_by_ai=int(calls_handled_by_ai),
+        calls_missed=int(calls_missed),
+        bookings_by_ai=int(bookings_by_ai),
+        total_talk_time_minutes=total_talk_time_minutes,
+        minutes_saved=minutes_saved,
+        cost_saved_usd=cost_saved_usd,
+        revenue_protected_usd=revenue_protected_usd,
+        ai_answer_rate_pct=ai_answer_rate_pct,
     )
