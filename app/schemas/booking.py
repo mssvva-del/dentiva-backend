@@ -104,3 +104,25 @@ class ROIResponse(BaseModel):
     cost_saved_usd: float
     revenue_protected_usd: float
     ai_answer_rate_pct: float
+
+
+class ActivityDay(BaseModel):
+    date: date
+    created: int
+    rescheduled: int
+    cancelled: int
+
+
+class ActivityResponse(BaseModel):
+    """Appointment lifecycle activity over a window — created / rescheduled /
+    cancelled — sourced from audit logs so reschedules & cancellations
+    (etap 1 voice tools) become visible alongside new bookings."""
+
+    period_days: int
+    created: int
+    rescheduled: int
+    cancelled: int
+    net_added: int
+    reschedule_rate: float
+    cancellation_rate: float
+    days: list[ActivityDay]

@@ -9,10 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.dependencies import get_current_practice, get_tenant_db
+from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.call import Call
 from app.models.practice import Practice
 from app.schemas.booking import (
+    ActivityDay,
+    ActivityResponse,
     BriefingResponse,
     CallsByHourResponse,
     ConversionResponse,
@@ -570,4 +573,88 @@ async def dashboard_roi(
         cost_saved_usd=cost_saved_usd,
         revenue_protected_usd=revenue_protected_usd,
         ai_answer_rate_pct=ai_answer_rate_pct,
+    )
+
+
+# Audit actions that make up appointment lifecycle activity. Booking creation,
+# reschedules and cancellations are all written by the voice webhook handlers
+# (app/webhooks/retell.py), so the audit log is the single source of truth that
+# captures reschedules/cancellations — which the bookings table alone can't.
+_ACTIVITY_ACTIONS = {
+    "booking_created": "created",
+    "booking_rescheduled": "rescheduled",
+    "booking_cancelled": "cancelled",
+}
+
+
+@router.get("/activity", response_model=ActivityResponse)
+async def get_appointment_activity(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> ActivityResponse:
+    """Return appointment lifecycle activity for the last 30 days.
+
+    Counts new bookings, reschedules and cancellations from the audit log and
+    returns both totals and a per-day series for a stacked chart. This surfaces
+    the reschedule/cancel voice tools (etap 1), which the bookings table alone
+    cannot show.
+    """
+    period_days = 30
+    today = datetime.now(UTC).date()
+    date_range: list[date] = [
+        today - timedelta(days=i) for i in range(period_days - 1, -1, -1)
+    ]
+    window_start = datetime.combine(date_range[0], time.min, tzinfo=UTC)
+    window_end = datetime.combine(today, time.max, tzinfo=UTC)
+
+    rows = (
+        await db.execute(
+            select(
+                func.date_trunc("day", AuditLog.created_at).label("day"),
+                AuditLog.action.label("action"),
+                func.count().label("count"),
+            )
+            .where(AuditLog.practice_id == practice.id)
+            .where(AuditLog.action.in_(list(_ACTIVITY_ACTIONS.keys())))
+            .where(AuditLog.created_at >= window_start)
+            .where(AuditLog.created_at <= window_end)
+            .group_by(text("1"), AuditLog.action)
+        )
+    ).all()
+
+    # day -> {created, rescheduled, cancelled}
+    day_map: dict[date, dict[str, int]] = {}
+    for row in rows:
+        d: date = row.day.date()
+        bucket = day_map.setdefault(
+            d, {"created": 0, "rescheduled": 0, "cancelled": 0}
+        )
+        key = _ACTIVITY_ACTIONS[row.action]
+        bucket[key] += int(row.count)
+
+    days: list[ActivityDay] = []
+    for d in date_range:
+        b = day_map.get(d, {"created": 0, "rescheduled": 0, "cancelled": 0})
+        days.append(
+            ActivityDay(
+                date=d,
+                created=b["created"],
+                rescheduled=b["rescheduled"],
+                cancelled=b["cancelled"],
+            )
+        )
+
+    created = sum(d.created for d in days)
+    rescheduled = sum(d.rescheduled for d in days)
+    cancelled = sum(d.cancelled for d in days)
+
+    return ActivityResponse(
+        period_days=period_days,
+        created=created,
+        rescheduled=rescheduled,
+        cancelled=cancelled,
+        net_added=created - cancelled,
+        reschedule_rate=round(rescheduled / created, 3) if created else 0.0,
+        cancellation_rate=round(cancelled / created, 3) if created else 0.0,
+        days=days,
     )

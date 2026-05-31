@@ -232,3 +232,125 @@ async def test_dashboard_roi(client, db_session):
     assert data["total_talk_time_minutes"] >= 0
     assert data["minutes_saved"] >= 0
     assert 0.0 <= data["ai_answer_rate_pct"] <= 100.0
+
+
+# ── /activity ─────────────────────────────────────────────────────────────────
+
+_ACT_FUTURE = "2099-11-10"
+_ACT_FUTURE_2 = "2099-11-18"
+_ACT_PHONE = "+15558881234"
+
+
+@pytest.mark.asyncio
+async def test_get_activity_requires_auth(client):
+    resp = await client.get("/api/dashboard/activity")
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_get_activity_empty_practice(client, db_session):
+    org_id = _uid("org_act")
+    user_id = _uid("user_act")
+    await seed_practice(
+        db_session,
+        name="Activity Dental",
+        clerk_org_id=org_id,
+        clerk_user_id=user_id,
+    )
+
+    resp = await client.get(
+        "/api/dashboard/activity",
+        headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["period_days"] == 30
+    assert len(data["days"]) == 30
+    assert data["created"] == 0
+    assert data["rescheduled"] == 0
+    assert data["cancelled"] == 0
+    assert data["net_added"] == 0
+    assert data["reschedule_rate"] == 0.0
+    assert data["cancellation_rate"] == 0.0
+    for day in data["days"]:
+        assert {"date", "created", "rescheduled", "cancelled"} <= day.keys()
+
+
+@pytest.mark.asyncio
+async def test_activity_counts_create_reschedule_cancel(client, db_session):
+    """Drive a booking through book → reschedule → cancel via the voice webhook
+    and assert /activity reflects all three audit actions."""
+    org_id = _uid("org_actflow")
+    user_id = _uid("user_actflow")
+    await seed_practice(
+        db_session,
+        name="Activity Flow Dental",
+        clerk_org_id=org_id,
+        clerk_user_id=user_id,
+    )
+
+    # 1) book
+    book = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "act-call-1", "agent_id": "agent_act"},
+            "name": "book_appointment",
+            "args": {
+                "patient_first_name": "Nina",
+                "patient_last_name": "Park",
+                "patient_phone": _ACT_PHONE,
+                "procedure": "cleaning",
+                "preferred_date": _ACT_FUTURE,
+                "preferred_time_window": "morning",
+            },
+        },
+    )
+    assert book.status_code == 200 and book.json()["booked"] is True
+
+    # 2) reschedule
+    resched = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "act-call-1", "agent_id": "agent_act"},
+            "name": "reschedule_appointment",
+            "args": {
+                "patient_phone": _ACT_PHONE,
+                "new_date": _ACT_FUTURE_2,
+                "new_time_window": "afternoon",
+            },
+        },
+    )
+    assert resched.status_code == 200 and resched.json()["rescheduled"] is True
+
+    # 3) cancel
+    cancel = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "act-call-1", "agent_id": "agent_act"},
+            "name": "cancel_appointment",
+            "args": {"patient_phone": _ACT_PHONE, "reason": "test"},
+        },
+    )
+    assert cancel.status_code == 200 and cancel.json()["cancelled"] is True
+
+    await db_session.commit()
+
+    resp = await client.get(
+        "/api/dashboard/activity",
+        headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["created"] == 1
+    assert data["rescheduled"] == 1
+    assert data["cancelled"] == 1
+    assert data["net_added"] == 0  # 1 created − 1 cancelled
+    assert data["reschedule_rate"] == 1.0
+    assert data["cancellation_rate"] == 1.0
+    # Today's bucket should carry all three.
+    today_bucket = data["days"][-1]
+    assert today_bucket["created"] == 1
+    assert today_bucket["rescheduled"] == 1
+    assert today_bucket["cancelled"] == 1
