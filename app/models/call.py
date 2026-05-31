@@ -41,3 +41,10 @@ class Call(UUIDPKMixin, TimestampMixin, Base):
     patient_sentiment: Mapped[str | None] = mapped_column(Text)
     escalation_needed: Mapped[bool | None] = mapped_column(Boolean)
     hipaa_compliant: Mapped[bool | None] = mapped_column(Boolean)
+    # Programmatic emergency lock (persisted so it survives backend restarts and
+    # spans every webhook/tool call within one phone call). When True, the Retell
+    # tool router physically refuses check_availability / book_appointment — the
+    # agent CANNOT schedule during an active emergency, regardless of the prompt.
+    emergency_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )

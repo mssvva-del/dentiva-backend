@@ -321,6 +321,289 @@ async def test_custom_tool_shape_books_appointment(client, db_session):
 
 
 # ---------------------------------------------------------------------------
+# PROGRAMMATIC EMERGENCY LOCK
+#
+# The lock lives in the tool router (app/webhooks/retell.py), NOT in the prompt:
+# the LLM can be talked out of "emergency mode", so scheduling is refused at the
+# backend regardless of what the LLM decides. State is persisted in
+# calls.emergency_active so it survives restarts and spans every tool call in
+# one phone call. Double trigger: (a) create_callback_request(urgent=true), OR
+# (b) deterministic keyword scan of ANY tool's args.
+# ---------------------------------------------------------------------------
+
+
+async def test_emergency_blocks_booking_after_urgent_callback(client, db_session):
+    """After an urgent callback, book_appointment is physically refused.
+
+    Trigger (a): the LLM set urgent=true. The reason here has NO keyword, so
+    this isolates the urgent-flag path.
+    """
+    await seed_practice(
+        db_session, name="Emerg One", clerk_org_id="org_e1", clerk_user_id="user_e1"
+    )
+    call_id = "retell-emerg-001"
+
+    r1 = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "create_callback_request",
+            "args": {
+                "patient_phone": "+15551234567",
+                "reason": "caller is very distressed and needs help now",
+                "urgent": True,
+            },
+        },
+    )
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "callback_logged"
+
+    r2 = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "book_appointment",
+            "args": {
+                "patient_first_name": "Bob",
+                "patient_last_name": "Lee",
+                "patient_phone": "+15551234567",
+                "procedure": "cleaning",
+                "preferred_date": "2026-06-05",
+                "preferred_time_window": "morning",
+            },
+        },
+    )
+    assert r2.status_code == 200
+    body = r2.json()
+    assert body["blocked"] is True
+    assert body["reason"] == "emergency_active"
+    assert "urgent situation" in body["message"]
+
+    # No booking row was created.
+    await db_session.commit()
+    bookings = (await db_session.execute(select(Booking))).scalars().all()
+    assert len(bookings) == 0
+
+    # The flag is persisted on the call row.
+    call = (
+        await db_session.execute(select(Call).where(Call.retell_call_id == call_id))
+    ).scalar_one()
+    assert call.emergency_active is True
+
+
+async def test_emergency_flag_persists_across_multiple_webhook_calls(client, db_session):
+    """The flag survives many tool calls within ONE phone call (DB-persisted)."""
+    await seed_practice(
+        db_session, name="Emerg Two", clerk_org_id="org_e2", clerk_user_id="user_e2"
+    )
+    call_id = "retell-emerg-002"
+
+    # Engage emergency.
+    await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "create_callback_request",
+            "args": {
+                "patient_phone": "+15551234567",
+                "reason": "severe pain and swelling",
+                "urgent": True,
+            },
+        },
+    )
+
+    # Several intervening tool calls — the scheduling tools stay refused every time.
+    for _ in range(3):
+        r = await client.post(
+            "/webhooks/retell",
+            json={
+                "event": "function_call",
+                "call_id": call_id,
+                "function_name": "check_availability",
+                "args": {"procedure": "cleaning", "preferred_date": "2026-06-05"},
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["blocked"] is True
+
+    # A non-scheduling tool (lookup_patient) still works in between.
+    rl = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "lookup_patient",
+            "args": {"patient_phone": "+15551234567"},
+        },
+    )
+    assert rl.status_code == 200
+    assert "blocked" not in rl.json()
+
+    # And booking is STILL blocked after all those webhooks.
+    rb = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "book_appointment",
+            "args": {
+                "patient_first_name": "Ana",
+                "patient_last_name": "Diaz",
+                "patient_phone": "+15551234567",
+                "procedure": "cleaning",
+                "preferred_date": "2026-06-06",
+                "preferred_time_window": "afternoon",
+            },
+        },
+    )
+    assert rb.json()["blocked"] is True
+
+    call = (
+        await db_session.execute(select(Call).where(Call.retell_call_id == call_id))
+    ).scalar_one()
+    assert call.emergency_active is True
+
+
+async def test_emergency_caught_by_keyword_without_urgent_flag(client, db_session):
+    """Backend catches the emergency from keywords even if the LLM forgot urgent.
+
+    Trigger (b): urgent=False, but the reason text says "uncontrolled bleeding".
+    The deterministic regex must engage the lock anyway.
+    """
+    await seed_practice(
+        db_session, name="Emerg Three", clerk_org_id="org_e3", clerk_user_id="user_e3"
+    )
+    call_id = "retell-emerg-003"
+
+    r1 = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "create_callback_request",
+            "args": {
+                "patient_phone": "+15551234567",
+                "reason": "uncontrolled bleeding from the gum",
+                "urgent": False,
+            },
+        },
+    )
+    assert r1.status_code == 200
+
+    # Even though urgent was False, booking must now be refused.
+    r2 = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "book_appointment",
+            "args": {
+                "patient_first_name": "Sam",
+                "patient_last_name": "Roe",
+                "patient_phone": "+15551234567",
+                "procedure": "cleaning",
+                "preferred_date": "2026-06-07",
+                "preferred_time_window": "morning",
+            },
+        },
+    )
+    assert r2.status_code == 200
+    assert r2.json()["blocked"] is True
+
+    call = (
+        await db_session.execute(select(Call).where(Call.retell_call_id == call_id))
+    ).scalar_one()
+    assert call.emergency_active is True
+
+
+async def test_after_emergency_only_callback_and_transfer_allowed(client, db_session):
+    """During an active emergency: scheduling refused; callback + transfer work."""
+    await seed_practice(
+        db_session, name="Emerg Four", clerk_org_id="org_e4", clerk_user_id="user_e4"
+    )
+    call_id = "retell-emerg-004"
+
+    # Engage emergency (keyword + urgent).
+    await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "create_callback_request",
+            "args": {
+                "patient_phone": "+15551234567",
+                "reason": "knocked out tooth, lots of bleeding",
+                "urgent": True,
+            },
+        },
+    )
+
+    # check_availability → blocked.
+    rc = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "check_availability",
+            "args": {"procedure": "cleaning", "preferred_date": "2026-06-05"},
+        },
+    )
+    assert rc.json()["blocked"] is True
+
+    # book_appointment → blocked.
+    rb = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "book_appointment",
+            "args": {
+                "patient_first_name": "Joy",
+                "patient_last_name": "Kim",
+                "patient_phone": "+15551234567",
+                "procedure": "cleaning",
+                "preferred_date": "2026-06-05",
+                "preferred_time_window": "morning",
+            },
+        },
+    )
+    assert rb.json()["blocked"] is True
+
+    # create_callback_request → still allowed.
+    rcb = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "create_callback_request",
+            "args": {"patient_phone": "+15551234567", "reason": "follow up", "urgent": True},
+        },
+    )
+    assert rcb.json()["status"] == "callback_logged"
+
+    # transfer_to_human → still allowed.
+    rt = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "transfer_to_human",
+            "args": {"reason": "emergency: knocked out tooth"},
+        },
+    )
+    assert rt.status_code == 200
+    assert rt.json()["status"] == "transfer_initiated"
+
+    # No booking ever created during the emergency.
+    await db_session.commit()
+    bookings = (await db_session.execute(select(Booking))).scalars().all()
+    assert len(bookings) == 0
+
+
+# ---------------------------------------------------------------------------
 # GET /api/calls/:call_id
 # ---------------------------------------------------------------------------
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -52,6 +53,79 @@ def _verify_signature(raw_body: bytes, signature: str | None) -> bool:
         return False
     expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+# ---------------------------------------------------------------------------
+# Emergency lock — PROGRAMMATIC, not prompt-based.
+#
+# The LLM prompt can be talked out of "emergency mode" under conversational
+# pressure (this happened in a real test call). So the lock lives HERE, in the
+# tool router, and the on/off state is PERSISTED in calls.emergency_active so it
+# survives backend restarts and spans every webhook/tool call within one phone
+# call.
+#
+# DOUBLE TRIGGER (either one flips the flag — we never rely on the LLM alone):
+#   (a) the LLM called create_callback_request(urgent=true), OR
+#   (b) backend itself scans the args of ANY tool call for emergency keywords
+#       (deterministic regex — independent of whether the LLM flagged urgent).
+#
+# Once emergency_active is True, check_availability and book_appointment are
+# physically refused and a human-readable phrase is returned for the agent to
+# speak. Only create_callback_request and transfer_to_human stay allowed.
+# ---------------------------------------------------------------------------
+
+# Deterministic keyword scan. Substring patterns (not \b word boundaries) so
+# inflections match: bleed/bleeding/bleeds, swell/swelling, breath/breathing/
+# breathe, knocked out / knocked-out / knockedout, uncontrolled/uncontrollable.
+_EMERGENCY_PATTERNS = (
+    r"bleed",
+    r"swell",
+    r"swollen",
+    r"severe\s+pain",
+    r"uncontroll",
+    r"breath",
+    r"knocked[\s-]?out",
+    r"emergency",
+    r"urgent",
+)
+_EMERGENCY_RE = re.compile("|".join(_EMERGENCY_PATTERNS), re.IGNORECASE)
+
+# Tools that schedule and must be refused while an emergency is active.
+_SCHEDULING_TOOLS = frozenset({"check_availability", "book_appointment"})
+
+_EMERGENCY_BLOCK_MESSAGE = (
+    "I can't schedule a regular appointment while we're handling your urgent "
+    "situation. Our team is being notified right now and will call you "
+    "immediately."
+)
+
+
+def _is_truthy(value) -> bool:
+    """Tolerant truthiness — Retell may send a bool, a string, or a number."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1", "y")
+    if isinstance(value, (int, float)):
+        return value != 0
+    return bool(value)
+
+
+def _args_to_text(args: dict) -> str:
+    """Flatten arg values into one string for keyword scanning."""
+    parts: list[str] = []
+    for value in args.values():
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, (list, tuple)):
+            parts.extend(str(item) for item in value)
+        elif value is not None and not isinstance(value, (dict, bool)):
+            parts.append(str(value))
+    return " ".join(parts)
+
+
+def _contains_emergency_keywords(args: dict) -> bool:
+    return bool(_EMERGENCY_RE.search(_args_to_text(args)))
 
 
 # ---------------------------------------------------------------------------
@@ -432,12 +506,110 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Emergency-lock state: get-or-create the call row, update + read the flag.
+# ---------------------------------------------------------------------------
+
+
+async def _get_or_create_call(session, retell_call_id: str, agent_id: str | None) -> Call | None:
+    """Return the calls row for this call, creating a minimal one if needed.
+
+    Web/test calls don't fire call_started, so there may be no row yet — but we
+    still need somewhere to PERSIST emergency_active. Returns None only when
+    there's no call id or no practice to anchor the row to.
+    """
+    if not retell_call_id:
+        return None
+    result = await session.execute(
+        select(Call).where(Call.retell_call_id == retell_call_id)
+    )
+    call = result.scalar_one_or_none()
+    if call is not None:
+        return call
+
+    practice = await _resolve_practice(agent_id)
+    if practice is None:
+        return None
+    call = Call(
+        id=uuid.uuid4(),
+        practice_id=practice.id,
+        retell_call_id=retell_call_id,
+        direction="inbound",
+        from_number="unknown",
+        to_number="unknown",
+        started_at=datetime.now(tz=UTC),
+        status="in_progress",
+    )
+    session.add(call)
+    await session.flush()
+    return call
+
+
+async def _update_and_read_emergency_flag(
+    fn: str, retell_call_id: str, args: dict, agent_id: str | None
+) -> bool:
+    """Apply the double trigger, persist the flag, and return its current value.
+
+    Trigger (a): create_callback_request(urgent=true).
+    Trigger (b): emergency keywords found in the args of ANY tool call.
+    Once True the flag is sticky for the rest of the call (never cleared here).
+    """
+    triggered = _contains_emergency_keywords(args)
+    if fn == "create_callback_request" and _is_truthy(args.get("urgent")):
+        triggered = True
+
+    async with _app_db.async_session_factory() as session:
+        call = await _get_or_create_call(session, retell_call_id, agent_id)
+        if call is None:
+            # No row and no practice to persist against (dev/test edge). Fall
+            # back to the in-args trigger for this single call so we still fail
+            # safe rather than silently allowing scheduling.
+            return triggered
+        if triggered and not call.emergency_active:
+            call.emergency_active = True
+            logger.warning(
+                "emergency lock ENGAGED: call=%s trigger_fn=%s", retell_call_id, fn
+            )
+        await session.commit()
+        return bool(call.emergency_active)
+
+
+async def _handle_transfer_to_human(retell_call_id: str, args: dict) -> dict:
+    """Allowed during an emergency — hands the call to a live team member."""
+    logger.info(
+        "transfer_to_human: call=%s reason=%s",
+        retell_call_id,
+        args.get("reason"),
+    )
+    return {
+        "status": "transfer_initiated",
+        "message": "Of course — let me connect you with a team member, one moment.",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Function dispatch (shared by webhook "function_call" events AND Retell custom
 # tool POSTs, which use a different payload shape — see retell_webhook below).
 # ---------------------------------------------------------------------------
 
 
-async def _dispatch_function(fn: str, retell_call_id: str, args: dict) -> dict:
+async def _dispatch_function(
+    fn: str, retell_call_id: str, args: dict, agent_id: str | None = None
+) -> dict:
+    # PROGRAMMATIC EMERGENCY LOCK — runs BEFORE any tool. Persists/reads the flag
+    # for this call, then physically refuses scheduling tools while active.
+    emergency_active = await _update_and_read_emergency_flag(
+        fn, retell_call_id, args, agent_id
+    )
+    if emergency_active and fn in _SCHEDULING_TOOLS:
+        logger.warning(
+            "emergency lock: REFUSING %s for call=%s", fn, retell_call_id
+        )
+        return {
+            "blocked": True,
+            "reason": "emergency_active",
+            "message": _EMERGENCY_BLOCK_MESSAGE,
+        }
+
     if fn == "book_appointment":
         return await _handle_book_appointment(retell_call_id, args)
 
@@ -463,15 +635,19 @@ async def _dispatch_function(fn: str, retell_call_id: str, args: dict) -> dict:
 
     if fn == "create_callback_request":
         logger.info(
-            "create_callback_request: call=%s phone=%s when=%s",
+            "create_callback_request: call=%s phone=%s when=%s urgent=%s",
             retell_call_id,
             (args.get("patient_phone") or "")[-4:],
             args.get("preferred_callback_time"),
+            _is_truthy(args.get("urgent")),
         )
         return {
             "status": "callback_logged",
             "message": "Your callback request has been recorded; our team will reach out.",
         }
+
+    if fn == "transfer_to_human":
+        return await _handle_transfer_to_human(retell_call_id, args)
 
     logger.info("Unhandled function: %s", fn)
     return {"error": f"Unsupported function: {fn}"}
@@ -500,8 +676,9 @@ async def retell_webhook(request: Request) -> dict:
     if event is None and payload.get("name"):
         call_obj = payload.get("call", {}) or {}
         retell_call_id = call_obj.get("call_id") or payload.get("call_id", "")
+        agent_id = call_obj.get("agent_id") or payload.get("agent_id")
         return await _dispatch_function(
-            payload["name"], retell_call_id, payload.get("args", {}) or {}
+            payload["name"], retell_call_id, payload.get("args", {}) or {}, agent_id
         )
 
     if event == "call_started":
@@ -514,10 +691,13 @@ async def retell_webhook(request: Request) -> dict:
         return await _handle_call_analyzed(payload)
 
     if event == "function_call":
+        call_obj = payload.get("call", {}) or {}
+        agent_id = call_obj.get("agent_id") or payload.get("agent_id")
         return await _dispatch_function(
             payload.get("function_name"),
             payload.get("call_id", ""),
             payload.get("args", {}) or {},
+            agent_id,
         )
 
     logger.info("Unhandled Retell event: %s", event)
