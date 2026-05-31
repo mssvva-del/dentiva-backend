@@ -413,12 +413,68 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     )
 
     return {
-        "result": {
+        "booked": True,
+        "appointment": {
+            "date": preferred_date,
+            "time": chosen_slot.time if chosen_slot else "09:00",
+            "provider": chosen_slot.provider if chosen_slot else "Dr. Smith",
+            "procedure": procedure,
+        },
+        "message": (
+            f"Appointment confirmed for {first_name} on {preferred_date} "
+            f"at {chosen_slot.time if chosen_slot else '09:00'} "
+            f"with {chosen_slot.provider if chosen_slot else 'Dr. Smith'}."
+        ),
+        "available_slots": [
+            {"date": s.date, "time": s.time, "provider": s.provider} for s in slots
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Function dispatch (shared by webhook "function_call" events AND Retell custom
+# tool POSTs, which use a different payload shape — see retell_webhook below).
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_function(fn: str, retell_call_id: str, args: dict) -> dict:
+    if fn == "book_appointment":
+        return await _handle_book_appointment(retell_call_id, args)
+
+    if fn == "check_availability":
+        slots = await find_available_slots(
+            procedure=args.get("procedure", "cleaning"),
+            preferred_date=args.get("preferred_date", ""),
+            preferred_time_window=args.get("preferred_time_window"),
+        )
+        return {
             "available_slots": [
                 {"date": s.date, "time": s.time, "provider": s.provider} for s in slots
             ]
         }
-    }
+
+    if fn == "lookup_patient":
+        # Mock-PMS weekend mode: treat every caller as a new patient. A real PMS
+        # adapter would search by phone/name here.
+        return {
+            "found": False,
+            "message": "No existing record found — proceed as a new patient.",
+        }
+
+    if fn == "create_callback_request":
+        logger.info(
+            "create_callback_request: call=%s phone=%s when=%s",
+            retell_call_id,
+            (args.get("patient_phone") or "")[-4:],
+            args.get("preferred_callback_time"),
+        )
+        return {
+            "status": "callback_logged",
+            "message": "Your callback request has been recorded; our team will reach out.",
+        }
+
+    logger.info("Unhandled function: %s", fn)
+    return {"error": f"Unsupported function: {fn}"}
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +494,16 @@ async def retell_webhook(request: Request) -> dict:
     payload = await request.json()
     event = payload.get("event")
 
+    # Retell custom function tools (general_tools type=custom) POST a DIFFERENT
+    # shape than lifecycle webhooks: {"call": {...}, "name": "...", "args": {...}}
+    # with NO "event" field. Detect and route those to the shared dispatcher.
+    if event is None and payload.get("name"):
+        call_obj = payload.get("call", {}) or {}
+        retell_call_id = call_obj.get("call_id") or payload.get("call_id", "")
+        return await _dispatch_function(
+            payload["name"], retell_call_id, payload.get("args", {}) or {}
+        )
+
     if event == "call_started":
         return await _handle_call_started(payload)
 
@@ -448,30 +514,11 @@ async def retell_webhook(request: Request) -> dict:
         return await _handle_call_analyzed(payload)
 
     if event == "function_call":
-        fn = payload.get("function_name")
-        args = payload.get("args", {}) or {}
-        retell_call_id = payload.get("call_id", "")
-
-        if fn == "book_appointment":
-            return await _handle_book_appointment(retell_call_id, args)
-
-        if fn == "check_availability":
-            slots = await find_available_slots(
-                procedure=args.get("procedure", "cleaning"),
-                preferred_date=args.get("preferred_date", ""),
-                preferred_time_window=args.get("preferred_time_window"),
-            )
-            return {
-                "result": {
-                    "available_slots": [
-                        {"date": s.date, "time": s.time, "provider": s.provider}
-                        for s in slots
-                    ]
-                }
-            }
-
-        logger.info("Unhandled function_call: %s", fn)
-        return {"result": {"error": f"Unsupported function: {fn}"}}
+        return await _dispatch_function(
+            payload.get("function_name"),
+            payload.get("call_id", ""),
+            payload.get("args", {}) or {},
+        )
 
     logger.info("Unhandled Retell event: %s", event)
     return {"ok": True}

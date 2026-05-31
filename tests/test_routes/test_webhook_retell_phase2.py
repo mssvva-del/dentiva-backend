@@ -253,7 +253,11 @@ async def test_book_appointment_creates_booking_and_audit(client, db_session):
     )
     assert resp.status_code == 200
     body = resp.json()
-    slots = body["result"]["available_slots"]
+    # New contract: a flat confirmation the voice LLM can speak back, plus the
+    # candidate slots at top level (no "result" wrapper).
+    assert body["booked"] is True
+    assert "appointment" in body and body["appointment"]["procedure"] == "cleaning"
+    slots = body["available_slots"]
     assert len(slots) >= 1
     assert "date" in slots[0] and "time" in slots[0] and "provider" in slots[0]
 
@@ -276,6 +280,44 @@ async def test_book_appointment_creates_booking_and_audit(client, db_session):
     audit = result.scalar_one_or_none()
     assert audit is not None
     assert audit.resource_type == "booking"
+
+
+async def test_custom_tool_shape_books_appointment(client, db_session):
+    """Retell custom tools POST {call, name, args} with NO 'event' field.
+
+    Regression guard: web calls invoke tools in this shape; the handler must
+    route it to the same dispatcher as the legacy function_call event.
+    """
+    practice, _ = await seed_practice(
+        db_session, name="WebCall Dental", clerk_org_id="org_wc1", clerk_user_id="user_wc1"
+    )
+
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "web-call-xyz", "agent_id": "agent_web"},
+            "name": "book_appointment",
+            "args": {
+                "patient_first_name": "Alex",
+                "patient_last_name": "Nguyen",
+                "patient_phone": "+15550001111",
+                "procedure": "cleaning",
+                "preferred_date": "2026-06-10",
+                "preferred_time_window": "afternoon",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["booked"] is True
+
+    await db_session.commit()
+    bookings = (
+        await db_session.execute(
+            select(Booking).where(Booking.practice_id == practice.id)
+        )
+    ).scalars().all()
+    assert len(bookings) == 1
+    assert bookings[0].source == "ai_call"
 
 
 # ---------------------------------------------------------------------------
