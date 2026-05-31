@@ -20,7 +20,12 @@ RUN pip install --upgrade pip && pip install .
 COPY app ./app
 COPY migrations ./migrations
 COPY alembic.ini ./
+COPY start.sh ./
+RUN chmod +x start.sh
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Single source of truth (see start.sh): migrate, then bind $PORT (default 8000).
+# Railway injects $PORT and health-checks that exact port — a hardcoded 8000
+# would make the health-check hang and the deploy fail.
+CMD ["bash", "start.sh"]

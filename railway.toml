@@ -3,7 +3,10 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+# Use the same entrypoint as the Docker image so cloud + local behave identically.
+# start.sh runs migrations then binds ${PORT:-8000}; never hardcode the port.
+startCommand = "bash start.sh"
 healthcheckPath = "/health"
-healthcheckTimeout = 60
+# Generous window: first boot runs migrations before uvicorn answers /health.
+healthcheckTimeout = 300
 restartPolicyType = "on_failure"
