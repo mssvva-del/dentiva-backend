@@ -77,6 +77,21 @@ def build_confirmation_body(
     )
 
 
+def build_cancellation_body(
+    *,
+    practice_name: str,
+    first_name: str | None,
+    date: str,
+    time: str,
+) -> str:
+    """Compose the patient-facing cancellation text (kept short — 1 SMS segment)."""
+    greeting = f"Hi {first_name}, " if first_name and first_name != "Unknown" else "Hi, "
+    return (
+        f"{greeting}your appointment at {practice_name} on {date} at {time} has "
+        f"been cancelled. Call us anytime to rebook — we're happy to help."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Low-level send
 # --------------------------------------------------------------------------- #
@@ -154,5 +169,24 @@ async def send_booking_confirmation(
         date=date,
         time=time,
         provider=provider,
+    )
+    return await send_sms(to, body, client=client)
+
+
+async def send_cancellation_notice(
+    *,
+    to: str | None,
+    practice_name: str,
+    first_name: str | None,
+    date: str,
+    time: str,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Build + send a cancellation notice. Fail-safe wrapper around send_sms."""
+    body = build_cancellation_body(
+        practice_name=practice_name,
+        first_name=first_name,
+        date=date,
+        time=time,
     )
     return await send_sms(to, body, client=client)

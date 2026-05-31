@@ -34,7 +34,7 @@ from app.models.callback_request import CallbackRequest
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.services.booking import find_available_slots
-from app.services.sms import send_booking_confirmation
+from app.services.sms import send_booking_confirmation, send_cancellation_notice
 
 logger = logging.getLogger("dentiva.webhooks.retell")
 
@@ -93,7 +93,10 @@ _EMERGENCY_PATTERNS = (
 _EMERGENCY_RE = re.compile("|".join(_EMERGENCY_PATTERNS), re.IGNORECASE)
 
 # Tools that schedule and must be refused while an emergency is active.
-_SCHEDULING_TOOLS = frozenset({"check_availability", "book_appointment"})
+# reschedule is scheduling too; cancel stays allowed (it only frees up time).
+_SCHEDULING_TOOLS = frozenset(
+    {"check_availability", "book_appointment", "reschedule_appointment"}
+)
 
 _EMERGENCY_BLOCK_MESSAGE = (
     "I can't schedule a regular appointment while we're handling your urgent "
@@ -186,6 +189,54 @@ async def _upsert_patient(
     session.add(patient)
     await session.flush()
     return patient
+
+
+async def _find_patient_by_phone(
+    session, practice_id: uuid.UUID, phone: str
+) -> Patient | None:
+    """Read-only lookup of a patient by (encrypted) phone within a practice."""
+    if not phone:
+        return None
+    result = await session.execute(
+        select(Patient).where(Patient.practice_id == practice_id)
+    )
+    for p in result.scalars().all():
+        try:
+            if p.phone == phone:
+                return p
+        except Exception:  # noqa: BLE001 — decrypt failures on stray rows are non-fatal
+            pass
+    return None
+
+
+async def _find_upcoming_booking(
+    session, practice_id: uuid.UUID, patient_id: uuid.UUID
+) -> Booking | None:
+    """Return the soonest upcoming confirmed booking for a patient, if any."""
+    now = datetime.now(tz=UTC)
+    result = await session.execute(
+        select(Booking)
+        .where(
+            Booking.practice_id == practice_id,
+            Booking.patient_id == patient_id,
+            Booking.status == "confirmed",
+            Booking.appointment_at >= now,
+        )
+        .order_by(Booking.appointment_at.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _resolve_practice_id_for_call(session, retell_call_id: str) -> uuid.UUID | None:
+    """Resolve the practice for a call row, falling back to the first practice."""
+    call = (
+        await session.execute(select(Call).where(Call.retell_call_id == retell_call_id))
+    ).scalar_one_or_none()
+    if call is not None:
+        return call.practice_id
+    resolved = await _resolve_practice(None)
+    return resolved.id if resolved else None
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +582,217 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# reschedule_appointment function_call handler
+# ---------------------------------------------------------------------------
+
+
+async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dict:
+    """Move a patient's upcoming appointment to a new date/slot.
+
+    Identifies the booking by the caller's phone (soonest upcoming confirmed
+    one). Re-checks availability for the requested date and shifts the booking,
+    writes an audit log, and texts an updated confirmation.
+    """
+    phone = args.get("patient_phone", "")
+    new_date = args.get("new_date", "")
+    new_window = args.get("new_time_window")
+
+    async with _app_db.async_session_factory() as session:
+        practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
+        if practice_id is None:
+            return {
+                "rescheduled": False,
+                "message": (
+                    "I'm having trouble accessing the schedule — let me "
+                    "have our team call you back."
+                ),
+            }
+        await set_tenant(session, practice_id)
+
+        patient = await _find_patient_by_phone(session, practice_id, phone)
+        if patient is None:
+            return {
+                "rescheduled": False,
+                "message": (
+                    "I couldn't find an appointment under that number. "
+                    "Would you like to book a new one?"
+                ),
+            }
+        booking = await _find_upcoming_booking(session, practice_id, patient.id)
+        if booking is None:
+            return {
+                "rescheduled": False,
+                "message": (
+                    "I don't see an upcoming appointment to move. "
+                    "Would you like to book one?"
+                ),
+            }
+
+        procedure = booking.procedure_type or "cleaning"
+        slots = await find_available_slots(
+            procedure=procedure,
+            preferred_date=new_date,
+            preferred_time_window=new_window,
+        )
+        if not slots:
+            return {
+                "rescheduled": False,
+                "message": (
+                    f"I don't have any openings on {new_date}. "
+                    "Want me to check another day?"
+                ),
+                "available_slots": [],
+            }
+
+        chosen = slots[0]
+        old_at = booking.appointment_at
+        booking.appointment_at = datetime.fromisoformat(
+            f"{new_date}T{chosen.time}:00+00:00"
+        )
+        booking.provider_name = chosen.provider
+
+        practice_name = (
+            await session.execute(
+                select(Practice.name).where(Practice.id == practice_id)
+            )
+        ).scalar_one_or_none() or "our office"
+        first_name = patient.first_name
+
+        session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                practice_id=practice_id,
+                action="booking_rescheduled",
+                resource_type="booking",
+                resource_id=booking.id,
+                audit_metadata={
+                    "retell_call_id": retell_call_id,
+                    "from": old_at.isoformat() if old_at else None,
+                    "to": booking.appointment_at.isoformat(),
+                    "patient_phone_last4": phone[-4:] if len(phone) >= 4 else "****",
+                },
+            )
+        )
+        await session.commit()
+        new_time = chosen.time
+        new_provider = chosen.provider
+
+    logger.info(
+        "reschedule_appointment: call=%s moved to %s %s", retell_call_id, new_date, new_time
+    )
+    sms_result = await send_booking_confirmation(
+        to=phone,
+        practice_name=practice_name,
+        first_name=first_name,
+        date=new_date,
+        time=new_time,
+        provider=new_provider,
+    )
+    logger.info("reschedule_appointment: sms %s", sms_result)
+
+    return {
+        "rescheduled": True,
+        "appointment": {
+            "date": new_date,
+            "time": new_time,
+            "provider": new_provider,
+            "procedure": procedure,
+        },
+        "message": (
+            f"All set — I've moved your appointment to {new_date} at {new_time} "
+            f"with {new_provider}. You'll get a text confirmation."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# cancel_appointment function_call handler
+# ---------------------------------------------------------------------------
+
+
+async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
+    """Cancel a patient's upcoming appointment (soonest upcoming confirmed one)."""
+    phone = args.get("patient_phone", "")
+    reason = args.get("reason")
+
+    async with _app_db.async_session_factory() as session:
+        practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
+        if practice_id is None:
+            return {
+                "cancelled": False,
+                "message": (
+                    "I'm having trouble accessing the schedule — let me "
+                    "have our team call you back."
+                ),
+            }
+        await set_tenant(session, practice_id)
+
+        patient = await _find_patient_by_phone(session, practice_id, phone)
+        if patient is None:
+            return {
+                "cancelled": False,
+                "message": "I couldn't find an appointment under that number.",
+            }
+        booking = await _find_upcoming_booking(session, practice_id, patient.id)
+        if booking is None:
+            return {
+                "cancelled": False,
+                "message": "I don't see an upcoming appointment to cancel.",
+            }
+
+        cancelled_date = booking.appointment_at.date().isoformat()
+        cancelled_time = booking.appointment_at.strftime("%H:%M")
+        booking.status = "cancelled"
+
+        practice_name = (
+            await session.execute(
+                select(Practice.name).where(Practice.id == practice_id)
+            )
+        ).scalar_one_or_none() or "our office"
+        first_name = patient.first_name
+
+        session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                practice_id=practice_id,
+                action="booking_cancelled",
+                resource_type="booking",
+                resource_id=booking.id,
+                audit_metadata={
+                    "retell_call_id": retell_call_id,
+                    "appointment_at": booking.appointment_at.isoformat(),
+                    "reason": reason,
+                    "patient_phone_last4": phone[-4:] if len(phone) >= 4 else "****",
+                },
+            )
+        )
+        await session.commit()
+
+    logger.info(
+        "cancel_appointment: call=%s cancelled %s %s",
+        retell_call_id,
+        cancelled_date,
+        cancelled_time,
+    )
+    sms_result = await send_cancellation_notice(
+        to=phone,
+        practice_name=practice_name,
+        first_name=first_name,
+        date=cancelled_date,
+        time=cancelled_time,
+    )
+    logger.info("cancel_appointment: sms %s", sms_result)
+
+    return {
+        "cancelled": True,
+        "message": (
+            f"Done — I've cancelled your appointment on {cancelled_date} at "
+            f"{cancelled_time}. Call us anytime to rebook."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Emergency-lock state: get-or-create the call row, update + read the flag.
 # ---------------------------------------------------------------------------
 
@@ -716,6 +978,12 @@ async def _dispatch_function(
             "found": False,
             "message": "No existing record found — proceed as a new patient.",
         }
+
+    if fn == "reschedule_appointment":
+        return await _handle_reschedule_appointment(retell_call_id, args)
+
+    if fn == "cancel_appointment":
+        return await _handle_cancel_appointment(retell_call_id, args)
 
     if fn == "create_callback_request":
         return await _handle_create_callback_request(retell_call_id, args, agent_id)
