@@ -63,6 +63,23 @@ class Settings(BaseSettings):
 
     # Retell
     retell_webhook_secret: str = ""
+    retell_api_key: str = ""
+    retell_agent_id: str = ""
+
+    # Background call-sync: periodically pull recent Retell calls into the DB so
+    # the dashboard stays current even when web/test calls fire no webhook.
+    # Disabled by default; enable on the server with CALL_SYNC_ENABLED=true.
+    call_sync_enabled: bool = False
+    call_sync_interval_seconds: int = 300
+    call_sync_limit: int = 20
+
+    # Twilio SMS — booking confirmation texts. Disabled by default; enable on
+    # the server with SMS_ENABLED=true once the three Twilio values are set.
+    # We call the Twilio REST API directly via httpx (no extra SDK dependency).
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""
+    sms_enabled: bool = False
 
     # PMS
     pms_adapter: str = "mock"

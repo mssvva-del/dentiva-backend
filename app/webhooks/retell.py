@@ -34,6 +34,7 @@ from app.models.callback_request import CallbackRequest
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.services.booking import find_available_slots
+from app.services.sms import send_booking_confirmation
 
 logger = logging.getLogger("dentiva.webhooks.retell")
 
@@ -438,6 +439,16 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         # Set tenant context so RLS allows patient inserts.
         await set_tenant(session, practice_id)
 
+        # Practice name for the confirmation SMS (sent after commit).
+        if resolved_practice is not None:
+            practice_name = resolved_practice.name
+        else:
+            practice_name = (
+                await session.execute(
+                    select(Practice.name).where(Practice.id == practice_id)
+                )
+            ).scalar_one_or_none() or "our office"
+
         # Upsert patient.
         patient = await _upsert_patient(session, practice_id, first_name, last_name, phone)
 
@@ -486,6 +497,19 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         retell_call_id,
         booking.id,
     )
+
+    # Fire the confirmation SMS — fail-safe, never blocks/raises into the booking.
+    booked_time = chosen_slot.time if chosen_slot else "09:00"
+    booked_provider = chosen_slot.provider if chosen_slot else "Dr. Smith"
+    sms_result = await send_booking_confirmation(
+        to=phone,
+        practice_name=practice_name,
+        first_name=first_name,
+        date=preferred_date,
+        time=booked_time,
+        provider=booked_provider,
+    )
+    logger.info("book_appointment: sms %s", sms_result)
 
     return {
         "booked": True,
