@@ -205,16 +205,22 @@ async def get_dashboard_briefing(
     )
 
     # ── Peak hours (top 3 busiest hours today) ───────────────────────────────
+    # Report hours in the practice's local timezone, not UTC — otherwise a 5pm
+    # call shows up as "22:00" and the briefing reads as if patients call at
+    # night. `started_at AT TIME ZONE <tz>` converts the timestamptz to local.
+    local_hour = func.extract(
+        "hour", func.timezone(practice.timezone, Call.started_at)
+    )
     peak_rows = (
         await db.execute(
             select(
-                func.extract("hour", Call.started_at).label("hour"),
+                local_hour.label("hour"),
                 func.count().label("count"),
             )
             .where(Call.practice_id == practice.id)
             .where(Call.started_at >= day_start)
             .where(Call.started_at <= day_end)
-            .group_by(func.extract("hour", Call.started_at))
+            .group_by(local_hour)
             .order_by(func.count().desc())
             .limit(3)
         )
@@ -358,16 +364,21 @@ async def get_calls_by_hour(
     window_start = datetime.combine(today - timedelta(days=29), time.min, tzinfo=UTC)
     window_end = datetime.combine(today, time.max, tzinfo=UTC)
 
+    # Bucket by hour-of-day in the practice's local timezone so the heatmap
+    # reflects real business hours, not a UTC-shifted version.
+    local_hour = func.extract(
+        "hour", func.timezone(practice.timezone, Call.started_at)
+    )
     rows = (
         await db.execute(
             select(
-                func.extract("hour", Call.started_at).label("hour"),
+                local_hour.label("hour"),
                 func.count().label("count"),
             )
             .where(Call.practice_id == practice.id)
             .where(Call.started_at >= window_start)
             .where(Call.started_at <= window_end)
-            .group_by(func.extract("hour", Call.started_at))
+            .group_by(local_hour)
         )
     ).all()
 
