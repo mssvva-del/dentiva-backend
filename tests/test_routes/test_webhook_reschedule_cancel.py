@@ -141,3 +141,42 @@ async def test_cancel_unknown_phone_is_graceful(client, db_session):
     )
     assert resp.status_code == 200
     assert resp.json()["cancelled"] is False
+
+
+async def test_lookup_patient_recognizes_returning(client, db_session):
+    await seed_practice(
+        db_session, name="Returning Dental", clerk_org_id="org_rc5", clerk_user_id="user_rc5"
+    )
+    book_resp = await _book(client)
+    assert book_resp.status_code == 200 and book_resp.json()["booked"] is True
+
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "rc-call-1", "agent_id": "agent_rc"},
+            "name": "lookup_patient",
+            "args": {"patient_phone": _PHONE},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["found"] is True
+    assert body["patient_first_name"] == "Maria"
+    assert body["has_upcoming_appointment"] is True
+    assert body["upcoming"]["date"] == _FUTURE
+
+
+async def test_lookup_patient_unknown_returns_not_found(client, db_session):
+    await seed_practice(
+        db_session, name="Unknown Dental", clerk_org_id="org_rc6", clerk_user_id="user_rc6"
+    )
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "rc-call-9", "agent_id": "agent_rc"},
+            "name": "lookup_patient",
+            "args": {"patient_phone": "+15550007777"},
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["found"] is False

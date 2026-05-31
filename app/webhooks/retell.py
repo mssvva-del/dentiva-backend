@@ -793,6 +793,64 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# lookup_patient function_call handler
+# ---------------------------------------------------------------------------
+
+
+async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
+    """Recognize a returning patient by phone so the agent can greet by name.
+
+    Returns found + first name + whether they have an upcoming appointment. The
+    agent uses this to personalize ("Welcome back, Maria") and to pre-fill a
+    reschedule/cancel without re-asking everything.
+    """
+    phone = args.get("patient_phone", "")
+    not_found = {
+        "found": False,
+        "message": "No existing record found — proceed as a new patient.",
+    }
+
+    async with _app_db.async_session_factory() as session:
+        practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
+        if practice_id is None:
+            return not_found
+        await set_tenant(session, practice_id)
+
+        patient = await _find_patient_by_phone(session, practice_id, phone)
+        if patient is None:
+            return not_found
+
+        first_name = patient.first_name
+        booking = await _find_upcoming_booking(session, practice_id, patient.id)
+        upcoming = None
+        if booking is not None:
+            upcoming = {
+                "date": booking.appointment_at.date().isoformat(),
+                "time": booking.appointment_at.strftime("%H:%M"),
+                "provider": booking.provider_name,
+            }
+
+    if upcoming:
+        message = (
+            f"Returning patient {first_name}; upcoming appointment on "
+            f"{upcoming['date']} at {upcoming['time']}."
+        )
+    else:
+        message = f"Returning patient {first_name}; no upcoming appointment on file."
+
+    logger.info(
+        "lookup_patient: call=%s found=True upcoming=%s", retell_call_id, bool(upcoming)
+    )
+    return {
+        "found": True,
+        "patient_first_name": first_name,
+        "has_upcoming_appointment": bool(upcoming),
+        "upcoming": upcoming,
+        "message": message,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Emergency-lock state: get-or-create the call row, update + read the flag.
 # ---------------------------------------------------------------------------
 
@@ -972,12 +1030,7 @@ async def _dispatch_function(
         }
 
     if fn == "lookup_patient":
-        # Mock-PMS weekend mode: treat every caller as a new patient. A real PMS
-        # adapter would search by phone/name here.
-        return {
-            "found": False,
-            "message": "No existing record found — proceed as a new patient.",
-        }
+        return await _handle_lookup_patient(retell_call_id, args)
 
     if fn == "reschedule_appointment":
         return await _handle_reschedule_appointment(retell_call_id, args)
