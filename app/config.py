@@ -2,7 +2,26 @@
 
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _to_async_url(url: str) -> str:
+    """Normalize any Postgres URL to the asyncpg driver.
+
+    Hosts like Railway/Render inject a plain ``postgres://`` or
+    ``postgresql://`` URL; SQLAlchemy + asyncpg need an explicit driver.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+    return url
+
+
+def _to_sync_url(async_url: str) -> str:
+    """Derive the psycopg2 (sync) URL used by Alembic from the async URL."""
+    return async_url.replace("+asyncpg://", "+psycopg2://")
 
 
 class Settings(BaseSettings):
@@ -13,6 +32,14 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://dentiva:dentiva@localhost:5432/dentiva"
     database_url_sync: str = "postgresql+psycopg2://dentiva:dentiva@localhost:5432/dentiva"
+
+    @model_validator(mode="after")
+    def _normalize_db_urls(self) -> "Settings":
+        # Accept a single plain DATABASE_URL (Railway/Render style) and derive
+        # both the async and the sync driver URLs from it.
+        self.database_url = _to_async_url(self.database_url)
+        self.database_url_sync = _to_sync_url(self.database_url)
+        return self
 
     # Encryption
     encryption_key: str = ""
