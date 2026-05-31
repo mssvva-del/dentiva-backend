@@ -17,6 +17,7 @@ from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.models.waitlist_entry import WaitlistEntry
 from app.services.sms import send_recall_notice
 from app.utils.redact import redact_name
 
@@ -306,4 +307,140 @@ async def send_patient_recall_sms(
         sent=bool(result.get("sent")),
         status=status_label,
         detail=result.get("skipped") or result.get("detail"),
+    )
+
+
+class PatientBookingRow(BaseModel):
+    id: str
+    appointment_at: datetime
+    procedure_type: str | None
+    provider_name: str | None
+    status: str
+    source: str | None
+    created_at: datetime
+
+
+class PatientWaitlistRow(BaseModel):
+    id: str
+    procedure_type: str | None
+    preferred_date: str | None
+    preferred_time_window: str | None
+    status: str
+    created_at: datetime
+
+
+class PatientDetailResponse(BaseModel):
+    patient_id: str
+    name_redacted: str | None
+    phone_masked: str | None
+    status: str
+    last_visit_date: str | None
+    next_visit_date: str | None
+    total_visits: int
+    no_show_count: int
+    sms_opt_out: bool
+    created_at: datetime
+    bookings: list[PatientBookingRow]
+    waitlist: list[PatientWaitlistRow]
+
+
+@router.get("/{patient_id}", response_model=PatientDetailResponse)
+async def get_patient_detail(
+    patient_id: str,
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> PatientDetailResponse:
+    """Full patient card: profile + aggregates + bookings timeline + waitlist.
+
+    PII is redacted/masked before leaving the backend. Bookings are newest-first
+    so the timeline reads top-to-bottom.
+    """
+    patient = (
+        await db.execute(
+            select(Patient).where(
+                Patient.id == patient_id,
+                Patient.practice_id == practice.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if patient is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Patient not found."
+        )
+
+    now = datetime.now(UTC)
+    recall_cutoff = now - timedelta(days=6 * 30)
+
+    bookings = (
+        await db.execute(
+            select(Booking)
+            .where(Booking.practice_id == practice.id, Booking.patient_id == patient.id)
+            .order_by(Booking.appointment_at.desc())
+        )
+    ).scalars().all()
+
+    completed = [b for b in bookings if b.status == "completed"]
+    no_shows = [b for b in bookings if b.status == "no_show"]
+    upcoming = [
+        b
+        for b in bookings
+        if b.status in ("confirmed", "completed") and _aware(b.appointment_at) >= now
+    ]
+    last_visit = max((_aware(b.appointment_at) for b in completed), default=None)
+    next_visit = min((_aware(b.appointment_at) for b in upcoming), default=None)
+
+    if not completed and not upcoming:
+        status = "new"
+    elif upcoming:
+        status = "upcoming"
+    elif last_visit is not None and last_visit < recall_cutoff:
+        status = "recall_due"
+    else:
+        status = "active"
+
+    waitlist = (
+        await db.execute(
+            select(WaitlistEntry)
+            .where(
+                WaitlistEntry.practice_id == practice.id,
+                WaitlistEntry.patient_id == patient.id,
+            )
+            .order_by(WaitlistEntry.created_at.desc())
+        )
+    ).scalars().all()
+
+    return PatientDetailResponse(
+        patient_id=str(patient.id),
+        name_redacted=redact_name(patient.first_name, patient.last_name),
+        phone_masked=_mask_phone(patient.phone),
+        status=status,
+        last_visit_date=last_visit.date().isoformat() if last_visit else None,
+        next_visit_date=next_visit.date().isoformat() if next_visit else None,
+        total_visits=len(completed),
+        no_show_count=len(no_shows),
+        sms_opt_out=patient.sms_opt_out,
+        created_at=patient.created_at,
+        bookings=[
+            PatientBookingRow(
+                id=str(b.id),
+                appointment_at=b.appointment_at,
+                procedure_type=b.procedure_type,
+                provider_name=b.provider_name,
+                status=b.status,
+                source=b.source,
+                created_at=b.created_at,
+            )
+            for b in bookings
+        ],
+        waitlist=[
+            PatientWaitlistRow(
+                id=str(w.id),
+                procedure_type=w.procedure_type,
+                preferred_date=w.preferred_date,
+                preferred_time_window=w.preferred_time_window,
+                status=w.status,
+                created_at=w.created_at,
+            )
+            for w in waitlist
+        ],
     )
