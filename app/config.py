@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     twilio_from_number: str = ""
     sms_enabled: bool = False
 
+    # Appointment reminders — background loop texts patients ~24h and ~2h before
+    # their appointment. Disabled by default; enable with REMINDERS_ENABLED=true.
+    # Sending also requires SMS_ENABLED + Twilio config (shared with confirmations).
+    reminders_enabled: bool = False
+    reminder_interval_seconds: int = 900  # how often the loop checks (15 min)
+
     # PMS
     pms_adapter: str = "mock"
     open_dental_api_url: str = ""

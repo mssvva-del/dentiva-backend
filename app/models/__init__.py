@@ -7,6 +7,7 @@ from app.models.callback_request import CallbackRequest
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.user import User
+from app.models.waitlist_entry import WaitlistEntry
 
 __all__ = [
     "Practice",
@@ -16,4 +17,5 @@ __all__ = [
     "Booking",
     "AuditLog",
     "CallbackRequest",
+    "WaitlistEntry",
 ]

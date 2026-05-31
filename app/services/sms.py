@@ -92,6 +92,59 @@ def build_cancellation_body(
     )
 
 
+def build_reminder_body(
+    *,
+    practice_name: str,
+    first_name: str | None,
+    date: str,
+    time: str,
+    soon: bool,
+) -> str:
+    """Compose an appointment-reminder text. ``soon`` selects the ~2h wording."""
+    greeting = f"Hi {first_name}, " if first_name and first_name != "Unknown" else "Hi, "
+    when = "later today" if soon else "tomorrow"
+    return (
+        f"{greeting}a reminder that your appointment at {practice_name} is {when} "
+        f"on {date} at {time}. Reply to this text or call us if you need to "
+        f"reschedule. See you soon!"
+    )
+
+
+def build_waitlist_opening_body(
+    *,
+    practice_name: str,
+    first_name: str | None,
+    date: str | None = None,
+    time: str | None = None,
+) -> str:
+    """Compose a 'a slot just opened' text for a waitlisted patient.
+
+    A spot freed up (usually from a cancellation). We invite them to call/reply
+    to grab it — we don't auto-book, so the slot stays first-come.
+    """
+    greeting = f"Hi {first_name}, " if first_name and first_name != "Unknown" else "Hi, "
+    when = f" on {date} at {time}" if date and time else ""
+    return (
+        f"{greeting}good news — a spot just opened up at {practice_name}{when}. "
+        f"You're on our waitlist, so reply or call us soon to grab it before "
+        f"someone else does!"
+    )
+
+
+def build_recall_body(
+    *,
+    practice_name: str,
+    first_name: str | None,
+) -> str:
+    """Compose a recall / reactivation text for patients overdue for a visit."""
+    greeting = f"Hi {first_name}, " if first_name and first_name != "Unknown" else "Hi, "
+    return (
+        f"{greeting}it's been a while since your last visit to {practice_name}. "
+        f"You're due for a check-up — reply or call us and we'll find a time that "
+        f"works for you."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Low-level send
 # --------------------------------------------------------------------------- #
@@ -184,6 +237,58 @@ async def send_cancellation_notice(
 ) -> dict:
     """Build + send a cancellation notice. Fail-safe wrapper around send_sms."""
     body = build_cancellation_body(
+        practice_name=practice_name,
+        first_name=first_name,
+        date=date,
+        time=time,
+    )
+    return await send_sms(to, body, client=client)
+
+
+async def send_appointment_reminder(
+    *,
+    to: str | None,
+    practice_name: str,
+    first_name: str | None,
+    date: str,
+    time: str,
+    soon: bool,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Build + send an appointment reminder. Fail-safe wrapper around send_sms."""
+    body = build_reminder_body(
+        practice_name=practice_name,
+        first_name=first_name,
+        date=date,
+        time=time,
+        soon=soon,
+    )
+    return await send_sms(to, body, client=client)
+
+
+async def send_recall_notice(
+    *,
+    to: str | None,
+    practice_name: str,
+    first_name: str | None,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Build + send a recall / reactivation text. Fail-safe wrapper around send_sms."""
+    body = build_recall_body(practice_name=practice_name, first_name=first_name)
+    return await send_sms(to, body, client=client)
+
+
+async def send_waitlist_opening(
+    *,
+    to: str | None,
+    practice_name: str,
+    first_name: str | None,
+    date: str | None = None,
+    time: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Build + send a waitlist 'slot opened' text. Fail-safe wrapper around send_sms."""
+    body = build_waitlist_opening_body(
         practice_name=practice_name,
         first_name=first_name,
         date=date,

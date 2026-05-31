@@ -33,3 +33,7 @@ class Booking(UUIDPKMixin, TimestampMixin, Base):
     provider_name: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="confirmed")
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default="ai_call")
+    # Appointment-reminder idempotency: set when each SMS reminder is sent so the
+    # background scheduler never double-sends. NULL = not yet sent.
+    reminder_24h_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reminder_2h_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

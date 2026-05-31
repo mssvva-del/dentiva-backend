@@ -15,8 +15,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import retell_llm_relay
 from app.config import get_settings
-from app.routes import bookings, callbacks, calls, dashboard, patients, practice
+from app.routes import (
+    bookings,
+    callbacks,
+    calls,
+    dashboard,
+    patients,
+    practice,
+    waitlist,
+)
 from app.services.call_sync import call_sync_loop
+from app.services.reminders import reminder_loop
 from app.webhooks import retell
 
 logging.basicConfig(level=get_settings().log_level.upper())
@@ -27,20 +36,25 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Start/stop background workers alongside the app."""
     settings = get_settings()
-    sync_task: asyncio.Task | None = None
+    tasks: list[asyncio.Task] = []
     if settings.call_sync_enabled and settings.retell_api_key:
-        sync_task = asyncio.create_task(call_sync_loop())
+        tasks.append(asyncio.create_task(call_sync_loop()))
         logger.info("Retell call-sync background task started")
     elif settings.call_sync_enabled:
         logger.warning("CALL_SYNC_ENABLED but RETELL_API_KEY missing — sync disabled")
 
+    if settings.reminders_enabled:
+        tasks.append(asyncio.create_task(reminder_loop()))
+        logger.info("Appointment-reminder background task started")
+
     try:
         yield
     finally:
-        if sync_task is not None:
-            sync_task.cancel()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
-                await sync_task
+                await task
 
 
 app = FastAPI(title="Dentiva Backend", version="0.1.0", lifespan=lifespan)
@@ -108,5 +122,6 @@ app.include_router(bookings.router)
 app.include_router(callbacks.router)
 app.include_router(patients.router)
 app.include_router(dashboard.router)
+app.include_router(waitlist.router)
 app.include_router(retell.router)
 app.include_router(retell_llm_relay.router)

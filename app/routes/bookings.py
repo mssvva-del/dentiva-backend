@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import uuid
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,13 +12,29 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_practice, get_tenant_db
+from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.patient import Patient
 from app.models.practice import Practice
-from app.schemas.booking import BookingListResponse, BookingSummary
+from app.schemas.booking import (
+    BookingListResponse,
+    BookingStatusUpdate,
+    BookingSummary,
+)
 from app.utils.redact import redact_name
 
 router = APIRouter(prefix="/api/bookings", tags=["bookings"])
+
+# Statuses staff can set from the dashboard. "no_show" powers no-show tracking;
+# the rest let staff correct a booking's lifecycle state.
+_ALLOWED_STATUSES = {"confirmed", "completed", "cancelled", "no_show"}
+
+# Audit action written when a status change is meaningful for analytics.
+_STATUS_AUDIT_ACTION = {
+    "no_show": "booking_no_show",
+    "completed": "booking_completed",
+    "cancelled": "booking_cancelled",
+}
 
 
 @router.get("", response_model=BookingListResponse)
@@ -164,6 +181,83 @@ async def get_booking(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Booking not found.",
         )
+
+    patient = (
+        await db.execute(select(Patient).where(Patient.id == b.patient_id))
+    ).scalar_one_or_none()
+    name = redact_name(patient.first_name, patient.last_name) if patient else None
+
+    return BookingSummary(
+        id=str(b.id),
+        patient_name_redacted=name,
+        patient_id=str(b.patient_id),
+        appointment_at=b.appointment_at,
+        duration_minutes=b.duration_minutes,
+        procedure_type=b.procedure_type,
+        provider_name=b.provider_name,
+        status=b.status,
+        source=b.source,
+        source_call_id=str(b.source_call_id) if b.source_call_id else None,
+        created_at=b.created_at,
+    )
+
+
+@router.patch("/{booking_id}/status", response_model=BookingSummary)
+async def update_booking_status(
+    booking_id: str,
+    payload: BookingStatusUpdate,
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> BookingSummary:
+    """Update a booking's lifecycle status from the dashboard.
+
+    Primary use: marking a patient as a no-show after a missed appointment, so
+    the no-show rate (analytics) and per-patient no-show count stay accurate.
+    Meaningful transitions write an audit log so the analytics activity feed
+    picks them up.
+    """
+    if payload.status not in _ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"status must be one of {sorted(_ALLOWED_STATUSES)}",
+        )
+
+    b = (
+        await db.execute(
+            select(Booking).where(
+                Booking.id == booking_id,
+                Booking.practice_id == practice.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if b is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Booking not found.",
+        )
+
+    previous = b.status
+    b.status = payload.status
+
+    # Only audit a real transition into an analytics-relevant state.
+    audit_action = _STATUS_AUDIT_ACTION.get(payload.status)
+    if audit_action and previous != payload.status:
+        db.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                practice_id=practice.id,
+                action=audit_action,
+                resource_type="booking",
+                resource_id=b.id,
+                audit_metadata={
+                    "previous_status": previous,
+                    "appointment_at": b.appointment_at.isoformat(),
+                },
+            )
+        )
+
+    await db.commit()
+    await db.refresh(b)
 
     patient = (
         await db.execute(select(Patient).where(Patient.id == b.patient_id))

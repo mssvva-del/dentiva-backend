@@ -33,8 +33,13 @@ from app.models.call import Call
 from app.models.callback_request import CallbackRequest
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.models.waitlist_entry import WaitlistEntry
 from app.services.booking import find_available_slots
-from app.services.sms import send_booking_confirmation, send_cancellation_notice
+from app.services.sms import (
+    send_booking_confirmation,
+    send_cancellation_notice,
+    send_waitlist_opening,
+)
 
 logger = logging.getLogger("dentiva.webhooks.retell")
 
@@ -766,6 +771,17 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
                 },
             )
         )
+
+        # Backfill: a slot just freed up — notify the oldest waitlisted patient.
+        # Fail-safe: a waitlist hiccup must never block the cancellation itself.
+        notify_target: tuple[str | None, str | None] | None = None
+        try:
+            notify_target = await _backfill_from_waitlist(
+                session, practice_id, retell_call_id=retell_call_id
+            )
+        except Exception:  # noqa: BLE001 — backfill is best-effort
+            logger.exception("cancel_appointment: waitlist backfill failed")
+
         await session.commit()
 
     logger.info(
@@ -783,6 +799,18 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
     )
     logger.info("cancel_appointment: sms %s", sms_result)
 
+    # Notify the waitlisted patient that a slot opened (after commit, fail-safe).
+    if notify_target is not None:
+        wl_first_name, wl_phone = notify_target
+        wl_sms = await send_waitlist_opening(
+            to=wl_phone,
+            practice_name=practice_name,
+            first_name=wl_first_name,
+            date=cancelled_date,
+            time=cancelled_time,
+        )
+        logger.info("cancel_appointment: waitlist backfill sms %s", wl_sms)
+
     return {
         "cancelled": True,
         "message": (
@@ -790,6 +818,142 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
             f"{cancelled_time}. Call us anytime to rebook."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# join_waitlist function_call handler
+# ---------------------------------------------------------------------------
+
+
+async def _handle_join_waitlist(retell_call_id: str, args: dict) -> dict:
+    """Add a caller to the waitlist when no suitable slot is available.
+
+    Captures demand so a later cancellation can be backfilled. Upserts the
+    patient (so we can reach them) and records their preference as free text.
+    """
+    first_name = args.get("patient_first_name", "Unknown")
+    last_name = args.get("patient_last_name", "")
+    phone = args.get("patient_phone", "")
+    procedure = args.get("procedure")
+    preferred_date = args.get("preferred_date")
+    preferred_time_window = args.get("preferred_time_window")
+    notes = args.get("notes")
+
+    async with _app_db.async_session_factory() as session:
+        result = await session.execute(
+            select(Call).where(Call.retell_call_id == retell_call_id)
+        )
+        call = result.scalar_one_or_none()
+
+        if call is not None:
+            practice_id = call.practice_id
+            call_internal_id = call.id
+        else:
+            resolved = await _resolve_practice(None)
+            if resolved is None:
+                return {
+                    "added": False,
+                    "message": (
+                        "I'm having trouble accessing our system right now — "
+                        "let me take a message and have someone call you back."
+                    ),
+                }
+            practice_id = resolved.id
+            call_internal_id = None
+
+        await set_tenant(session, practice_id)
+        patient = await _upsert_patient(session, practice_id, first_name, last_name, phone)
+
+        entry = WaitlistEntry(
+            id=uuid.uuid4(),
+            practice_id=practice_id,
+            patient_id=patient.id,
+            call_id=call_internal_id,
+            procedure_type=procedure,
+            preferred_date=preferred_date,
+            preferred_time_window=preferred_time_window,
+            notes=notes,
+            status="waiting",
+        )
+        session.add(entry)
+        session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                practice_id=practice_id,
+                action="waitlist_joined",
+                resource_type="waitlist_entry",
+                resource_id=entry.id,
+                audit_metadata={
+                    "retell_call_id": retell_call_id,
+                    "procedure": procedure,
+                    "preferred_date": preferred_date,
+                    "patient_phone_last4": phone[-4:] if len(phone) >= 4 else "****",
+                },
+            )
+        )
+        await session.commit()
+
+    logger.info("join_waitlist: call=%s patient added to waitlist", retell_call_id)
+    return {
+        "added": True,
+        "message": (
+            f"You're on our waitlist, {first_name}. If an earlier spot opens "
+            f"up we'll text you right away so you can grab it."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cancellation backfill — notify the next waitlisted patient
+# ---------------------------------------------------------------------------
+
+
+async def _backfill_from_waitlist(
+    session,
+    practice_id: uuid.UUID,
+    *,
+    retell_call_id: str,
+) -> tuple[str | None, str | None] | None:
+    """Mark the oldest waiting waitlist entry as notified and return
+    ``(first_name, phone)`` for the SMS the caller should send after commit.
+
+    Returns None when the waitlist is empty. Tenant must already be set.
+    """
+    entry = (
+        await session.execute(
+            select(WaitlistEntry)
+            .where(
+                WaitlistEntry.practice_id == practice_id,
+                WaitlistEntry.status == "waiting",
+            )
+            .order_by(WaitlistEntry.created_at.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if entry is None:
+        return None
+
+    patient = (
+        await session.execute(
+            select(Patient).where(Patient.id == entry.patient_id)
+        )
+    ).scalar_one_or_none()
+
+    entry.status = "notified"
+    entry.notified_at = datetime.now(tz=UTC)
+    session.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            practice_id=practice_id,
+            action="waitlist_notified",
+            resource_type="waitlist_entry",
+            resource_id=entry.id,
+            audit_metadata={"retell_call_id": retell_call_id},
+        )
+    )
+    if patient is None:
+        return (None, None)
+    return (patient.first_name, patient.phone)
 
 
 # ---------------------------------------------------------------------------
@@ -1031,6 +1195,9 @@ async def _dispatch_function(
 
     if fn == "lookup_patient":
         return await _handle_lookup_patient(retell_call_id, args)
+
+    if fn == "join_waitlist":
+        return await _handle_join_waitlist(retell_call_id, args)
 
     if fn == "reschedule_appointment":
         return await _handle_reschedule_appointment(retell_call_id, args)

@@ -1,19 +1,26 @@
 """Patient routes."""
 from __future__ import annotations
 
+import logging
+import uuid
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import status as http_status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_practice, get_tenant_db
+from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.services.sms import send_recall_notice
 from app.utils.redact import redact_name
+
+logger = logging.getLogger("dentiva.routes.patients")
 
 router = APIRouter(prefix="/api/patients", tags=["patients"])
 
@@ -39,6 +46,7 @@ class PatientSummary(BaseModel):
     last_visit_date: str | None      # ISO date or null
     next_visit_date: str | None      # ISO date or null
     total_visits: int
+    no_show_count: int = 0           # missed appointments (repeat-offender flag)
     status: str                      # new | upcoming | recall_due | active
 
 
@@ -81,6 +89,7 @@ async def list_patients(
     for p in patients:
         bks = by_patient.get(p.id, [])
         completed = [b for b in bks if b.status == "completed"]
+        no_shows = [b for b in bks if b.status == "no_show"]
         upcoming = [
             b
             for b in bks
@@ -106,6 +115,7 @@ async def list_patients(
                 last_visit_date=last_visit.date().isoformat() if last_visit else None,
                 next_visit_date=next_visit.date().isoformat() if next_visit else None,
                 total_visits=len(completed),
+                no_show_count=len(no_shows),
                 status=status,
             )
         )
@@ -229,4 +239,70 @@ async def get_recall_patients(
         patients=patients_out,
         total=total,
         recall_threshold_months=threshold_months,
+    )
+
+
+class RecallSmsResponse(BaseModel):
+    sent: bool
+    status: str  # sent | skipped | error
+    detail: str | None = None
+
+
+@router.post("/{patient_id}/recall-sms", response_model=RecallSmsResponse)
+async def send_patient_recall_sms(
+    patient_id: str,
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> RecallSmsResponse:
+    """Text a lapsed patient a reactivation / recall message.
+
+    Staff trigger this from the Reactivation list. Phone (encrypted at rest) is
+    decrypted server-side and never returned. Sending is fail-safe: if SMS is
+    disabled or the send fails, we still return 200 with the outcome and log the
+    staff action so the reactivation effort is auditable.
+    """
+    patient = (
+        await db.execute(
+            select(Patient).where(
+                Patient.id == patient_id,
+                Patient.practice_id == practice.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if patient is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Patient not found.",
+        )
+
+    result = await send_recall_notice(
+        to=patient.phone,
+        practice_name=practice.name,
+        first_name=patient.first_name,
+    )
+
+    if result.get("sent"):
+        status_label = "sent"
+    elif "skipped" in result:
+        status_label = "skipped"
+    else:
+        status_label = "error"
+
+    db.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            practice_id=practice.id,
+            action="recall_sms_sent",
+            resource_type="patient",
+            resource_id=patient.id,
+            audit_metadata={"outcome": status_label},
+        )
+    )
+    await db.commit()
+
+    logger.info("recall-sms: patient=%s outcome=%s", patient_id, status_label)
+    return RecallSmsResponse(
+        sent=bool(result.get("sent")),
+        status=status_label,
+        detail=result.get("skipped") or result.get("detail"),
     )

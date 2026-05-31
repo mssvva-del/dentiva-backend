@@ -25,6 +25,10 @@ class BookingListResponse(BaseModel):
     has_more: bool
 
 
+class BookingStatusUpdate(BaseModel):
+    status: str  # confirmed | completed | cancelled | no_show
+
+
 class DashboardToday(BaseModel):
     calls_today: int
     calls_answered_by_ai: int
@@ -111,18 +115,21 @@ class ActivityDay(BaseModel):
     created: int
     rescheduled: int
     cancelled: int
+    no_show: int = 0
 
 
 class ActivityResponse(BaseModel):
     """Appointment lifecycle activity over a window — created / rescheduled /
-    cancelled — sourced from audit logs so reschedules & cancellations
-    (etap 1 voice tools) become visible alongside new bookings."""
+    cancelled / no-show — sourced from audit logs so reschedules, cancellations
+    (etap 1 voice tools) and no-shows become visible alongside new bookings."""
 
     period_days: int
     created: int
     rescheduled: int
     cancelled: int
+    no_show: int = 0
     net_added: int
     reschedule_rate: float
     cancellation_rate: float
+    no_show_rate: float = 0.0
     days: list[ActivityDay]

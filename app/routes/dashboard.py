@@ -584,7 +584,10 @@ _ACTIVITY_ACTIONS = {
     "booking_created": "created",
     "booking_rescheduled": "rescheduled",
     "booking_cancelled": "cancelled",
+    "booking_no_show": "no_show",
 }
+
+_ACTIVITY_ZERO = {"created": 0, "rescheduled": 0, "cancelled": 0, "no_show": 0}
 
 
 @router.get("/activity", response_model=ActivityResponse)
@@ -622,39 +625,41 @@ async def get_appointment_activity(
         )
     ).all()
 
-    # day -> {created, rescheduled, cancelled}
+    # day -> {created, rescheduled, cancelled, no_show}
     day_map: dict[date, dict[str, int]] = {}
     for row in rows:
         d: date = row.day.date()
-        bucket = day_map.setdefault(
-            d, {"created": 0, "rescheduled": 0, "cancelled": 0}
-        )
+        bucket = day_map.setdefault(d, dict(_ACTIVITY_ZERO))
         key = _ACTIVITY_ACTIONS[row.action]
         bucket[key] += int(row.count)
 
     days: list[ActivityDay] = []
     for d in date_range:
-        b = day_map.get(d, {"created": 0, "rescheduled": 0, "cancelled": 0})
+        b = day_map.get(d, _ACTIVITY_ZERO)
         days.append(
             ActivityDay(
                 date=d,
                 created=b["created"],
                 rescheduled=b["rescheduled"],
                 cancelled=b["cancelled"],
+                no_show=b["no_show"],
             )
         )
 
     created = sum(d.created for d in days)
     rescheduled = sum(d.rescheduled for d in days)
     cancelled = sum(d.cancelled for d in days)
+    no_show = sum(d.no_show for d in days)
 
     return ActivityResponse(
         period_days=period_days,
         created=created,
         rescheduled=rescheduled,
         cancelled=cancelled,
+        no_show=no_show,
         net_added=created - cancelled,
         reschedule_rate=round(rescheduled / created, 3) if created else 0.0,
         cancellation_rate=round(cancelled / created, 3) if created else 0.0,
+        no_show_rate=round(no_show / created, 3) if created else 0.0,
         days=days,
     )
