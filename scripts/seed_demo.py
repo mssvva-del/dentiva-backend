@@ -365,6 +365,79 @@ def seed(session: Session) -> None:
     print("Done! Dashboard should now show realistic data.")
 
 
+# Lapsed patients for the recall / reactivation demo. Each has one OLD
+# completed visit (8–22 months ago) and no upcoming appointment, so they
+# surface in GET /api/patients/recall and the Reactivation page.
+LAPSED_PATIENTS = [
+    ("Eleanor", "Whitfield", 22),
+    ("Marcus", "Delgado", 17),
+    ("Priya", "Nair", 13),
+    ("Tom", "Becker", 9),
+    ("Sofia", "Russo", 7),
+]
+
+
+def seed_recall_patients(session: Session) -> None:
+    """Idempotent: ensure a handful of overdue patients exist for the recall
+    demo. Runs independently of the main seed guard so an already-seeded DB
+    still gets reactivation data on a re-run."""
+    practice = session.execute(select(Practice).limit(1)).scalars().first()
+    if practice is None:
+        return  # nothing to attach to; main seed handles practice creation
+
+    created = 0
+    for i, (first, last, months_ago) in enumerate(LAPSED_PATIENTS):
+        pms_id = f"DEMO-LAPSED-{i:02d}"
+        existing = session.execute(
+            select(Patient).where(
+                Patient.practice_id == practice.id,
+                Patient.pms_external_id == pms_id,
+            )
+        ).scalars().first()
+        if existing:
+            continue
+
+        domain = random.choice(EMAIL_DOMAINS)
+        patient = Patient(
+            practice_id=practice.id,
+            pms_external_id=pms_id,
+            first_name=first,
+            last_name=last,
+            phone=rand_phone(),
+            email=f"{first.lower()}.{last.lower()}@{domain}",
+        )
+        session.add(patient)
+        session.flush()
+
+        appointment_at = datetime.now(EST) - timedelta(days=months_ago * 30)
+        appointment_at = appointment_at.replace(
+            hour=random.randint(9, 16),
+            minute=random.choice([0, 15, 30, 45]),
+            second=0,
+            microsecond=0,
+        )
+        session.add(
+            Booking(
+                practice_id=practice.id,
+                patient_id=patient.id,
+                source_call_id=None,
+                appointment_at=appointment_at,
+                duration_minutes=random.choice([30, 45, 60]),
+                procedure_type=weighted_choice(PROCEDURE_NAMES, PROCEDURE_WEIGHTS),
+                provider_name=random.choice(PROVIDERS),
+                status="completed",
+                source="phone",
+            )
+        )
+        created += 1
+
+    session.commit()
+    if created:
+        print(f"  Created {created} lapsed patients for recall demo")
+    else:
+        print("  Recall demo patients already present, skipping")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -382,6 +455,7 @@ def main() -> None:
     try:
         with Session(engine) as session:
             seed(session)
+            seed_recall_patients(session)
     except Exception as exc:
         print(f"ERROR: {exc}")
         raise
