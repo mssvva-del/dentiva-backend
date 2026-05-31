@@ -17,7 +17,7 @@ import os
 import random
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -113,6 +113,91 @@ def rand_future_datetime(days_max: int = 60) -> datetime:
 
 def weighted_choice(choices, weights):
     return random.choices(choices, weights=weights, k=1)[0]
+
+
+def seed_today_activity(
+    session: Session,
+    practice_id,
+    practice_phone: str,
+    patients: list[Patient],
+) -> None:
+    """Force a few calls and appointments onto *today* (UTC) so the Overview
+    hero ("calls today", "appointments today") is never empty, no matter which
+    day the demo database is seeded.
+
+    ``/dashboard/today`` computes its day window in UTC, so timestamps here are
+    anchored in UTC. Times are clamped so they never spill into the previous
+    day when the database happens to be seeded early in the UTC day.
+    """
+    now_utc = datetime.now(UTC)
+    day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # (minutes_before_now, status, outcome)
+    call_specs = [
+        (270, "completed", "booked"),
+        (210, "completed", "info_only"),
+        (150, "completed", "booked"),
+        (90, "missed", None),
+        (30, "completed", "info_only"),
+    ]
+    booked_today: list[Call] = []
+    for minutes_before, status, outcome in call_specs:
+        started_at = now_utc - timedelta(minutes=minutes_before)
+        if started_at < day_start:
+            started_at = day_start + timedelta(minutes=minutes_before)
+        patient = random.choice(patients) if random.random() < 0.7 else None
+        duration = (
+            random.randint(120, 360) if status == "completed" else random.randint(5, 20)
+        )
+        call = Call(
+            practice_id=practice_id,
+            retell_call_id=f"DEMO-{uuid.uuid4()}",
+            direction="inbound",
+            from_number=patient.phone if (patient and patient.phone) else rand_phone(),
+            to_number=practice_phone,
+            patient_id=patient.id if patient else None,
+            started_at=started_at,
+            ended_at=started_at + timedelta(seconds=duration),
+            duration_seconds=duration,
+            status=status,
+            outcome=outcome,
+            call_intent=random.choice(CALL_INTENTS) if status == "completed" else None,
+            patient_sentiment=(
+                weighted_choice(SENTIMENTS, SENTIMENT_WEIGHTS)
+                if status == "completed"
+                else None
+            ),
+            escalation_needed=False,
+            hipaa_compliant=True,
+        )
+        session.add(call)
+        if outcome == "booked":
+            booked_today.append(call)
+    session.flush()
+
+    # 3 confirmed appointments later today. Link the first ones to today's
+    # booked calls so the AI booking attribution reads true.
+    for idx, hour_offset in enumerate((2, 4, 6)):
+        appt_at = now_utc + timedelta(hours=hour_offset)
+        if appt_at >= day_start + timedelta(days=1):
+            appt_at = day_start + timedelta(hours=12 + idx)
+        patient = random.choice(patients)
+        source_call = booked_today[idx] if idx < len(booked_today) else None
+        session.add(
+            Booking(
+                practice_id=practice_id,
+                patient_id=patient.id,
+                source_call_id=source_call.id if source_call else None,
+                appointment_at=appt_at,
+                duration_minutes=random.choice([30, 45, 60]),
+                procedure_type=weighted_choice(PROCEDURE_NAMES, PROCEDURE_WEIGHTS),
+                provider_name=random.choice(PROVIDERS),
+                status="confirmed",
+                source="ai_call" if source_call else "phone",
+            )
+        )
+    session.flush()
+    print("  Added guaranteed 'today' activity: 5 calls + 3 confirmed appointments")
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +398,9 @@ def seed(session: Session) -> None:
             provider_name=provider,
             status=status,
             source="ai_call",
+            # The booking was made during the call — keep created_at realistic so
+            # the "bookings made today" metric isn't inflated by the seed run.
+            created_at=call.started_at,
         )
         session.add(booking)
         bookings_created += 1
@@ -333,9 +421,15 @@ def seed(session: Session) -> None:
                 second=0, microsecond=0,
             )
             status = "completed"
+            # Past appointment → it was booked on (or shortly before) that day.
+            booked_at = appointment_at
         else:
             appointment_at = rand_future_datetime(60)
             status = "confirmed"
+            # Future appointment → it was booked at some realistic point in the
+            # recent past, NOT all at seed-run time (which would inflate the
+            # "bookings made today" metric).
+            booked_at = rand_working_datetime(30)
 
         procedure = weighted_choice(PROCEDURE_NAMES, PROCEDURE_WEIGHTS)
         provider = random.choice(PROVIDERS)
@@ -351,11 +445,15 @@ def seed(session: Session) -> None:
             provider_name=provider,
             status=status,
             source="phone",
+            created_at=booked_at,
         )
         session.add(booking)
         bookings_created += 1
 
     phone_bookings = bookings_created - ai_bookings
+
+    # 4c. Guaranteed "today" activity so the Overview hero is alive on any day.
+    seed_today_activity(session, practice_id, practice_phone, patients)
 
     session.commit()
     print(
