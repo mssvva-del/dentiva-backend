@@ -5,12 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-import pytest
 from sqlalchemy import select
 
 from app.models.call import Call
 from tests.conftest import seed_practice
-
 
 # ---------------------------------------------------------------------------
 # call_analyzed webhook

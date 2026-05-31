@@ -14,7 +14,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-import pytest
 from sqlalchemy import select
 
 from app.models.audit_log import AuditLog
@@ -22,7 +21,6 @@ from app.models.booking import Booking
 from app.models.call import Call
 from app.models.callback_request import CallbackRequest
 from tests.conftest import seed_practice
-
 
 # ---------------------------------------------------------------------------
 # call_started
@@ -749,11 +747,10 @@ async def test_ws_retell_llm_call_details_ack(_prepare_database):
     No DB operations; purely tests the WS routing layer.
     """
     import json
+    import warnings
 
     import anyio
     from starlette.testclient import TestClient  # type: ignore[import]
-
-    import warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
     from app.main import app
@@ -780,9 +777,9 @@ async def test_ws_retell_llm_call_details_ack(_prepare_database):
 async def test_ws_retell_llm_response_required_mocked(_prepare_database, monkeypatch):
     """response_required triggers LLM relay; Groq is mocked to avoid real HTTP."""
     import json
+    import warnings
 
     import anyio
-    import warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
     from app.api import retell_llm_relay
