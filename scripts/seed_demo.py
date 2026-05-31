@@ -13,7 +13,6 @@ Uses the admin (owner) role to bypass RLS.
 
 from __future__ import annotations
 
-import os
 import random
 import sys
 import uuid
@@ -34,7 +33,7 @@ load_dotenv(ROOT / ".env")
 # ---------------------------------------------------------------------------
 # App imports (config is now populated from .env)
 # ---------------------------------------------------------------------------
-from sqlalchemy import create_engine, func, select, text  # noqa: E402
+from sqlalchemy import create_engine, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
@@ -258,7 +257,7 @@ def seed(session: Session) -> None:
     # ------------------------------------------------------------------
     patients: list[Patient] = []
     created_patients = 0
-    for i, (first, last) in enumerate(zip(FIRST_NAMES, LAST_NAMES)):
+    for i, (first, last) in enumerate(zip(FIRST_NAMES, LAST_NAMES, strict=True)):
         pms_id = f"DEMO-{i:02d}"
         existing = session.execute(
             select(Patient).where(
@@ -284,7 +283,8 @@ def seed(session: Session) -> None:
         created_patients += 1
 
     session.flush()  # get IDs for patients just inserted
-    print(f"  Created {created_patients} patients ({len(patients) - created_patients} already existed)")
+    already = len(patients) - created_patients
+    print(f"  Created {created_patients} patients ({already} already existed)")
 
     # ------------------------------------------------------------------
     # 3. Create 80 calls
@@ -298,7 +298,7 @@ def seed(session: Session) -> None:
     )
     counts = {"completed": 0, "missed": 0, "voicemail": 0}
 
-    for i in range(80):
+    for _ in range(80):
         retell_id = f"DEMO-{uuid.uuid4()}"
         status = random.choice(status_choices)
         counts[status] += 1
@@ -356,8 +356,8 @@ def seed(session: Session) -> None:
     session.flush()  # get call IDs
 
     print(
-        f"  Created 80 calls "
-        f"({counts['completed']} completed, {counts['missed']} missed, {counts['voicemail']} voicemail)"
+        f"  Created 80 calls ({counts['completed']} completed, "
+        f"{counts['missed']} missed, {counts['voicemail']} voicemail)"
     )
 
     # ------------------------------------------------------------------
