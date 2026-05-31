@@ -20,6 +20,7 @@ from sqlalchemy import select
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.call import Call
+from app.models.callback_request import CallbackRequest
 from tests.conftest import seed_practice
 
 
@@ -601,6 +602,54 @@ async def test_after_emergency_only_callback_and_transfer_allowed(client, db_ses
     await db_session.commit()
     bookings = (await db_session.execute(select(Booking))).scalars().all()
     assert len(bookings) == 0
+
+
+async def test_create_callback_request_persists_row(client, db_session):
+    """create_callback_request must STORE a row (was previously only logged).
+
+    Urgent + linked to the call, with PII encrypted at rest.
+    """
+    practice, _ = await seed_practice(
+        db_session, name="Callback Dental", clerk_org_id="org_cb1", clerk_user_id="user_cb1"
+    )
+    call_id = "retell-cb-001"
+
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "create_callback_request",
+            "args": {
+                "patient_first_name": "Carlos",
+                "patient_phone": "+15557654321",
+                "reason": "uncontrolled bleeding",
+                "urgent": True,
+            },
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "callback_logged"
+
+    await db_session.commit()
+    rows = (
+        await db_session.execute(
+            select(CallbackRequest).where(CallbackRequest.practice_id == practice.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    cb = rows[0]
+    assert cb.urgent is True
+    assert cb.status == "pending"
+    assert cb.reason == "uncontrolled bleeding"
+    # PII decrypts back through the EncryptedString type.
+    assert cb.patient_first_name == "Carlos"
+    assert cb.phone == "+15557654321"
+    # Linked to the call row (created on the fly since web calls skip call_started).
+    linked = (
+        await db_session.execute(select(Call).where(Call.retell_call_id == call_id))
+    ).scalar_one()
+    assert cb.call_id == linked.id
 
 
 # ---------------------------------------------------------------------------

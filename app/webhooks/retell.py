@@ -30,6 +30,7 @@ from app.db import set_tenant
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.call import Call
+from app.models.callback_request import CallbackRequest
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.services.booking import find_available_slots
@@ -573,6 +574,65 @@ async def _update_and_read_emergency_flag(
         return bool(call.emergency_active)
 
 
+async def _handle_create_callback_request(
+    retell_call_id: str, args: dict, agent_id: str | None
+) -> dict:
+    """Persist a callback request so it surfaces on the practice dashboard.
+
+    This is the only scheduling-adjacent action allowed during an emergency, so
+    it must reliably land in the DB (previously it was only logged). Patient
+    identifiers are stored encrypted via the EncryptedString column type.
+    """
+    first_name = args.get("patient_first_name") or args.get("first_name")
+    phone = args.get("patient_phone") or args.get("phone")
+    reason = args.get("reason")
+    urgent = _is_truthy(args.get("urgent"))
+
+    async with _app_db.async_session_factory() as session:
+        call = await _get_or_create_call(session, retell_call_id, agent_id)
+        practice_id = call.practice_id if call else None
+        call_internal_id = call.id if call else None
+        if practice_id is None:
+            resolved = await _resolve_practice(agent_id)
+            practice_id = resolved.id if resolved else None
+
+        if practice_id is None:
+            logger.warning(
+                "create_callback_request: no practice found; not persisted. call=%s",
+                retell_call_id,
+            )
+            return {
+                "status": "callback_logged",
+                "message": "Your callback request has been recorded; our team will reach out.",
+            }
+
+        # RLS tenant context so the insert is allowed.
+        await set_tenant(session, practice_id)
+        callback = CallbackRequest(
+            id=uuid.uuid4(),
+            practice_id=practice_id,
+            call_id=call_internal_id,
+            patient_first_name=first_name,
+            phone=phone,
+            reason=reason,
+            urgent=urgent,
+            status="pending",
+        )
+        session.add(callback)
+        await session.commit()
+
+    logger.info(
+        "create_callback_request persisted: call=%s phone=%s urgent=%s",
+        retell_call_id,
+        (phone or "")[-4:],
+        urgent,
+    )
+    return {
+        "status": "callback_logged",
+        "message": "Your callback request has been recorded; our team will reach out.",
+    }
+
+
 async def _handle_transfer_to_human(retell_call_id: str, args: dict) -> dict:
     """Allowed during an emergency — hands the call to a live team member."""
     logger.info(
@@ -634,17 +694,7 @@ async def _dispatch_function(
         }
 
     if fn == "create_callback_request":
-        logger.info(
-            "create_callback_request: call=%s phone=%s when=%s urgent=%s",
-            retell_call_id,
-            (args.get("patient_phone") or "")[-4:],
-            args.get("preferred_callback_time"),
-            _is_truthy(args.get("urgent")),
-        )
-        return {
-            "status": "callback_logged",
-            "message": "Your callback request has been recorded; our team will reach out.",
-        }
+        return await _handle_create_callback_request(retell_call_id, args, agent_id)
 
     if fn == "transfer_to_human":
         return await _handle_transfer_to_human(retell_call_id, args)
