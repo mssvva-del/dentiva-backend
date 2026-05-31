@@ -7,13 +7,25 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _to_async_url(url: str) -> str:
-    """Normalize any Postgres URL to the asyncpg driver.
+    """Normalize ANY Postgres URL to the asyncpg driver.
 
-    Hosts like Railway/Render inject a plain ``postgres://`` or
-    ``postgresql://`` URL; SQLAlchemy + asyncpg need an explicit driver.
+    The app's SQLAlchemy engine is async and *requires* the asyncpg driver.
+    Hosts inject the URL in several shapes, all coerced to
+    ``postgresql+asyncpg://``:
+      * ``postgres://`` (Heroku/legacy),
+      * ``postgresql://`` (Railway/Render plain),
+      * ``postgresql+psycopg2://`` / ``postgresql+psycopg://`` (sync driver) —
+        if a sync scheme leaks into DATABASE_URL the async engine crashes on
+        startup, killing both ``alembic upgrade`` and uvicorn before /health
+        is ever reachable.
     """
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://") :]
+    # Strip any explicit *sync* driver so the async engine always gets asyncpg.
+    if url.startswith("postgresql+psycopg2://"):
+        url = "postgresql://" + url[len("postgresql+psycopg2://") :]
+    elif url.startswith("postgresql+psycopg://"):
+        url = "postgresql://" + url[len("postgresql+psycopg://") :]
     if url.startswith("postgresql://"):
         url = "postgresql+asyncpg://" + url[len("postgresql://") :]
     return url
