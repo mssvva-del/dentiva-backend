@@ -60,12 +60,49 @@ echo "==> Target DB: ${MASKED}"
 
 export DATABASE_URL="$RAW_URL"
 
+# CRITICAL: PII (patient names) is Fernet-encrypted with ENCRYPTION_KEY. The
+# PRODUCTION backend on Railway decrypts with ITS key, so the seed must encrypt
+# with the SAME key — otherwise endpoints that read names (/api/calls,
+# /api/patients) crash with InvalidToken while count-only endpoints still work.
+# Pull the prod app vars from the Railway paste block so the data matches prod.
+PASTE_ENV="${ROOT}/../_docs/_railway_paste.env"
+if [ -f "$PASTE_ENV" ]; then
+  # NOTE: use grep|cut, NOT `IFS='=' read` — the Fernet key ends with '=', and
+  # the read-loop strips that trailing delimiter (43-char key -> "Incorrect
+  # padding"). cut -f2- keeps everything after the first '=' verbatim.
+  _paste_get() { grep "^$1=" "$PASTE_ENV" | head -n1 | cut -d= -f2-; }
+  ENCRYPTION_KEY="$(_paste_get ENCRYPTION_KEY)"; export ENCRYPTION_KEY
+  CLERK_SECRET_KEY="$(_paste_get CLERK_SECRET_KEY)"; export CLERK_SECRET_KEY
+  GROQ_API_KEY="$(_paste_get GROQ_API_KEY)"; export GROQ_API_KEY
+  PMS_ADAPTER="$(_paste_get PMS_ADAPTER)"; export PMS_ADAPTER
+  if [ -n "${ENCRYPTION_KEY:-}" ]; then
+    echo "==> Using PROD ENCRYPTION_KEY from _railway_paste.env (len ${#ENCRYPTION_KEY}; PII will match prod)."
+  fi
+else
+  echo "WARN: $PASTE_ENV not found — seeding with LOCAL ENCRYPTION_KEY." >&2
+  echo "      If patient names fail to load in prod, that's the key mismatch." >&2
+fi
+
 echo
-echo "==> [1/2] Seeding demo data (scripts/seed_demo.py)..."
+echo "==> [1/3] Clearing previous demo rows (bookings, calls, patients)..."
+"$PY" - <<'PY'
+import os, psycopg2
+url = os.environ["DATABASE_URL"].replace("+asyncpg", "").replace("+psycopg2", "")
+conn = psycopg2.connect(url); conn.autocommit = True
+cur = conn.cursor()
+# FK-safe order; practices/users kept so the provisioned login survives.
+for t in ("bookings", "calls", "patients"):
+    cur.execute(f"DELETE FROM {t}")
+    print(f"  cleared {t}")
+cur.close(); conn.close()
+PY
+
+echo
+echo "==> [2/3] Seeding demo data (scripts/seed_demo.py)..."
 ( cd "$ROOT" && "$PY" scripts/seed_demo.py )
 
 echo
-echo "==> [2/2] Provisioning dashboard user: ${EMAIL}"
+echo "==> [3/3] Provisioning dashboard user: ${EMAIL}"
 ( cd "$ROOT" && "$PY" scripts/provision_user.py --email "$EMAIL" --role owner )
 
 echo
