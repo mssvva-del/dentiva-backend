@@ -118,6 +118,24 @@ class ActivityDay(BaseModel):
     no_show: int = 0
 
 
+class EngagementResponse(BaseModel):
+    """SMS-engagement + waitlist funnel over a window, from audit logs.
+
+    Surfaces the V2/V3 features' real-world impact: how many patients joined the
+    waitlist, how many got notified of an opening, and how patients responded to
+    texts (confirmed / cancelled by reply, recall outreach, opt-outs).
+    """
+
+    period_days: int
+    waitlist_joined: int
+    waitlist_notified: int
+    waitlist_conversion_rate: float  # notified / joined
+    sms_confirmed: int
+    sms_cancelled: int
+    recall_sms_sent: int
+    sms_opt_outs: int
+
+
 class ActivityResponse(BaseModel):
     """Appointment lifecycle activity over a window — created / rescheduled /
     cancelled / no-show — sourced from audit logs so reschedules, cancellations

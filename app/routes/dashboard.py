@@ -21,6 +21,7 @@ from app.schemas.booking import (
     ConversionResponse,
     DailyStats,
     DashboardToday,
+    EngagementResponse,
     HourlyCount,
     ProcedureCount,
     ROIResponse,
@@ -662,4 +663,55 @@ async def get_appointment_activity(
         cancellation_rate=round(cancelled / created, 3) if created else 0.0,
         no_show_rate=round(no_show / created, 3) if created else 0.0,
         days=days,
+    )
+
+
+@router.get("/engagement", response_model=EngagementResponse)
+async def get_engagement(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> EngagementResponse:
+    """SMS-engagement + waitlist funnel over the last 30 days, from audit logs.
+
+    Shows the real-world impact of the two-way SMS, waitlist and reminder
+    features: joins, openings offered, confirmations/cancellations by text,
+    recall outreach and opt-outs.
+    """
+    period_days = 30
+    window_start = datetime.now(UTC) - timedelta(days=period_days)
+
+    rows = (
+        await db.execute(
+            select(AuditLog.action, func.count().label("count"))
+            .where(AuditLog.practice_id == practice.id)
+            .where(AuditLog.created_at >= window_start)
+            .group_by(AuditLog.action)
+        )
+    ).all()
+    counts = {action: int(count) for action, count in rows}
+
+    # Cancellations via SMS are tagged in audit_metadata.via == "sms".
+    sms_cancelled = (
+        await db.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.practice_id == practice.id)
+            .where(AuditLog.action == "booking_cancelled")
+            .where(AuditLog.created_at >= window_start)
+            .where(AuditLog.audit_metadata["via"].astext == "sms")
+        )
+    ).scalar_one()
+
+    joined = counts.get("waitlist_joined", 0)
+    notified = counts.get("waitlist_notified", 0)
+
+    return EngagementResponse(
+        period_days=period_days,
+        waitlist_joined=joined,
+        waitlist_notified=notified,
+        waitlist_conversion_rate=round(notified / joined, 3) if joined else 0.0,
+        sms_confirmed=counts.get("booking_confirmed_sms", 0),
+        sms_cancelled=int(sms_cancelled),
+        recall_sms_sent=counts.get("recall_sms_sent", 0),
+        sms_opt_outs=counts.get("sms_opt_out", 0),
     )
