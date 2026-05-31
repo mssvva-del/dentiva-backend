@@ -111,6 +111,14 @@ async def test_send_sms_skips_when_not_configured(monkeypatch):
     assert result == {"skipped": "not_configured"}
 
 
+async def test_send_sms_skips_when_opted_out(monkeypatch):
+    # Opt-out short-circuits BEFORE any config/number checks — even fully
+    # configured + SMS-enabled, a STOPed patient gets nothing.
+    _patch_settings(monkeypatch)
+    result = await sms.send_sms("+15551234567", "hi", opted_out=True)
+    assert result == {"skipped": "opted_out"}
+
+
 async def test_send_sms_skips_bad_number(monkeypatch):
     _patch_settings(monkeypatch)
     result = await sms.send_sms("123", "hi")

@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_from_number: str = ""
     sms_enabled: bool = False
+    # Inbound SMS (two-way). Validate Twilio's X-Twilio-Signature only when true —
+    # behind a proxy the public URL must be reconstructed exactly, so it's off by
+    # default for local/dev and enabled in production once the URL is verified.
+    twilio_validate_signature: bool = False
 
     # Appointment reminders — background loop texts patients ~24h and ~2h before
     # their appointment. Disabled by default; enable with REMINDERS_ENABLED=true.

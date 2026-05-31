@@ -75,6 +75,7 @@ async def _send_window(
             date=booking.appointment_at.date().isoformat(),
             time=booking.appointment_at.strftime("%H:%M"),
             soon=soon,
+            opted_out=patient.sms_opt_out,
             client=client,
         )
         # Stamp regardless of SMS result — a disabled/failed SMS must not cause an

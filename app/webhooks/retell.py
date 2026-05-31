@@ -507,6 +507,7 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
 
         # Upsert patient.
         patient = await _upsert_patient(session, practice_id, first_name, last_name, phone)
+        patient_opted_out = patient.sms_opt_out
 
         # Create booking row.
         slot_time = chosen_slot.time if chosen_slot else "09:00"
@@ -564,6 +565,7 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         date=preferred_date,
         time=booked_time,
         provider=booked_provider,
+        opted_out=patient_opted_out,
     )
     logger.info("book_appointment: sms %s", sms_result)
 
@@ -662,6 +664,7 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
             )
         ).scalar_one_or_none() or "our office"
         first_name = patient.first_name
+        patient_opted_out = patient.sms_opt_out
 
         session.add(
             AuditLog(
@@ -692,6 +695,7 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
         date=new_date,
         time=new_time,
         provider=new_provider,
+        opted_out=patient_opted_out,
     )
     logger.info("reschedule_appointment: sms %s", sms_result)
 
@@ -755,6 +759,7 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
             )
         ).scalar_one_or_none() or "our office"
         first_name = patient.first_name
+        patient_opted_out = patient.sms_opt_out
 
         session.add(
             AuditLog(
@@ -774,7 +779,7 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
 
         # Backfill: a slot just freed up — notify the oldest waitlisted patient.
         # Fail-safe: a waitlist hiccup must never block the cancellation itself.
-        notify_target: tuple[str | None, str | None] | None = None
+        notify_target: tuple[str | None, str | None, bool] | None = None
         try:
             notify_target = await _backfill_from_waitlist(
                 session, practice_id, retell_call_id=retell_call_id
@@ -796,18 +801,20 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
         first_name=first_name,
         date=cancelled_date,
         time=cancelled_time,
+        opted_out=patient_opted_out,
     )
     logger.info("cancel_appointment: sms %s", sms_result)
 
     # Notify the waitlisted patient that a slot opened (after commit, fail-safe).
     if notify_target is not None:
-        wl_first_name, wl_phone = notify_target
+        wl_first_name, wl_phone, wl_opted_out = notify_target
         wl_sms = await send_waitlist_opening(
             to=wl_phone,
             practice_name=practice_name,
             first_name=wl_first_name,
             date=cancelled_date,
             time=cancelled_time,
+            opted_out=wl_opted_out,
         )
         logger.info("cancel_appointment: waitlist backfill sms %s", wl_sms)
 
@@ -913,9 +920,10 @@ async def _backfill_from_waitlist(
     practice_id: uuid.UUID,
     *,
     retell_call_id: str,
-) -> tuple[str | None, str | None] | None:
+) -> tuple[str | None, str | None, bool] | None:
     """Mark the oldest waiting waitlist entry as notified and return
-    ``(first_name, phone)`` for the SMS the caller should send after commit.
+    ``(first_name, phone, opted_out)`` for the SMS the caller should send after
+    commit.
 
     Returns None when the waitlist is empty. Tenant must already be set.
     """
@@ -952,8 +960,8 @@ async def _backfill_from_waitlist(
         )
     )
     if patient is None:
-        return (None, None)
-    return (patient.first_name, patient.phone)
+        return (None, None, False)
+    return (patient.first_name, patient.phone, patient.sms_opt_out)
 
 
 # ---------------------------------------------------------------------------

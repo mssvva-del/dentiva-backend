@@ -279,6 +279,7 @@ async def send_patient_recall_sms(
         to=patient.phone,
         practice_name=practice.name,
         first_name=patient.first_name,
+        opted_out=patient.sms_opt_out,
     )
 
     if result.get("sent"):

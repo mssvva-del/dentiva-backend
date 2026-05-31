@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,3 +30,8 @@ class Patient(UUIDPKMixin, TimestampMixin, Base):
     # DOB stored encrypted as ISO string (date is PHI).
     date_of_birth: Mapped[str | None] = mapped_column(EncryptedString)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # SMS opt-out (TCPA compliance). Set when a patient texts STOP; cleared on
+    # START. All outbound SMS senders skip opted-out patients.
+    sms_opt_out: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )

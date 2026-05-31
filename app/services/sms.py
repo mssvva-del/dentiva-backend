@@ -152,15 +152,21 @@ async def send_sms(
     to: str | None,
     body: str,
     *,
+    opted_out: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     """Send one SMS via Twilio. Never raises — returns a small result dict.
+
+    ``opted_out`` short-circuits the send (TCPA): a patient who texted STOP must
+    not receive any further outbound SMS.
 
     Returns one of:
       {"skipped": "<reason>"}            — disabled / not configured / bad number
       {"sent": True, "sid": "<sid>"}     — Twilio accepted the message
       {"error": "<detail>", ...}         — Twilio rejected or network failed
     """
+    if opted_out:
+        return {"skipped": "opted_out"}
     settings = get_settings()
     if not settings.sms_enabled:
         return {"skipped": "sms_disabled"}
@@ -213,6 +219,7 @@ async def send_booking_confirmation(
     date: str,
     time: str,
     provider: str | None,
+    opted_out: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     """Build + send a booking confirmation. Fail-safe wrapper around send_sms."""
@@ -223,7 +230,7 @@ async def send_booking_confirmation(
         time=time,
         provider=provider,
     )
-    return await send_sms(to, body, client=client)
+    return await send_sms(to, body, opted_out=opted_out, client=client)
 
 
 async def send_cancellation_notice(
@@ -233,6 +240,7 @@ async def send_cancellation_notice(
     first_name: str | None,
     date: str,
     time: str,
+    opted_out: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     """Build + send a cancellation notice. Fail-safe wrapper around send_sms."""
@@ -242,7 +250,7 @@ async def send_cancellation_notice(
         date=date,
         time=time,
     )
-    return await send_sms(to, body, client=client)
+    return await send_sms(to, body, opted_out=opted_out, client=client)
 
 
 async def send_appointment_reminder(
@@ -253,6 +261,7 @@ async def send_appointment_reminder(
     date: str,
     time: str,
     soon: bool,
+    opted_out: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     """Build + send an appointment reminder. Fail-safe wrapper around send_sms."""
@@ -263,7 +272,7 @@ async def send_appointment_reminder(
         time=time,
         soon=soon,
     )
-    return await send_sms(to, body, client=client)
+    return await send_sms(to, body, opted_out=opted_out, client=client)
 
 
 async def send_recall_notice(
@@ -271,11 +280,12 @@ async def send_recall_notice(
     to: str | None,
     practice_name: str,
     first_name: str | None,
+    opted_out: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     """Build + send a recall / reactivation text. Fail-safe wrapper around send_sms."""
     body = build_recall_body(practice_name=practice_name, first_name=first_name)
-    return await send_sms(to, body, client=client)
+    return await send_sms(to, body, opted_out=opted_out, client=client)
 
 
 async def send_waitlist_opening(
@@ -285,6 +295,7 @@ async def send_waitlist_opening(
     first_name: str | None,
     date: str | None = None,
     time: str | None = None,
+    opted_out: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     """Build + send a waitlist 'slot opened' text. Fail-safe wrapper around send_sms."""
@@ -294,4 +305,4 @@ async def send_waitlist_opening(
         date=date,
         time=time,
     )
-    return await send_sms(to, body, client=client)
+    return await send_sms(to, body, opted_out=opted_out, client=client)
