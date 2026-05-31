@@ -122,3 +122,20 @@ async def test_reminders_skip_cancelled(client, db_session):
         )
     ).scalar_one()
     assert refreshed.reminder_24h_sent_at is None
+
+
+async def test_reminders_skip_practice_opted_out(client, db_session):
+    practice, _ = await seed_practice(
+        db_session, name="Opted Out Dental", clerk_org_id="org_rem_off",
+        clerk_user_id="user_rem_off",
+    )
+    # Practice opts out of reminders.
+    practice.reminders_enabled = False
+    now = datetime.now(tz=UTC)
+    await _add_booking(
+        db_session, practice.id, when=now + timedelta(hours=10), ext="rem-off"
+    )
+    await db_session.commit()
+
+    summary = await reminders.send_due_reminders(now=now)
+    assert summary == {"sent_24h": 0, "sent_2h": 0}

@@ -12,6 +12,7 @@ class PracticeMe(BaseModel):
     pms_connected: bool
     languages_enabled: list[str]
     business_hours: dict
+    reminders_enabled: bool = True
 
 
 class PracticeUpdate(BaseModel):
@@ -20,3 +21,4 @@ class PracticeUpdate(BaseModel):
     phone_number: str | None = None
     languages_enabled: list[str] | None = None
     business_hours: dict | None = None
+    reminders_enabled: bool | None = None

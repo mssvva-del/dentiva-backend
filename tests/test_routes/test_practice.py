@@ -114,3 +114,32 @@ async def test_patch_practice_me_empty_body_returns_200_unchanged(client, db_ses
     body = resp.json()
     assert body["name"] == "No Change Practice"
     assert body["timezone"] == "America/New_York"
+
+
+async def test_practice_me_exposes_reminders_enabled_default_true(client, db_session):
+    org_id = _uid("org_rem_def")
+    user_id = _uid("user_rem_def")
+    await seed_practice(
+        db_session, name="Rem Default", clerk_org_id=org_id, clerk_user_id=user_id
+    )
+    resp = await client.get(
+        "/api/practice/me",
+        headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reminders_enabled"] is True
+
+
+async def test_patch_practice_me_toggle_reminders(client, db_session):
+    org_id = _uid("org_rem_tog")
+    user_id = _uid("user_rem_tog")
+    await seed_practice(
+        db_session, name="Rem Toggle", clerk_org_id=org_id, clerk_user_id=user_id
+    )
+    resp = await client.patch(
+        "/api/practice/me",
+        json={"reminders_enabled": False},
+        headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reminders_enabled"] is False

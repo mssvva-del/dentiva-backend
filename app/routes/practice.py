@@ -29,6 +29,7 @@ def _build_practice_me(practice: Practice) -> PracticeMe:
         pms_connected=pms_connected,
         languages_enabled=list(practice.languages_enabled),
         business_hours=practice.business_hours,
+        reminders_enabled=practice.reminders_enabled,
     )
 
 
@@ -79,6 +80,13 @@ async def update_practice_me(
     ):
         db_practice.business_hours = payload.business_hours
         changed_fields.append("business_hours")
+
+    if (
+        payload.reminders_enabled is not None
+        and payload.reminders_enabled != db_practice.reminders_enabled
+    ):
+        db_practice.reminders_enabled = payload.reminders_enabled
+        changed_fields.append("reminders_enabled")
 
     if changed_fields:
         audit = AuditLog(

@@ -96,8 +96,14 @@ async def send_due_reminders(*, now: datetime | None = None, client=None) -> dic
     sent_24h = sent_2h = 0
 
     async with app_db.async_session_factory() as session:
+        # Only practices that have opted in (per-practice toggle; the global
+        # REMINDERS_ENABLED env already gated whether this loop runs at all).
         practice_ids = (
-            await session.execute(select(Practice.id).order_by(Practice.created_at))
+            await session.execute(
+                select(Practice.id)
+                .where(Practice.reminders_enabled.is_(True))
+                .order_by(Practice.created_at)
+            )
         ).scalars().all()
 
         for practice_id in practice_ids:

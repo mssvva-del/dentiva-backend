@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ARRAY, Text
+from sqlalchemy import ARRAY, Boolean, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,3 +24,10 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     )
     business_hours: Mapped[dict] = mapped_column(JSONB, nullable=False)
     retell_agent_id: Mapped[str | None] = mapped_column(Text)
+    # Per-practice toggle for the appointment-reminder scheduler. The global
+    # REMINDERS_ENABLED env is the master switch (starts the loop); this lets an
+    # individual practice opt in/out. Default on so reminders work once enabled
+    # globally without extra per-practice setup.
+    reminders_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true", default=True
+    )
