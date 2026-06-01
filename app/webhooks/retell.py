@@ -1150,14 +1150,36 @@ async def _handle_create_callback_request(
 
 
 async def _handle_transfer_to_human(retell_call_id: str, args: dict) -> dict:
-    """Allowed during an emergency — hands the call to a live team member."""
+    """Allowed during an emergency — hands the call to a live team member.
+
+    Resolves the practice's transfer destination (transfer_phone_number, falling
+    back to its main phone_number) so Retell can bridge the call / the agent can
+    read it out. Returns ``transfer_number`` (None if the practice has none set).
+    """
+    transfer_number = None
+    async with _app_db.async_session_factory() as session:
+        practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
+        if practice_id is not None:
+            row = (
+                await session.execute(
+                    select(
+                        Practice.transfer_phone_number, Practice.phone_number
+                    ).where(Practice.id == practice_id)
+                )
+            ).first()
+            if row is not None:
+                transfer_number = row[0] or row[1]
+
+    dest_last4 = f"…{transfer_number[-4:]}" if transfer_number else "none"
     logger.info(
-        "transfer_to_human: call=%s reason=%s",
+        "transfer_to_human: call=%s reason=%s dest=%s",
         retell_call_id,
         args.get("reason"),
+        dest_last4,
     )
     return {
         "status": "transfer_initiated",
+        "transfer_number": transfer_number,
         "message": "Of course — let me connect you with a team member, one moment.",
     }
 

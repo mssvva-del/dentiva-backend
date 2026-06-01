@@ -8,6 +8,7 @@ class PracticeMe(BaseModel):
     name: str
     timezone: str
     phone_number: str | None
+    transfer_phone_number: str | None = None
     pms_system: str
     pms_connected: bool
     languages_enabled: list[str]
@@ -19,6 +20,7 @@ class PracticeUpdate(BaseModel):
     name: str | None = None
     timezone: str | None = None
     phone_number: str | None = None
+    transfer_phone_number: str | None = None
     languages_enabled: list[str] | None = None
     business_hours: dict | None = None
     reminders_enabled: bool | None = None

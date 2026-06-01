@@ -17,6 +17,9 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
         Text, nullable=False, server_default="America/New_York"
     )
     phone_number: Mapped[str | None] = mapped_column(Text)
+    # Where transfer_to_human routes the live call (front-desk / on-call line).
+    # E.164. Falls back to phone_number when unset.
+    transfer_phone_number: Mapped[str | None] = mapped_column(Text)
     pms_system: Mapped[str] = mapped_column(Text, nullable=False)
     pms_credentials_secret_key: Mapped[str | None] = mapped_column(Text)
     languages_enabled: Mapped[list[str]] = mapped_column(
