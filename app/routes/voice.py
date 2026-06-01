@@ -40,6 +40,7 @@ async def voice_status() -> dict:
         "configured": bool(settings.retell_api_key and settings.retell_agent_id),
         "has_key": bool(settings.retell_api_key),
         "has_agent": bool(settings.retell_agent_id),
+        "demo_open_access": settings.demo_open_access,
     }
 
 
