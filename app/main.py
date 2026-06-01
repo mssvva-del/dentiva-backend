@@ -113,7 +113,26 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.get("/health")
 async def health() -> dict:
+    """Liveness — process is up. No external dependencies touched."""
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready() -> JSONResponse:
+    """Readiness — verifies the DB is reachable (SELECT 1)."""
+    from sqlalchemy import text as _text
+
+    import app.db as app_db
+
+    try:
+        async with app_db.async_session_factory() as session:
+            await session.execute(_text("SELECT 1"))
+        return JSONResponse(status_code=200, content={"status": "ready"})
+    except Exception as exc:  # noqa: BLE001 — report not-ready, don't crash
+        logger.warning("readiness check failed: %s", exc)
+        return JSONResponse(
+            status_code=503, content={"status": "not_ready", "detail": "db_unreachable"}
+        )
 
 
 app.include_router(practice.router)

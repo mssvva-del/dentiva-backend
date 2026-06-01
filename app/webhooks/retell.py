@@ -214,6 +214,25 @@ async def _find_patient_by_phone(
     return None
 
 
+async def _slot_taken(
+    session, practice_id: uuid.UUID, provider_name: str | None, appointment_at: datetime
+) -> bool:
+    """True if a confirmed booking already holds this provider+time (double-book guard)."""
+    existing = (
+        await session.execute(
+            select(Booking.id)
+            .where(
+                Booking.practice_id == practice_id,
+                Booking.provider_name == provider_name,
+                Booking.appointment_at == appointment_at,
+                Booking.status == "confirmed",
+            )
+            .limit(1)
+        )
+    ).first()
+    return existing is not None
+
+
 async def _find_upcoming_booking(
     session, practice_id: uuid.UUID, patient_id: uuid.UUID
 ) -> Booking | None:
@@ -457,9 +476,8 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     preferred_date = args.get("preferred_date", "")
     procedure = args.get("procedure", "cleaning")
 
-    # Use first slot as the "chosen" appointment (voice agent collects patient
-    # confirmation; this is the mock-PMS weekend booking).
-    chosen_slot = slots[0] if slots else None
+    # Chosen slot is selected inside the session (double-book guard needs the DB).
+    chosen_slot = None
 
     async with _app_db.async_session_factory() as session:
         # Resolve call row (may or may not exist depending on call_started timing).
@@ -508,6 +526,23 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         # Upsert patient.
         patient = await _upsert_patient(session, practice_id, first_name, last_name, phone)
         patient_opted_out = patient.sms_opt_out
+
+        # Double-book guard: pick the first offered slot not already taken.
+        for s in slots:
+            cand = datetime.fromisoformat(f"{preferred_date}T{s.time}:00+00:00")
+            if not await _slot_taken(session, practice_id, s.provider, cand):
+                chosen_slot = s
+                break
+        if slots and chosen_slot is None:
+            # Every offered time was just booked by someone else.
+            return {
+                "booked": False,
+                "message": (
+                    "I'm sorry — those times were just taken. "
+                    "Want me to check another day?"
+                ),
+                "available_slots": [],
+            }
 
         # Create booking row.
         slot_time = chosen_slot.time if chosen_slot else "09:00"
@@ -651,11 +686,27 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
                 "available_slots": [],
             }
 
-        chosen = slots[0]
+        # Double-book guard: pick the first offered slot not already taken.
+        chosen = None
+        new_at = None
+        for s in slots:
+            cand = datetime.fromisoformat(f"{new_date}T{s.time}:00+00:00")
+            if not await _slot_taken(session, practice_id, s.provider, cand):
+                chosen = s
+                new_at = cand
+                break
+        if chosen is None:
+            return {
+                "rescheduled": False,
+                "message": (
+                    f"Those {new_date} times were just taken. "
+                    "Want me to check another day?"
+                ),
+                "available_slots": [],
+            }
+
         old_at = booking.appointment_at
-        booking.appointment_at = datetime.fromisoformat(
-            f"{new_date}T{chosen.time}:00+00:00"
-        )
+        booking.appointment_at = new_at
         booking.provider_name = chosen.provider
 
         practice_name = (
