@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://dentiva:dentiva@localhost:5432/dentiva"
     database_url_sync: str = "postgresql+psycopg2://dentiva:dentiva@localhost:5432/dentiva"
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _strip_whitespace(cls, v):
+        """Trim stray whitespace from env values (e.g. a tab pasted before
+        ``true``). Prevents a single bad paste from crashing startup — a leading
+        tab made Pydantic fail to parse a bool, killing the whole app."""
+        return v.strip() if isinstance(v, str) else v
 
     @model_validator(mode="after")
     def _normalize_db_urls(self) -> "Settings":
