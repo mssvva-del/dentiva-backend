@@ -91,7 +91,15 @@ url = os.environ["DATABASE_URL"].replace("+asyncpg", "").replace("+psycopg2", ""
 conn = psycopg2.connect(url); conn.autocommit = True
 cur = conn.cursor()
 # FK-safe order; practices/users kept so the provisioned login survives.
-for t in ("bookings", "calls", "patients"):
+# waitlist_entries + callback_requests FK to calls/patients, so clear first.
+for t in (
+    "waitlist_entries",
+    "callback_requests",
+    "bookings",
+    "calls",
+    "audit_logs",
+    "patients",
+):
     cur.execute(f"DELETE FROM {t}")
     print(f"  cleared {t}")
 cur.close(); conn.close()

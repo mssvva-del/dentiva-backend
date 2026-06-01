@@ -22,6 +22,7 @@ from app.routes import (
     dashboard,
     patients,
     practice,
+    voice,
     waitlist,
 )
 from app.services.call_sync import call_sync_loop
@@ -142,6 +143,7 @@ app.include_router(callbacks.router)
 app.include_router(patients.router)
 app.include_router(dashboard.router)
 app.include_router(waitlist.router)
+app.include_router(voice.router)
 app.include_router(retell.router)
 app.include_router(twilio_sms.router)
 app.include_router(retell_llm_relay.router)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -590,20 +590,28 @@ _ACTIVITY_ACTIONS = {
 
 _ACTIVITY_ZERO = {"created": 0, "rescheduled": 0, "cancelled": 0, "no_show": 0}
 
+# Selectable analytics windows.
+_ALLOWED_PERIODS = {7, 30, 90}
+
+
+def _clamp_period(days: int) -> int:
+    return days if days in _ALLOWED_PERIODS else 30
+
 
 @router.get("/activity", response_model=ActivityResponse)
 async def get_appointment_activity(
+    days: int = Query(default=30),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> ActivityResponse:
-    """Return appointment lifecycle activity for the last 30 days.
+    """Return appointment lifecycle activity for the selected window (7/30/90 days).
 
     Counts new bookings, reschedules and cancellations from the audit log and
     returns both totals and a per-day series for a stacked chart. This surfaces
     the reschedule/cancel voice tools (etap 1), which the bookings table alone
     cannot show.
     """
-    period_days = 30
+    period_days = _clamp_period(days)
     today = datetime.now(UTC).date()
     date_range: list[date] = [
         today - timedelta(days=i) for i in range(period_days - 1, -1, -1)
@@ -668,16 +676,17 @@ async def get_appointment_activity(
 
 @router.get("/engagement", response_model=EngagementResponse)
 async def get_engagement(
+    days: int = Query(default=30),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> EngagementResponse:
-    """SMS-engagement + waitlist funnel over the last 30 days, from audit logs.
+    """SMS-engagement + waitlist funnel over the selected window (7/30/90 days).
 
     Shows the real-world impact of the two-way SMS, waitlist and reminder
     features: joins, openings offered, confirmations/cancellations by text,
     recall outreach and opt-outs.
     """
-    period_days = 30
+    period_days = _clamp_period(days)
     window_start = datetime.now(UTC) - timedelta(days=period_days)
 
     rows = (

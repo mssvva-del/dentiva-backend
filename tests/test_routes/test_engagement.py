@@ -77,3 +77,21 @@ async def test_engagement_requires_auth(client, db_session):
     )
     resp = await client.get("/api/dashboard/engagement")
     assert resp.status_code == 401
+
+
+async def test_engagement_period_param(client, db_session):
+    await seed_practice(
+        db_session, name="Engage Period", clerk_org_id="org_eng4", clerk_user_id="user_eng4"
+    )
+    for d in (7, 30, 90):
+        resp = await client.get(
+            f"/api/dashboard/engagement?days={d}",
+            headers=_auth("org_eng4", "user_eng4"),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["period_days"] == d
+
+    resp = await client.get(
+        "/api/dashboard/engagement?days=13", headers=_auth("org_eng4", "user_eng4")
+    )
+    assert resp.json()["period_days"] == 30
