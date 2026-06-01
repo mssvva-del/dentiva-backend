@@ -31,6 +31,18 @@ class WebCallResponse(BaseModel):
     agent_id: str | None = None
 
 
+@router.get("/status")
+async def voice_status() -> dict:
+    """Public diagnostic: is the voice demo configured? Exposes only booleans
+    (no secrets) so config can be verified remotely without auth."""
+    settings = get_settings()
+    return {
+        "configured": bool(settings.retell_api_key and settings.retell_agent_id),
+        "has_key": bool(settings.retell_api_key),
+        "has_agent": bool(settings.retell_agent_id),
+    }
+
+
 @router.post("/web-call", response_model=WebCallResponse)
 async def create_web_call(
     _practice: Practice = Depends(get_current_practice),
