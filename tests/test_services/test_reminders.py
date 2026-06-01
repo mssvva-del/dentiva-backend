@@ -58,7 +58,9 @@ async def test_reminders_pick_correct_windows_and_are_idempotent(client, db_sess
     practice, _ = await seed_practice(
         db_session, name="Reminder Dental", clerk_org_id="org_rem1", clerk_user_id="user_rem1"
     )
-    now = datetime.now(tz=UTC)
+    # Pin tz + a midday instant so quiet-hours never skips this window test.
+    practice.timezone = "UTC"
+    now = datetime(2099, 1, 15, 12, 0, tzinfo=UTC)
 
     b_24h = await _add_booking(
         db_session, practice.id, when=now + timedelta(hours=23), ext="rem-24h"
@@ -139,3 +141,37 @@ async def test_reminders_skip_practice_opted_out(client, db_session):
 
     summary = await reminders.send_due_reminders(now=now)
     assert summary == {"sent_24h": 0, "sent_2h": 0}
+
+
+async def test_reminders_quiet_hours_skip(client, db_session):
+    practice, _ = await seed_practice(
+        db_session, name="Quiet Dental", clerk_org_id="org_quiet",
+        clerk_user_id="user_quiet",
+    )
+    practice.timezone = "UTC"  # make local == UTC for a deterministic hour
+    # 03:00 local — before the 08:00 quiet-start → must hold all reminders.
+    now = datetime(2099, 1, 15, 3, 0, tzinfo=UTC)
+    await _add_booking(
+        db_session, practice.id, when=now + timedelta(hours=10), ext="quiet-1"
+    )
+    await db_session.commit()
+
+    summary = await reminders.send_due_reminders(now=now)
+    assert summary == {"sent_24h": 0, "sent_2h": 0}
+
+
+async def test_reminders_send_during_open_hours(client, db_session):
+    practice, _ = await seed_practice(
+        db_session, name="Open Hours Dental", clerk_org_id="org_open",
+        clerk_user_id="user_open",
+    )
+    practice.timezone = "UTC"
+    # 12:00 local — within 08:00–21:00 → reminders flow normally.
+    now = datetime(2099, 1, 15, 12, 0, tzinfo=UTC)
+    await _add_booking(
+        db_session, practice.id, when=now + timedelta(hours=10), ext="open-1"
+    )
+    await db_session.commit()
+
+    summary = await reminders.send_due_reminders(now=now)
+    assert summary == {"sent_24h": 1, "sent_2h": 0}

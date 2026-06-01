@@ -97,6 +97,27 @@ def _classify(body: str) -> str:
     return "unknown"
 
 
+@router.post("/status")
+async def twilio_status_webhook(request: Request) -> Response:
+    """Twilio message status callback (queued/sent/delivered/failed/undelivered).
+
+    Configure as the StatusCallback URL on outbound messages to get delivery
+    observability. We log the outcome (no PHI — only the last 4 of the
+    destination); failures/undelivered are logged at WARNING so they surface.
+    """
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    params = dict(parse_qsl(raw))
+    sid = params.get("MessageSid", "")
+    status = params.get("MessageStatus", "")
+    to = params.get("To", "")
+    last4 = to[-4:] if len(to) >= 4 else "????"
+    if status in ("failed", "undelivered"):
+        logger.warning("twilio-status: sid=%s status=%s to=…%s", sid, status, last4)
+    else:
+        logger.info("twilio-status: sid=%s status=%s to=…%s", sid, status, last4)
+    return Response(status_code=204)
+
+
 @router.post("/sms")
 async def twilio_sms_webhook(request: Request) -> Response:
     settings = get_settings()

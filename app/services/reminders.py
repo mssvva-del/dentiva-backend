@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 
@@ -85,6 +86,22 @@ async def _send_window(
     return count
 
 
+def _within_quiet_window(
+    now: datetime, tz_name: str | None, start_hour: int, end_hour: int
+) -> bool:
+    """True when the practice-local hour is within [start_hour, end_hour).
+
+    Outside this window we hold reminders (quiet hours). Unknown timezone falls
+    back to UTC so we still send rather than silently never sending.
+    """
+    try:
+        tz = ZoneInfo(tz_name) if tz_name else UTC
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = UTC
+    local_hour = now.astimezone(tz).hour
+    return start_hour <= local_hour < end_hour
+
+
 async def send_due_reminders(*, now: datetime | None = None, client=None) -> dict:
     """Send all due 24h and 2h reminders across every practice.
 
@@ -93,20 +110,27 @@ async def send_due_reminders(*, now: datetime | None = None, client=None) -> dic
     the RLS-enforced app role (tests). Returns a small summary dict.
     """
     now = now or datetime.now(tz=UTC)
+    settings = get_settings()
+    quiet_start = settings.reminder_quiet_start_hour
+    quiet_end = settings.reminder_quiet_end_hour
     sent_24h = sent_2h = 0
 
     async with app_db.async_session_factory() as session:
         # Only practices that have opted in (per-practice toggle; the global
         # REMINDERS_ENABLED env already gated whether this loop runs at all).
-        practice_ids = (
+        practices = (
             await session.execute(
-                select(Practice.id)
+                select(Practice.id, Practice.timezone)
                 .where(Practice.reminders_enabled.is_(True))
                 .order_by(Practice.created_at)
             )
-        ).scalars().all()
+        ).all()
 
-        for practice_id in practice_ids:
+        for practice_id, tz_name in practices:
+            # Quiet hours: skip practices where it's currently too early/late
+            # in their LOCAL time (TCPA-friendly — no 3am texts).
+            if not _within_quiet_window(now, tz_name, quiet_start, quiet_end):
+                continue
             await set_tenant(session, practice_id)
             # 24h pass: appointment is between 2h and 24h away (so it never
             # collides with the 2h reminder for the same booking).

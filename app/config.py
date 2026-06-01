@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # Sending also requires SMS_ENABLED + Twilio config (shared with confirmations).
     reminders_enabled: bool = False
     reminder_interval_seconds: int = 900  # how often the loop checks (15 min)
+    # Quiet hours (practice-local): never send reminders before this hour or at/
+    # after the end hour. Default 8:00–21:00 local. TCPA-friendly.
+    reminder_quiet_start_hour: int = 8  # earliest hour reminders may send
+    reminder_quiet_end_hour: int = 21  # first hour reminders stop (exclusive)
 
     # PMS
     pms_adapter: str = "mock"

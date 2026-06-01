@@ -191,3 +191,21 @@ async def test_unknown_keyword_gets_help(client, db_session):
     resp = await _post(client, "hello%20there")
     assert resp.status_code == 200
     assert "reply confirm" in resp.text.lower()
+
+
+async def test_status_callback_returns_204(client, db_session):
+    resp = await client.post(
+        "/webhooks/twilio/status",
+        content="MessageSid=SM123&MessageStatus=delivered&To=%2B15557770000",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 204
+
+
+async def test_status_callback_failed_status_ok(client, db_session):
+    resp = await client.post(
+        "/webhooks/twilio/status",
+        content="MessageSid=SM999&MessageStatus=failed&To=%2B15557770000",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 204
