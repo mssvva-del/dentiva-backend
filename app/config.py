@@ -116,6 +116,12 @@ class Settings(BaseSettings):
     # Never enable in staging/production.
     auth_dev_bypass: bool = False
 
+    # Demo open-access: any authenticated Clerk user with no local record is
+    # auto-attached to the demo (first) practice as staff. Lets you hand a
+    # login to a doctor/investor without per-user provisioning. Demo only —
+    # everyone shares the same demo data. Turn off before real multi-tenant use.
+    demo_open_access: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
