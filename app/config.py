@@ -130,6 +130,21 @@ class Settings(BaseSettings):
     # everyone shares the same demo data. Turn off before real multi-tenant use.
     demo_open_access: bool = False
 
+    # Security / ops hardening (Security Sprint — Block 0)
+    enable_llm_relay: bool = False  # mount the Groq /ws/retell-llm relay only if true
+    rate_limit_enabled: bool = False  # in-process per-IP rate limiting (enable for real traffic)
+    rate_limit_per_minute: int = 240  # general endpoints, per client IP
+    rate_limit_webhook_per_minute: int = 600  # webhooks (a single call bursts many)
+
+    @model_validator(mode="after")
+    def _guard_production(self) -> "Settings":
+        """Fail-safe: never let dangerous dev flags run in production."""
+        if self.environment == "production" and self.auth_dev_bypass:
+            raise ValueError(
+                "AUTH_DEV_BYPASS must NOT be enabled when ENVIRONMENT=production."
+            )
+        return self
+
 
 @lru_cache
 def get_settings() -> Settings:

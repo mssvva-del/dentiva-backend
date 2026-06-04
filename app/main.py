@@ -75,6 +75,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Per-IP rate limiting (Security Sprint H2) — gated, generous, /health exempt.
+_rl_settings = get_settings()
+if _rl_settings.rate_limit_enabled:
+    from app.middleware.ratelimit import RateLimitMiddleware
+
+    app.add_middleware(
+        RateLimitMiddleware,
+        per_minute=_rl_settings.rate_limit_per_minute,
+        webhook_per_minute=_rl_settings.rate_limit_webhook_per_minute,
+    )
+    logger.info("Rate limiting enabled (%s/min, webhooks %s/min)",
+                _rl_settings.rate_limit_per_minute,
+                _rl_settings.rate_limit_webhook_per_minute)
+
 # Map HTTP status -> stable error code for the unified envelope.
 _STATUS_CODE_MAP = {
     400: "INVALID_REQUEST",
@@ -146,4 +160,9 @@ app.include_router(waitlist.router)
 app.include_router(voice.router)
 app.include_router(retell.router)
 app.include_router(twilio_sms.router)
-app.include_router(retell_llm_relay.router)
+# Groq custom-LLM relay (/ws/retell-llm) — NOT used by the live agent (native
+# retell-llm). Mounted only when explicitly enabled, so an unauthenticated WS
+# isn't exposed by default (Security Sprint M7).
+if get_settings().enable_llm_relay:
+    app.include_router(retell_llm_relay.router)
+    logger.info("Groq LLM relay mounted (ENABLE_LLM_RELAY=true)")

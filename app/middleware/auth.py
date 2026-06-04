@@ -64,8 +64,9 @@ async def authenticate(
     """
     settings = get_settings()
 
-    # Dev bypass for local tests only.
-    if settings.auth_dev_bypass:
+    # Dev bypass for local tests only — NEVER honored in production (defense in
+    # depth; config also refuses to boot with this flag in production).
+    if settings.auth_dev_bypass and settings.environment != "production":
         dev_user = request.headers.get("x-dev-clerk-user-id")
         dev_org = request.headers.get("x-dev-clerk-org-id")
         if dev_user:

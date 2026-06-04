@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 os.environ["AUTH_DEV_BYPASS"] = "true"
+# Mount the Groq custom-LLM relay so its WS tests run (prod keeps it off by default).
+os.environ["ENABLE_LLM_RELAY"] = "true"
 # App connects as the RLS-enforced dentiva_app role; schema mgmt uses the owner.
 TEST_DB_URL = "postgresql+asyncpg://dentiva_app:dentiva_app@localhost:5432/dentiva_test"
 OWNER_TEST_DB_URL = "postgresql+asyncpg://dentiva:dentiva@localhost:5432/dentiva_test"

@@ -52,9 +52,21 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
 def _verify_signature(raw_body: bytes, signature: str | None) -> bool:
-    secret = get_settings().retell_webhook_secret
+    settings = get_settings()
+    secret = settings.retell_webhook_secret
     if not secret:
-        logger.warning("RETELL_WEBHOOK_SECRET empty — skipping signature check (dev only).")
+        # No secret configured → we CANNOT verify. We still allow the request so
+        # the live agent keeps working, but flag it loudly. SECURITY HOLE while
+        # unset: anyone who knows the URL could POST a fake book/cancel/transfer.
+        # To CLOSE it: (1) set a signing secret in Retell, (2) set
+        # RETELL_WEBHOOK_SECRET to match, (3) confirm our HMAC matches Retell's
+        # scheme in staging BEFORE prod (mismatch would reject real webhooks).
+        if settings.environment == "production":
+            logger.error(
+                "RETELL_WEBHOOK_SECRET NOT set — webhooks are UNVERIFIED in production."
+            )
+        else:
+            logger.warning("RETELL_WEBHOOK_SECRET empty — skipping signature check (dev).")
         return True
     if not signature:
         return False
