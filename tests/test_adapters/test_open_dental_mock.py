@@ -34,5 +34,8 @@ async def test_create_appointment(adapter):
     appt = await adapter.create_appointment(
         "OD-1001", "2026-06-05T10:00:00Z", "cleaning", 60
     )
-    assert appt.pms_external_id.startswith("APPT-")
+    # Step 1 model: pms_external_id is the PATIENT (PatNum) for back-reference;
+    # the appointment's own id lives in apt_num (was conflated before).
+    assert appt.pms_external_id == "OD-1001"
+    assert appt.apt_num is not None
     assert appt.duration_minutes == 60

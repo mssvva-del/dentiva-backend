@@ -126,9 +126,19 @@ class Settings(BaseSettings):
     reminder_quiet_end_hour: int = 21  # first hour reminders stop (exclusive)
 
     # PMS
+    # 'mock' (demo/default — fake calendar) or 'open_dental_real' (live API).
+    # Stays 'mock' globally; the real adapter is opted into PER PRACTICE so one
+    # pilot clinic can run live while everyone else stays on the mock.
     pms_adapter: str = "mock"
-    open_dental_api_url: str = ""
+    # Open Dental REST base, e.g. https://api.opendental.com/api/v1 (remote) or a
+    # clinic's local/service URL. The DEVELOPER key is ours (one for all of
+    # Dentiva); each clinic's CUSTOMER key is per-practice and passed in at call
+    # time (stored encrypted in practices.pms_credentials_secret_key) — NOT here.
+    open_dental_api_url: str = "https://api.opendental.com/api/v1"
     open_dental_dev_key: str = ""
+    # Fallback CUSTOMER key for single-clinic/dev use when not threading per-
+    # practice keys yet (Step 3 wires per-practice). Empty in prod.
+    open_dental_customer_key: str = ""
 
     # LLM (Groq primary, Anthropic fallback — OpenAI unused in weekend mode)
     groq_api_key: str = ""
