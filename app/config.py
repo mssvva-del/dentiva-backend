@@ -79,6 +79,23 @@ class Settings(BaseSettings):
     retell_api_key: str = ""
     retell_agent_id: str = ""
 
+    # Stripe (Phase D). Test-mode keys first; Sergio provides them later. When
+    # stripe_secret_key is empty, billing API calls (checkout) return a clear
+    # "not configured" error instead of crashing. The webhook secret gates
+    # /webhooks/stripe (rejected in production when unset, like the Clerk one).
+    # Price IDs map our plan keys → Stripe Price objects (monthly/annual).
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    # Where Stripe Checkout returns the user (success/cancel). The dashboard
+    # origin; defaults to local dev. Set to the deployed dashboard URL in prod.
+    dashboard_base_url: str = "http://localhost:3000"
+    stripe_price_starter_monthly: str = ""
+    stripe_price_starter_annual: str = ""
+    stripe_price_practice_monthly: str = ""
+    stripe_price_practice_annual: str = ""
+    stripe_price_group_monthly: str = ""
+    stripe_price_group_annual: str = ""
+
     # Background call-sync: periodically pull recent Retell calls into the DB so
     # the dashboard stays current even when web/test calls fire no webhook.
     # Disabled by default; enable on the server with CALL_SYNC_ENABLED=true.

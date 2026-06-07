@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api import retell_llm_relay
 from app.config import get_settings
 from app.routes import (
+    billing,
     bookings,
     callbacks,
     calls,
@@ -31,7 +32,7 @@ from app.routes import (
 )
 from app.services.call_sync import call_sync_loop
 from app.services.reminders import reminder_loop
-from app.webhooks import clerk, retell, twilio_sms
+from app.webhooks import clerk, retell, stripe, twilio_sms
 
 logging.basicConfig(level=get_settings().log_level.upper())
 logger = logging.getLogger(__name__)
@@ -162,6 +163,7 @@ async def health_ready() -> JSONResponse:
 app.include_router(me.router)
 app.include_router(onboarding.router)
 app.include_router(team.router)
+app.include_router(billing.router)
 app.include_router(practice.router)
 app.include_router(calls.router)
 app.include_router(bookings.router)
@@ -173,6 +175,7 @@ app.include_router(voice.router)
 app.include_router(retell.router)
 app.include_router(twilio_sms.router)
 app.include_router(clerk.router)
+app.include_router(stripe.router)
 # Groq custom-LLM relay (/ws/retell-llm) — NOT used by the live agent (native
 # retell-llm). Mounted only when explicitly enabled, so an unauthenticated WS
 # isn't exposed by default (Security Sprint M7).

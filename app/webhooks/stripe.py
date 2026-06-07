@@ -1,0 +1,246 @@
+"""Stripe webhook handler (Platform Iter 1, Phase D).
+
+Keeps our billing rows in sync with Stripe and drives the failed-payment →
+grace → suspend lifecycle.
+
+SECURITY: signature verified against STRIPE_WEBHOOK_SECRET. Unset → allowed in
+dev (logged), REJECTED in production (an unverified billing webhook could flip a
+practice's payment status). Unknown events are acked + ignored so Stripe stops
+retrying. Handlers are idempotent (Stripe redelivers).
+
+Events handled:
+  checkout.session.completed        → record customer, activate subscription
+  invoice.paid                      → store invoice paid, (re)activate
+  invoice.payment_failed            → past_due (grace; Stripe retries)
+  customer.subscription.deleted     → suspend (Stripe gave up after retries)
+  customer.subscription.updated     → sync status
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Header, HTTPException, Request, status
+from sqlalchemy import select
+
+import app.db as _app_db
+from app.config import get_settings
+from app.db import set_tenant
+from app.models.invoice import Invoice
+from app.models.practice import Practice
+from app.models.subscription import Subscription
+from app.services.billing_service import (
+    create_or_update_subscription,
+    mark_past_due,
+    reactivate_practice,
+    suspend_practice,
+)
+from app.webhooks.stripe_verify import StripeVerificationError, verify
+
+logger = logging.getLogger("dentiva.webhooks.stripe")
+
+router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+
+def _verify(raw_body: bytes, sig_header: str | None) -> None:
+    settings = get_settings()
+    secret = settings.stripe_webhook_secret
+    if not secret:
+        if settings.environment == "production":
+            logger.error("STRIPE_WEBHOOK_SECRET unset in production — rejecting webhook.")
+            raise HTTPException(status_code=401, detail="Webhook not configured.")
+        logger.warning("STRIPE_WEBHOOK_SECRET empty — skipping signature check (dev).")
+        return
+    try:
+        verify(secret=secret, raw_body=raw_body, signature_header=sig_header)
+    except StripeVerificationError as exc:
+        logger.warning("stripe webhook signature rejected: %s", exc)
+        raise HTTPException(status_code=401, detail="Invalid webhook signature.") from exc
+
+
+async def _resolve_practice(session, obj: dict) -> Practice | None:
+    """Find the practice an event object belongs to.
+
+    Tries (in order): our explicit metadata.practice_id (set when we create the
+    checkout session), the Stripe customer id, then the Stripe subscription id.
+    """
+    meta = obj.get("metadata") or {}
+    pid = meta.get("practice_id")
+    if pid:
+        try:
+            p = (
+                await session.execute(select(Practice).where(Practice.id == uuid.UUID(pid)))
+            ).scalar_one_or_none()
+            if p:
+                return p
+        except ValueError:
+            pass
+
+    customer = obj.get("customer")
+    if customer:
+        p = (
+            await session.execute(
+                select(Practice).where(Practice.stripe_customer_id == customer)
+            )
+        ).scalar_one_or_none()
+        if p:
+            return p
+
+    sub_id = obj.get("subscription")
+    if not sub_id and obj.get("object") == "subscription":
+        sub_id = obj.get("id")
+    if sub_id:
+        sub = (
+            await session.execute(
+                select(Subscription).where(Subscription.stripe_subscription_id == sub_id)
+            )
+        ).scalar_one_or_none()
+        if sub:
+            return (
+                await session.execute(select(Practice).where(Practice.id == sub.practice_id))
+            ).scalar_one_or_none()
+    return None
+
+
+def _epoch(value) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(value), tz=UTC)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _handle_checkout_completed(session, obj: dict) -> str:
+    practice = await _resolve_practice(session, obj)
+    if practice is None:
+        return "no_practice"
+    customer = obj.get("customer")
+    if customer:
+        practice.stripe_customer_id = customer
+    await set_tenant(session, practice.id)
+    meta = obj.get("metadata") or {}
+    plan = meta.get("plan", "starter")
+    cycle = meta.get("billing_cycle", "monthly")
+    await create_or_update_subscription(
+        session, practice, plan_key=plan, billing_cycle=cycle, status="active",
+        stripe_subscription_id=obj.get("subscription"),
+    )
+    return "subscription_active"
+
+
+async def _handle_invoice_paid(session, obj: dict) -> str:
+    practice = await _resolve_practice(session, obj)
+    if practice is None:
+        return "no_practice"
+    await set_tenant(session, practice.id)
+    session.add(Invoice(
+        id=uuid.uuid4(), practice_id=practice.id,
+        stripe_invoice_id=obj.get("id"),
+        amount_cents=int(obj.get("amount_paid") or obj.get("amount_due") or 0),
+        status="paid",
+        period_start=_epoch(obj.get("period_start")),
+        period_end=_epoch(obj.get("period_end")),
+        paid_at=datetime.now(UTC),
+    ))
+    # A successful payment clears any suspension/past-due.
+    await reactivate_practice(session, practice)
+    return "invoice_paid"
+
+
+async def _handle_payment_failed(session, obj: dict) -> str:
+    practice = await _resolve_practice(session, obj)
+    if practice is None:
+        return "no_practice"
+    await set_tenant(session, practice.id)
+    session.add(Invoice(
+        id=uuid.uuid4(), practice_id=practice.id,
+        stripe_invoice_id=obj.get("id"),
+        amount_cents=int(obj.get("amount_due") or 0),
+        status="open",
+        paid_at=None,
+    ))
+    # Grace period: Stripe will retry. We mark past_due but do NOT suspend yet —
+    # suspension happens on customer.subscription.deleted (Stripe gave up).
+    await mark_past_due(session, practice.id)
+    return "past_due"
+
+
+async def _handle_subscription_deleted(session, obj: dict) -> str:
+    practice = await _resolve_practice(session, obj)
+    if practice is None:
+        return "no_practice"
+    await set_tenant(session, practice.id)
+    await suspend_practice(session, practice)
+    return "suspended"
+
+
+async def _handle_subscription_updated(session, obj: dict) -> str:
+    practice = await _resolve_practice(session, obj)
+    if practice is None:
+        return "no_practice"
+    await set_tenant(session, practice.id)
+    sub = (
+        await session.execute(
+            select(Subscription).where(Subscription.practice_id == practice.id)
+        )
+    ).scalar_one_or_none()
+    if sub is None:
+        return "no_subscription"
+    # Map Stripe status → ours where they differ (canceled→cancelled, unpaid→past_due).
+    stripe_status = obj.get("status", "")
+    mapping = {
+        "active": "active", "trialing": "trialing", "past_due": "past_due",
+        "canceled": "cancelled", "unpaid": "past_due",
+    }
+    sub.status = mapping.get(stripe_status, sub.status)
+    if start := _epoch(obj.get("current_period_start")):
+        sub.current_period_start = start
+    if end := _epoch(obj.get("current_period_end")):
+        sub.current_period_end = end
+    return f"synced:{sub.status}"
+
+
+_HANDLERS = {
+    "checkout.session.completed": _handle_checkout_completed,
+    "invoice.paid": _handle_invoice_paid,
+    "invoice.payment_failed": _handle_payment_failed,
+    "customer.subscription.deleted": _handle_subscription_deleted,
+    "customer.subscription.updated": _handle_subscription_updated,
+}
+
+
+@router.post("/stripe", status_code=status.HTTP_200_OK)
+async def stripe_webhook(
+    request: Request,
+    stripe_signature: str | None = Header(default=None, alias="stripe-signature"),
+) -> dict:
+    raw_body = await request.body()
+    _verify(raw_body, stripe_signature)
+
+    try:
+        event = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+
+    event_type = event.get("type")
+    obj = (event.get("data") or {}).get("object") or {}
+    handler = _HANDLERS.get(event_type)
+    if handler is None:
+        logger.info("stripe webhook: ignoring unmodeled event '%s'", event_type)
+        return {"status": "ignored", "type": event_type}
+
+    async with _app_db.async_session_factory() as session:
+        try:
+            result = await handler(session, obj)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("stripe webhook handler failed for '%s'", event_type)
+            raise HTTPException(status_code=500, detail="Webhook processing failed.") from None
+
+    logger.info("stripe webhook '%s' → %s", event_type, result)
+    return {"status": "ok", "type": event_type, "result": result}
