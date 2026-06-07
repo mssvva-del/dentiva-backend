@@ -21,9 +21,11 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import set_tenant
+from app.models.invitation import Invitation
 from app.models.practice import Practice
 from app.models.user import User
 
@@ -166,7 +168,29 @@ async def handle_membership_created(session: AsyncSession, data: dict) -> str:
         )
         return "deferred"
 
+    # Prefer an explicitly invited role over the Clerk-role mapping: if this user
+    # was invited (pending invitation matching their email in THIS practice), use
+    # the role the owner chose and mark the invitation accepted. RLS guards the
+    # invitations table, so bind the tenant context first.
+    email = (pud.get("identifier") or "").strip().lower()
     role = map_clerk_role(clerk_role)
+    invitation: Invitation | None = None
+    if email:
+        await set_tenant(session, practice.id)
+        invitation = (
+            await session.execute(
+                select(Invitation).where(
+                    Invitation.practice_id == practice.id,
+                    func.lower(Invitation.email) == email,
+                    Invitation.status == "pending",
+                )
+            )
+        ).scalar_one_or_none()
+        if invitation is not None:
+            role = invitation.role
+            invitation.status = "accepted"
+            logger.info("membership.created: matched invitation, role=%s", role)
+
     user = (
         await session.execute(select(User).where(User.clerk_user_id == clerk_user_id))
     ).scalar_one_or_none()

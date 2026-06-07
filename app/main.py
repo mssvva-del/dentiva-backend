@@ -25,6 +25,7 @@ from app.routes import (
     onboarding,
     patients,
     practice,
+    team,
     voice,
     waitlist,
 )
@@ -160,6 +161,7 @@ async def health_ready() -> JSONResponse:
 
 app.include_router(me.router)
 app.include_router(onboarding.router)
+app.include_router(team.router)
 app.include_router(practice.router)
 app.include_router(calls.router)
 app.include_router(bookings.router)
