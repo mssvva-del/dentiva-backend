@@ -14,9 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi import status as http_status
 from pydantic import BaseModel
 
+from app.auth.permissions import VIEW_CALLS, require_permission
 from app.config import get_settings
 from app.dependencies import get_current_practice
 from app.models.practice import Practice
+from app.models.user import User
 
 logger = logging.getLogger("dentiva.routes.voice")
 
@@ -47,6 +49,10 @@ async def voice_status() -> dict:
 @router.post("/web-call", response_model=WebCallResponse)
 async def create_web_call(
     _practice: Practice = Depends(get_current_practice),
+    # RBAC: starting a browser test-call needs at least call-view access
+    # (everyone but unprovisioned). Kept low so any clinic role can demo the
+    # receptionist; the action is harmless beyond consuming Retell minutes.
+    _: User = Depends(require_permission(VIEW_CALLS)),
 ) -> WebCallResponse:
     """Create a Retell web call and return its browser access token.
 

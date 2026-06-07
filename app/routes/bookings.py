@@ -11,11 +11,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import MANAGE_APPOINTMENTS, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.models.user import User
 from app.schemas.booking import (
     BookingListResponse,
     BookingStatusUpdate,
@@ -207,6 +209,9 @@ async def update_booking_status(
     booking_id: str,
     payload: BookingStatusUpdate,
     practice: Practice = Depends(get_current_practice),
+    # RBAC: changing an appointment's status is a scheduling action → staff+
+    # (viewers are read-only). Enforced server-side regardless of the UI.
+    _: User = Depends(require_permission(MANAGE_APPOINTMENTS)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> BookingSummary:
     """Update a booking's lifecycle status from the dashboard.

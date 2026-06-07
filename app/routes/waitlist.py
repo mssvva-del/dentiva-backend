@@ -4,9 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import MANAGE_APPOINTMENTS, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.models.user import User
 from app.models.waitlist_entry import WaitlistEntry
 from app.schemas.waitlist import (
     WaitlistListResponse,
@@ -108,6 +110,9 @@ async def update_waitlist_status(
     entry_id: str,
     payload: WaitlistStatusUpdate,
     practice: Practice = Depends(get_current_practice),
+    # RBAC: working the waitlist (contacted/scheduled/removed) is a scheduling
+    # action → staff+.
+    _: User = Depends(require_permission(MANAGE_APPOINTMENTS)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> WaitlistSummary:
     if payload.status not in _ALLOWED_STATUSES:

@@ -4,9 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import MANAGE_CALLS, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.callback_request import CallbackRequest
 from app.models.practice import Practice
+from app.models.user import User
 from app.schemas.callback import (
     CallbackListResponse,
     CallbackStatusUpdate,
@@ -95,6 +97,8 @@ async def update_callback_status(
     callback_id: str,
     payload: CallbackStatusUpdate,
     practice: Practice = Depends(get_current_practice),
+    # RBAC: handling/dismissing a callback is a call-desk action → staff+.
+    _: User = Depends(require_permission(MANAGE_CALLS)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> CallbackSummary:
     if payload.status not in _ALLOWED_STATUSES:

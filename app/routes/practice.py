@@ -6,8 +6,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import MANAGE_SETTINGS, require_permission
 from app.config import get_settings
-from app.dependencies import get_current_practice, get_current_user, get_tenant_db
+from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.practice import Practice
 from app.models.user import User
@@ -45,7 +46,9 @@ async def practice_me(practice: Practice = Depends(get_current_practice)) -> Pra
 async def update_practice_me(
     payload: PracticeUpdate,
     practice: Practice = Depends(get_current_practice),
-    user: User = Depends(get_current_user),
+    # RBAC: editing practice settings is manager+ (MANAGE_SETTINGS). This both
+    # authenticates and authorizes — the returned user is used for the audit log.
+    user: User = Depends(require_permission(MANAGE_SETTINGS)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> PracticeMe:
     """Partially update practice settings. Only provided (non-None) fields are changed."""

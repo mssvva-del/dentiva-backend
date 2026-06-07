@@ -12,11 +12,13 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import SEND_SMS, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.models.user import User
 from app.models.waitlist_entry import WaitlistEntry
 from app.services.sms import send_recall_notice
 from app.utils.redact import redact_name
@@ -253,6 +255,9 @@ class RecallSmsResponse(BaseModel):
 async def send_patient_recall_sms(
     patient_id: str,
     practice: Practice = Depends(get_current_practice),
+    # RBAC: texting a patient is an outbound-SMS action → staff+ (viewers can
+    # see the recall list but not message patients).
+    _: User = Depends(require_permission(SEND_SMS)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> RecallSmsResponse:
     """Text a lapsed patient a reactivation / recall message.
