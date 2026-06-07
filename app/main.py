@@ -28,7 +28,7 @@ from app.routes import (
 )
 from app.services.call_sync import call_sync_loop
 from app.services.reminders import reminder_loop
-from app.webhooks import retell, twilio_sms
+from app.webhooks import clerk, retell, twilio_sms
 
 logging.basicConfig(level=get_settings().log_level.upper())
 logger = logging.getLogger(__name__)
@@ -162,6 +162,7 @@ app.include_router(waitlist.router)
 app.include_router(voice.router)
 app.include_router(retell.router)
 app.include_router(twilio_sms.router)
+app.include_router(clerk.router)
 # Groq custom-LLM relay (/ws/retell-llm) — NOT used by the live agent (native
 # retell-llm). Mounted only when explicitly enabled, so an unauthenticated WS
 # isn't exposed by default (Security Sprint M7).
