@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     clerk_publishable_key: str = ""
     clerk_secret_key: str = ""
     clerk_jwks_url: str = ""
+    # svix signing secret for Clerk webhooks (Dashboard → Webhooks → Signing
+    # Secret, format "whsec_..."). Verifies user.created / organization.* events.
+    # When empty: allowed in dev (logged), but REJECTED in production so an
+    # unverified webhook can't provision/delete users. Set in Railway before go-live.
+    clerk_webhook_secret: str = ""
 
     # Retell
     retell_webhook_secret: str = ""
