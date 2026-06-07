@@ -8,6 +8,7 @@ import logging
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -21,6 +22,7 @@ from app.routes import (
     calls,
     dashboard,
     me,
+    onboarding,
     patients,
     practice,
     voice,
@@ -121,9 +123,14 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # jsonable_encoder makes the error list JSON-safe: Pydantic v2 puts the raw
+    # ValueError in each error's ``ctx`` for custom field_validators, and that
+    # object is NOT directly JSON-serializable (would 500 the error handler).
     return JSONResponse(
         status_code=400,
-        content=_error_payload(400, "Request validation failed", {"errors": exc.errors()}),
+        content=_error_payload(
+            400, "Request validation failed", {"errors": jsonable_encoder(exc.errors())}
+        ),
     )
 
 
@@ -152,6 +159,7 @@ async def health_ready() -> JSONResponse:
 
 
 app.include_router(me.router)
+app.include_router(onboarding.router)
 app.include_router(practice.router)
 app.include_router(calls.router)
 app.include_router(bookings.router)

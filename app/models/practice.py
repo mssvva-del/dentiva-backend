@@ -13,6 +13,9 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
 
     clerk_org_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Street address (single free-text line). Collected in onboarding step 1;
+    # nullable because existing practices predate it and it's not load-bearing.
+    address: Mapped[str | None] = mapped_column(Text)
     timezone: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="America/New_York"
     )
@@ -54,3 +57,9 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     )
     # Stripe customer handle (set in Phase D at checkout). Nullable until billed.
     stripe_customer_id: Mapped[str | None] = mapped_column(Text)
+    # Per-practice agent personalization captured in onboarding step 5
+    # ({agent_name, voice, greeting}). Stored as JSONB so we can evolve the shape
+    # without a migration. NOT yet wired to the live Retell agent (still a single
+    # shared agent in Iter 1); ready for when agents are parameterized per
+    # practice. Nullable until the wizard fills it.
+    agent_settings: Mapped[dict | None] = mapped_column(JSONB)
