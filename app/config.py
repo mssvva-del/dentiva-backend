@@ -135,6 +135,16 @@ class Settings(BaseSettings):
     # everyone shares the same demo data. Turn off before real multi-tenant use.
     demo_open_access: bool = False
 
+    # Lazy provisioning: when a Clerk-authenticated user has no local record yet,
+    # provision them from their VERIFIED JWT org claim — create their practice
+    # (status='onboarding') if missing and link them with a sensible role. This is
+    # the in-spec "first login without a clinic → onboarding wizard" path and makes
+    # the system robust to delayed/failed Clerk webhooks (the webhook stays the
+    # primary, idempotent provisioning path). Unlike demo_open_access it is fully
+    # multi-tenant (keys off the caller's OWN org, never the first/demo practice).
+    # Off by default so production behavior is unchanged unless explicitly enabled.
+    lazy_provisioning: bool = False
+
     # Security / ops hardening (Security Sprint — Block 0)
     enable_llm_relay: bool = False  # mount the Groq /ws/retell-llm relay only if true
     rate_limit_enabled: bool = False  # in-process per-IP rate limiting (enable for real traffic)

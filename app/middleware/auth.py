@@ -28,6 +28,21 @@ _jwks_fetched_at: float = 0.0
 class AuthClaims:
     clerk_user_id: str
     clerk_org_id: str | None
+    # Best-effort extras from the JWT (may be absent depending on Clerk token
+    # template). Used only by lazy provisioning to pick a sensible initial role
+    # and email; never trusted for authorization (that comes from our DB).
+    clerk_org_role: str | None = None
+    email: str | None = None
+
+
+def _extract_org_role(claims: dict) -> str | None:
+    # Clerk may expose the active org role as ``org_role`` or nested ``o.rol``.
+    if "org_role" in claims:
+        return claims["org_role"]
+    org = claims.get("o")
+    if isinstance(org, dict):
+        return org.get("rol")
+    return None
 
 
 async def _get_jwks(jwks_url: str) -> dict:
@@ -70,7 +85,12 @@ async def authenticate(
         dev_user = request.headers.get("x-dev-clerk-user-id")
         dev_org = request.headers.get("x-dev-clerk-org-id")
         if dev_user:
-            return AuthClaims(clerk_user_id=dev_user, clerk_org_id=dev_org)
+            return AuthClaims(
+                clerk_user_id=dev_user,
+                clerk_org_id=dev_org,
+                clerk_org_role=request.headers.get("x-dev-clerk-org-role"),
+                email=request.headers.get("x-dev-clerk-email"),
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing X-Dev-Clerk-User-Id header (dev bypass).",
@@ -119,4 +139,9 @@ async def authenticate(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token missing subject.",
         )
-    return AuthClaims(clerk_user_id=sub, clerk_org_id=_extract_org_id(claims))
+    return AuthClaims(
+        clerk_user_id=sub,
+        clerk_org_id=_extract_org_id(claims),
+        clerk_org_role=_extract_org_role(claims),
+        email=claims.get("email"),
+    )

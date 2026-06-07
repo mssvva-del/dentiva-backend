@@ -54,18 +54,111 @@ async def _auto_provision_demo_user(session, clerk_user_id: str) -> User | None:
     return user
 
 
+def _role_from_org_role(clerk_org_role: str | None) -> str:
+    """Map a Clerk org role claim to our clinic role (admin-like → owner)."""
+    if clerk_org_role and clerk_org_role.split(":")[-1].lower() in {"admin", "owner"}:
+        return "owner"
+    return "staff"
+
+
+async def _lazy_provision_user(session, claims: AuthClaims) -> User | None:
+    """Provision a user (and their practice if needed) from a VERIFIED JWT.
+
+    In-spec "first login without a clinic → onboarding" path, and a safety net for
+    delayed/failed Clerk webhooks. Fully multi-tenant: keys off the caller's OWN
+    org id (never the demo practice). Requires an org claim — without one the user
+    hasn't created/joined a clinic yet, so we can't place them.
+    """
+    org_id = claims.clerk_org_id
+    if not org_id:
+        return None  # no org → frontend should route them to create one
+
+    practice = (
+        await session.execute(
+            select(Practice).where(Practice.clerk_org_id == org_id)
+        )
+    ).scalar_one_or_none()
+
+    if practice is None:
+        # The org creator's first login: stand up their practice in onboarding and
+        # make them owner. Mirrors the organization.created + membership webhooks.
+        practice = Practice(
+            id=uuid.uuid4(),
+            clerk_org_id=org_id,
+            name="New practice",
+            pms_system="none",
+            business_hours={d: None for d in
+                            ("mon", "tue", "wed", "thu", "fri", "sat", "sun")},
+            languages_enabled=["en", "es"],
+            status="onboarding",
+            onboarding_step=1,
+        )
+        session.add(practice)
+        await session.flush()
+        role = "owner"
+    else:
+        # Joining an existing practice: owner if no owner yet (they created it),
+        # else use the JWT org role (admin→owner, else staff).
+        has_owner = (
+            await session.execute(
+                select(User).where(
+                    User.practice_id == practice.id,
+                    User.role == "owner",
+                    User.status == "active",
+                )
+            )
+        ).scalar_one_or_none() is not None
+        role = "owner" if not has_owner else _role_from_org_role(claims.clerk_org_role)
+
+    user = User(
+        id=uuid.uuid4(),
+        clerk_user_id=claims.clerk_user_id,
+        practice_id=practice.id,
+        email=claims.email or f"{claims.clerk_user_id}@clerk.local",
+        role=role,
+        is_internal=False,
+        status="active",
+    )
+    session.add(user)
+    try:
+        await session.commit()
+        await session.refresh(user)
+    except IntegrityError:
+        # Concurrent first request created it — re-read.
+        await session.rollback()
+        user = (
+            await session.execute(
+                select(User).where(User.clerk_user_id == claims.clerk_user_id)
+            )
+        ).scalar_one_or_none()
+    logger.info(
+        "lazy provisioning: user=%s practice_org=%s role=%s",
+        claims.clerk_user_id[:12], org_id[:12], role,
+    )
+    return user
+
+
 async def get_current_user(
     claims: AuthClaims = Depends(authenticate),
 ) -> User:
-    """Resolve the DB user from Clerk claims. 401 if not provisioned (unless
-    DEMO_OPEN_ACCESS auto-attaches new users to the demo practice)."""
+    """Resolve the DB user from Clerk claims. 401 if not provisioned.
+
+    Two optional auto-provision paths (both off by default): DEMO_OPEN_ACCESS
+    (attach to the demo practice — single-tenant demo) and LAZY_PROVISIONING
+    (provision from the caller's own verified org — multi-tenant, in-spec
+    first-login onboarding). They are mutually exclusive in practice; demo takes
+    precedence if both are somehow on.
+    """
+    settings = get_settings()
     async with async_session_factory() as session:
         result = await session.execute(
             select(User).where(User.clerk_user_id == claims.clerk_user_id)
         )
         user = result.scalar_one_or_none()
-        if user is None and get_settings().demo_open_access:
+        if user is None and settings.demo_open_access:
             user = await _auto_provision_demo_user(session, claims.clerk_user_id)
+        elif user is None and settings.lazy_provisioning:
+            user = await _lazy_provision_user(session, claims)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
