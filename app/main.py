@@ -20,6 +20,7 @@ from app.routes import (
     callbacks,
     calls,
     dashboard,
+    me,
     patients,
     practice,
     voice,
@@ -150,6 +151,7 @@ async def health_ready() -> JSONResponse:
         )
 
 
+app.include_router(me.router)
 app.include_router(practice.router)
 app.include_router(calls.router)
 app.include_router(bookings.router)
