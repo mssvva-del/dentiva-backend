@@ -6,8 +6,11 @@ from app.models.call import Call
 from app.models.callback_request import CallbackRequest
 from app.models.dentiva_staff import DentivaStaff
 from app.models.invitation import Invitation
+from app.models.invoice import Invoice
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.models.subscription import Subscription
+from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.models.waitlist_entry import WaitlistEntry
 
@@ -22,4 +25,7 @@ __all__ = [
     "WaitlistEntry",
     "DentivaStaff",
     "Invitation",
+    "Subscription",
+    "Invoice",
+    "UsageRecord",
 ]

@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import app.db as _app_db
+from app.billing.metering import record_call_usage
 from app.config import get_settings
 from app.db import set_tenant
 from app.models.audit_log import AuditLog
@@ -417,6 +418,19 @@ async def _handle_call_ended(payload: dict) -> dict:
         booking_exists = booking_result.scalar_one_or_none() is not None
         call.outcome = "booked" if booking_exists else "info_only"
         call.status = call_status
+
+        # Billing metering (Phase D): a completed call adds its minutes to the
+        # practice's current-period usage. Only count answered calls (a 'missed'
+        # call consumed no agent minutes). Best-effort — never fail the webhook
+        # over metering, but log loudly so under-billing is visible.
+        if call_status == "completed":
+            try:
+                await record_call_usage(session, call.practice_id, duration_seconds)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "metering failed for call %s (practice %s)",
+                    retell_call_id, call.practice_id,
+                )
 
         await session.commit()
 
