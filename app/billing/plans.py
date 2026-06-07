@@ -22,6 +22,12 @@ from dataclasses import dataclass
 # Annual discount: 17% off the 12-month total (≈2 months free).
 ANNUAL_DISCOUNT = 0.17
 
+# Rough per-minute cost of a call (Retell + LLM + Cartesia TTS), in cents. Used by
+# the admin margin view only — a planning estimate, NOT an invoice input. Tune as
+# real vendor costs land; keep it conservative (over-estimate) so margin isn't
+# flattering.
+ESTIMATED_COST_CENTS_PER_MIN = 8
+
 
 @dataclass(frozen=True)
 class Plan:

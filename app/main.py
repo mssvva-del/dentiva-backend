@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api import retell_llm_relay
 from app.config import get_settings
 from app.routes import (
+    admin,
     billing,
     bookings,
     callbacks,
@@ -164,6 +165,7 @@ app.include_router(me.router)
 app.include_router(onboarding.router)
 app.include_router(team.router)
 app.include_router(billing.router)
+app.include_router(admin.router)
 app.include_router(practice.router)
 app.include_router(calls.router)
 app.include_router(bookings.router)

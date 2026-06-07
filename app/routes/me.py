@@ -13,8 +13,8 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select
 
+import app.db as _app_db
 from app.auth.permissions import admin_permissions_for, clinic_permissions_for
-from app.db import async_session_factory
 from app.dependencies import get_current_user
 from app.models.dentiva_staff import DentivaStaff
 from app.models.user import User
@@ -37,7 +37,7 @@ async def get_me(user: User = Depends(get_current_user)) -> MeResponse:
     """Identity + the exact permissions this caller has, for the frontend."""
     staff_role: str | None = None
     if user.is_internal:
-        async with async_session_factory() as session:
+        async with _app_db.async_session_factory() as session:
             staff = (
                 await session.execute(
                     select(DentivaStaff).where(DentivaStaff.user_id == user.id)

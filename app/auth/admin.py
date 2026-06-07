@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 
+import app.db as _app_db
 from app.auth.permissions import has_admin_permission
-from app.db import async_session_factory
 from app.models.dentiva_staff import DentivaStaff
 from app.models.user import User
 
@@ -39,7 +39,9 @@ def require_internal():
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Admin area — internal Dentiva staff only.",
             )
-        async with async_session_factory() as session:
+        # Reference the factory via the module (not a top-level import) so tests
+        # that repoint app.db.async_session_factory take effect here too.
+        async with _app_db.async_session_factory() as session:
             staff = (
                 await session.execute(
                     select(DentivaStaff).where(DentivaStaff.user_id == user.id)
