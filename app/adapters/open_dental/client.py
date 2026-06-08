@@ -87,6 +87,11 @@ class OpenDentalClient(PMSAdapter):
         return {"Authorization": f"ODFHIR {self._dev_key}/{self._customer_key}"}
 
     async def _request(self, method: str, path: str, **kw) -> httpx.Response:
+        # Defense-in-depth against cross-tenant calls: never hit Open Dental with
+        # a missing key. A blank customer key would otherwise mean "use whatever
+        # the env default points at" — i.e. potentially ANOTHER clinic's office.
+        if not self._dev_key or not self._customer_key:
+            raise PMSError("Open Dental keys not configured for this clinic")
         async with httpx.AsyncClient(
             base_url=self._base_url,
             headers=self._auth_header(),
@@ -103,9 +108,11 @@ class OpenDentalClient(PMSAdapter):
             raise PMSUnavailable(f"Open Dental {resp.status_code}")
         if resp.status_code >= 400:
             # 4xx = our request was wrong / no slot / not found — caller decides.
-            logger.info("Open Dental %s %s -> %s: %s", method, path,
-                        resp.status_code, resp.text[:200])
-            raise PMSError(f"Open Dental {resp.status_code}: {resp.text[:200]}")
+            # SECURITY: do NOT log or surface the response BODY — Open Dental error
+            # bodies on patient/appointment endpoints can echo PHI (names, phones).
+            # Status + path only; the body never reaches our logs or exceptions.
+            logger.info("Open Dental %s %s -> %s", method, path, resp.status_code)
+            raise PMSError(f"Open Dental {resp.status_code} on {method} {path}")
         return resp
 
     # ── Patients ─────────────────────────────────────────────────────────────

@@ -26,6 +26,14 @@ def get_pms_adapter(
     if pms_system == "open_dental":
         from app.adapters.open_dental.client import OpenDentalClient
 
+        # Per-practice real OD REQUIRES an explicit customer key — never fall back
+        # to the env default here, or one clinic could end up talking to another
+        # clinic's Open Dental office. (The global open_dental_real path below may
+        # use the env key, since that's the single-clinic/dev configuration.)
+        if not customer_key:
+            raise ValueError(
+                "open_dental per-practice adapter requires an explicit customer_key"
+            )
         return OpenDentalClient(customer_key=customer_key)
     if pms_system in (None, "mock", "none", "nexhealth"):
         # Global setting decides when no per-practice real OD is requested.

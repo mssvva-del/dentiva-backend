@@ -174,3 +174,40 @@ async def test_get_appointment_404_returns_none():
         return httpx.Response(404, text="not found")
 
     assert await _client(handler).get_appointment("999") is None
+
+
+# ── self-review fixes (PHI-in-logs + cross-tenant key) ───────────────────────
+async def test_4xx_error_does_not_leak_response_body():
+    # An OD error body could echo PHI (a patient name). It must NOT appear in the
+    # raised exception (which could land in logs / an API response).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="Patient Maria Garcia +15551234567 invalid")
+
+    with pytest.raises(PMSError) as ei:
+        await _client(handler).get_patient_by_phone("+15551234567")
+    msg = str(ei.value)
+    assert "Maria" not in msg and "15551234567" not in msg  # body scrubbed
+    assert "400" in msg  # status still useful
+
+
+async def test_request_refuses_without_customer_key():
+    # A client with no customer key must NOT call Open Dental (cross-tenant guard).
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("must not reach the network without a key")
+
+    client = OpenDentalClient(
+        developer_key="DEV", customer_key="", base_url="https://od.test",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(PMSError):
+        await client.list_providers()
+
+
+def test_factory_per_practice_open_dental_requires_customer_key():
+    from app.adapters.open_dental import get_pms_adapter
+
+    # Per-practice real OD without an explicit key → refuse (no silent env fallback).
+    with pytest.raises(ValueError):
+        get_pms_adapter(pms_system="open_dental", customer_key=None)
+    # mock path is always fine.
+    assert get_pms_adapter(pms_system="mock") is not None
