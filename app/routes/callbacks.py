@@ -5,6 +5,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.permissions import MANAGE_CALLS, require_permission
+from app.db import set_tenant
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.callback_request import CallbackRequest
 from app.models.practice import Practice
@@ -122,6 +123,8 @@ async def update_callback_status(
 
     cb.status = payload.status
     await db.commit()
+    # Re-bind tenant after commit (connection-scoped GUC may reset on commit).
+    await set_tenant(db, practice.id)
     await db.refresh(cb)
 
     return CallbackSummary(

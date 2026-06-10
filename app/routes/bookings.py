@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.permissions import MANAGE_APPOINTMENTS, require_permission
+from app.db import set_tenant
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
@@ -262,6 +263,10 @@ async def update_booking_status(
         )
 
     await db.commit()
+    # Re-bind the tenant after commit: the connection may be recycled on commit,
+    # and the GUC is connection-scoped — without this, the post-commit refresh +
+    # patient read would run with no tenant and RLS would hide the rows.
+    await set_tenant(db, practice.id)
     await db.refresh(b)
 
     patient = (

@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 import app.db as app_db
 from app.config import get_settings
+from app.db import set_tenant
 from app.models.call import Call
 from app.models.practice import Practice
 
@@ -191,6 +192,8 @@ async def sync_recent_calls(
             logger.warning("call-sync: no practice in DB — nothing to attach calls to")
             return {"error": "no_practice"}
 
+        # calls is RLS-protected — bind the tenant before upserting.
+        await set_tenant(session, practice.id)
         for call in calls:
             result = await _upsert_call(session, practice.id, call)
             if result == "inserted":

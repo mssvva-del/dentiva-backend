@@ -29,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.permissions import MANAGE_TEAM, require_permission
+from app.db import set_tenant
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.invitation import Invitation
@@ -257,6 +258,8 @@ async def create_invitation(
     await _audit(db, practice, caller, "team_invited",
                  {"email": email, "role": payload.role})
     await db.commit()
+    # Re-bind tenant after commit (invitations is RLS; connection GUC may reset).
+    await set_tenant(db, practice.id)
     await db.refresh(inv)
     return InvitationOut(
         id=str(inv.id), email=inv.email, role=inv.role, status=inv.status,
@@ -295,6 +298,7 @@ async def revoke_invitation(
     inv.status = "revoked"
     await _audit(db, practice, caller, "team_invite_revoked", {"invitation": str(inv.id)})
     await db.commit()
+    await set_tenant(db, practice.id)  # re-bind after commit (RLS table)
     await db.refresh(inv)
     return InvitationOut(
         id=str(inv.id), email=inv.email, role=inv.role, status=inv.status,

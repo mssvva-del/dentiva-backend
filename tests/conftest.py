@@ -56,14 +56,22 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
     async with owner_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text("ALTER TABLE patients ENABLE ROW LEVEL SECURITY"))
-        await conn.execute(text("ALTER TABLE patients FORCE ROW LEVEL SECURITY"))
-        await conn.execute(
-            text(
-                "CREATE POLICY tenant_isolation ON patients USING "
-                "(practice_id = NULLIF(current_setting('app.current_practice_id', true), '')::uuid)"
+        # Apply the SAME row-level security the migrations apply in prod, for
+        # EVERY RLS-protected table — so tenant isolation is actually EXERCISED by
+        # tests (previously only `patients` had RLS here, so the RLS on
+        # calls/bookings/callbacks/waitlist/invitations went untested).
+        for _t in (
+            "patients", "calls", "bookings", "callback_requests",
+            "waitlist_entries", "invitations",
+        ):
+            await conn.execute(text(f"ALTER TABLE {_t} ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text(f"ALTER TABLE {_t} FORCE ROW LEVEL SECURITY"))
+            await conn.execute(
+                text(
+                    f"CREATE POLICY tenant_isolation ON {_t} USING "
+                    "(practice_id = NULLIF(current_setting('app.current_practice_id', true), '')::uuid)"
+                )
             )
-        )
         # Grant the app role DML on the freshly (re)created tables.
         await conn.execute(
             text(
@@ -72,6 +80,23 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
             )
         )
         await conn.execute(text("GRANT USAGE ON SCHEMA public TO dentiva_app"))
+        # Trusted tenant-routing function (mirrors the migration). SECURITY
+        # DEFINER + owned by the superuser → bypasses RLS to resolve only the
+        # practice_id for a retell_call_id (the webhook needs this before it can
+        # bind the tenant). Created here because tests build schema via create_all.
+        await conn.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION dentiva_practice_for_retell_call(p_call_id text) "
+                "RETURNS uuid LANGUAGE sql SECURITY DEFINER SET search_path = public AS "
+                "$$ SELECT practice_id FROM calls WHERE retell_call_id = p_call_id LIMIT 1; $$;"
+            )
+        )
+        await conn.execute(
+            text(
+                "GRANT EXECUTE ON FUNCTION dentiva_practice_for_retell_call(text) "
+                "TO dentiva_app"
+            )
+        )
     await owner_engine.dispose()
 
     # App engine connects as the RLS-enforced dentiva_app role.
@@ -84,14 +109,31 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
     app_db.async_session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
     deps.async_session_factory = app_db.async_session_factory
 
+    # SEPARATE seeding session factory bound to the OWNER role (superuser →
+    # bypasses RLS). The `db_session` fixture is a test harness for setup +
+    # inspection, so it gets DBA-style access to insert/read any tenant's rows
+    # without threading set_tenant everywhere. The APP path (client →
+    # async_session_factory as dentiva_app) stays RLS-enforced, so tenant
+    # isolation is still genuinely tested through the real API surface.
+    global _seed_engine, _seed_session_factory
+    _seed_engine = create_async_engine(OWNER_TEST_DB_URL, poolclass=NullPool)
+    _seed_session_factory = async_sessionmaker(_seed_engine, expire_on_commit=False)
+
     yield
 
     await test_engine.dispose()
+    await _seed_engine.dispose()
+
+
+# Set per-test in _prepare_database (owner/superuser → bypasses RLS for seeding).
+_seed_engine = None
+_seed_session_factory = None
 
 
 @pytest_asyncio.fixture
 async def db_session(_prepare_database) -> AsyncGenerator[AsyncSession, None]:
-    async with app_db.async_session_factory() as session:
+    # Privileged seeding/inspection session (bypasses RLS). NOT the app path.
+    async with _seed_session_factory() as session:
         yield session
 
 

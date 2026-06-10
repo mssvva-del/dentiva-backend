@@ -21,7 +21,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import app.db as _app_db
@@ -266,12 +266,20 @@ async def _find_upcoming_booking(
 
 
 async def _resolve_practice_id_for_call(session, retell_call_id: str) -> uuid.UUID | None:
-    """Resolve the practice for a call row, falling back to the first practice."""
-    call = (
-        await session.execute(select(Call).where(Call.retell_call_id == retell_call_id))
-    ).scalar_one_or_none()
-    if call is not None:
-        return call.practice_id
+    """Resolve the practice for a call row, falling back to the first practice.
+
+    `calls` is RLS-protected, but this runs BEFORE we know the tenant (routing).
+    We use the SECURITY DEFINER routing function to look up only the practice_id
+    (no PHI) without being blocked by RLS, then the caller binds the tenant.
+    """
+    practice_id = (
+        await session.execute(
+            text("SELECT dentiva_practice_for_retell_call(:cid)"),
+            {"cid": retell_call_id},
+        )
+    ).scalar()
+    if practice_id is not None:
+        return practice_id
     resolved = await _resolve_practice(None)
     return resolved.id if resolved else None
 
@@ -303,6 +311,9 @@ async def _handle_call_started(payload: dict) -> dict:
         return {"ok": True, "warning": "no_practice"}
 
     async with _app_db.async_session_factory() as session:
+        # calls is RLS-protected — bind the resolved practice so the INSERT passes
+        # the tenant policy (FORCE RLS checks practice_id against the GUC).
+        await set_tenant(session, practice.id)
         stmt = (
             pg_insert(Call)
             .values(
@@ -366,7 +377,15 @@ async def _handle_call_ended(payload: dict) -> dict:
     else:
         call_status = "missed"
 
+    # Resolve the practice from the agent FIRST: calls/bookings are now RLS-
+    # protected, so we must bind the tenant before reading or writing them. The
+    # call belongs to the same practice that call_started used (same agent_id).
+    agent_id = call_data.get("agent_id") or payload.get("agent_id")
+    resolved_practice = await _resolve_practice(agent_id)
+
     async with _app_db.async_session_factory() as session:
+        if resolved_practice is not None:
+            await set_tenant(session, resolved_practice.id)
         result = await session.execute(
             select(Call).where(Call.retell_call_id == retell_call_id)
         )
@@ -375,9 +394,8 @@ async def _handle_call_ended(payload: dict) -> dict:
             logger.warning(
                 "call_ended: no call row for retell_call_id=%s; creating one.", retell_call_id
             )
-            # Resolve practice for the orphan row.
-            agent_id = call_data.get("agent_id") or payload.get("agent_id")
-            practice = await _resolve_practice(agent_id)
+            # Orphan row — use the practice resolved above (tenant already bound).
+            practice = resolved_practice
             practice_id = practice.id if practice else uuid.uuid4()
             from_number = call_data.get("from_number") or payload.get("from_number", "unknown")
             to_number = call_data.get("to_number") or payload.get("to_number", "unknown")
@@ -455,6 +473,10 @@ async def _handle_call_analyzed(payload: dict) -> dict:
     hipaa_compliant = analysis.get("hipaa_compliant")  # bool
 
     async with _app_db.async_session_factory() as session:
+        # calls is RLS-protected — resolve + bind tenant before the lookup.
+        routed_practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
+        if routed_practice_id is not None:
+            await set_tenant(session, routed_practice_id)
         result = await session.execute(
             select(Call).where(Call.retell_call_id == retell_call_id)
         )
@@ -506,6 +528,13 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     chosen_slot = None
 
     async with _app_db.async_session_factory() as session:
+        # calls/bookings are RLS-protected. Resolve the tenant FIRST (routing fn,
+        # bypasses RLS for the practice_id only) and bind it, so the Call lookup
+        # below actually sees the row instead of falling into the orphan branch.
+        routed_practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
+        if routed_practice_id is not None:
+            await set_tenant(session, routed_practice_id)
+
         # Resolve call row (may or may not exist depending on call_started timing).
         result = await session.execute(
             select(Call).where(Call.retell_call_id == retell_call_id)
@@ -1113,6 +1142,20 @@ async def _get_or_create_call(session, retell_call_id: str, agent_id: str | None
     """
     if not retell_call_id:
         return None
+    # calls is RLS-protected. Resolve + bind the tenant BEFORE reading/inserting:
+    # prefer the agent_id (present on most function-call payloads), else the
+    # routing function (resolves the practice_id for an existing call, RLS-safe).
+    practice = await _resolve_practice(agent_id)
+    if practice is None:
+        routed_id = await _resolve_practice_id_for_call(session, retell_call_id)
+        practice = await _resolve_practice(None) if routed_id is None else None
+        practice_id = routed_id or (practice.id if practice else None)
+    else:
+        practice_id = practice.id
+    if practice_id is None:
+        return None
+    await set_tenant(session, practice_id)
+
     result = await session.execute(
         select(Call).where(Call.retell_call_id == retell_call_id)
     )
@@ -1120,12 +1163,9 @@ async def _get_or_create_call(session, retell_call_id: str, agent_id: str | None
     if call is not None:
         return call
 
-    practice = await _resolve_practice(agent_id)
-    if practice is None:
-        return None
     call = Call(
         id=uuid.uuid4(),
-        practice_id=practice.id,
+        practice_id=practice_id,
         retell_call_id=retell_call_id,
         direction="inbound",
         from_number="unknown",
