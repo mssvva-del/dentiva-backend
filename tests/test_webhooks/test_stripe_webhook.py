@@ -130,6 +130,32 @@ async def test_invoice_paid_records_and_reactivates(client, db_session):
     assert inv.status == "paid" and inv.amount_cents == 14900
 
 
+async def test_invoice_idempotent_on_redelivery(client, db_session):
+    # Stripe redelivers webhooks — the SAME invoice.paid twice must yield ONE row.
+    practice, _ = await seed_practice(
+        db_session, name="Stripe4", clerk_org_id="org_st4", clerk_user_id="u_st4"
+    )
+    await client.post("/webhooks/stripe", content=await _event(
+        "checkout.session.completed",
+        {"customer": "cus_4", "subscription": "sub_4",
+         "metadata": {"practice_id": str(practice.id), "plan": "starter"}},
+    ))
+    evt = await _event(
+        "invoice.paid",
+        {"customer": "cus_4", "subscription": "sub_4", "id": "in_dup", "amount_paid": 14900},
+    )
+    await client.post("/webhooks/stripe", content=evt)
+    await client.post("/webhooks/stripe", content=evt)  # redelivery
+
+    import app.db as _db
+    async with _db.async_session_factory() as s2:
+        rows = (await s2.execute(
+            select(Invoice).where(Invoice.stripe_invoice_id == "in_dup")
+        )).scalars().all()
+    assert len(rows) == 1, "redelivered invoice must not duplicate"
+    assert rows[0].status == "paid"
+
+
 async def test_unknown_event_ignored(client):
     r = await client.post("/webhooks/stripe", content=await _event("payout.created", {}))
     assert r.status_code == 200 and r.json()["status"] == "ignored"

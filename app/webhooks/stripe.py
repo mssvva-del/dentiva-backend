@@ -24,7 +24,8 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import app.db as _app_db
 from app.config import get_settings
@@ -132,20 +133,57 @@ async def _handle_checkout_completed(session, obj: dict) -> str:
     return "subscription_active"
 
 
+async def _upsert_invoice(
+    session, practice_id, *, stripe_id: str | None, amount_cents: int, status_: str,
+    paid_at: datetime | None, period_start: datetime | None = None,
+    period_end: datetime | None = None,
+) -> None:
+    """Idempotently record an invoice. Stripe REDELIVERS webhooks, so we upsert on
+    stripe_invoice_id (partial-unique) instead of blind-inserting, which used to
+    create duplicate invoice rows on every retry."""
+    mutable = {
+        "amount_cents": amount_cents, "status": status_, "paid_at": paid_at,
+        "period_start": period_start, "period_end": period_end,
+        "updated_at": datetime.now(UTC),
+    }
+    if not stripe_id:
+        # No Stripe id to dedup on (rare/edge) — plain insert.
+        session.add(Invoice(
+            id=uuid.uuid4(), practice_id=practice_id, stripe_invoice_id=None,
+            amount_cents=amount_cents, status=status_, paid_at=paid_at,
+            period_start=period_start, period_end=period_end,
+        ))
+        return
+    stmt = (
+        pg_insert(Invoice)
+        .values(
+            id=uuid.uuid4(), practice_id=practice_id, stripe_invoice_id=stripe_id,
+            amount_cents=amount_cents, status=status_, paid_at=paid_at,
+            period_start=period_start, period_end=period_end,
+        )
+        .on_conflict_do_update(
+            index_elements=["stripe_invoice_id"],
+            index_where=text("stripe_invoice_id IS NOT NULL"),
+            set_=mutable,
+        )
+    )
+    await session.execute(stmt)
+
+
 async def _handle_invoice_paid(session, obj: dict) -> str:
     practice = await _resolve_practice(session, obj)
     if practice is None:
         return "no_practice"
     await set_tenant(session, practice.id)
-    session.add(Invoice(
-        id=uuid.uuid4(), practice_id=practice.id,
-        stripe_invoice_id=obj.get("id"),
+    await _upsert_invoice(
+        session, practice.id,
+        stripe_id=obj.get("id"),
         amount_cents=int(obj.get("amount_paid") or obj.get("amount_due") or 0),
-        status="paid",
+        status_="paid",
+        paid_at=datetime.now(UTC),
         period_start=_epoch(obj.get("period_start")),
         period_end=_epoch(obj.get("period_end")),
-        paid_at=datetime.now(UTC),
-    ))
+    )
     # A successful payment clears any suspension/past-due.
     await reactivate_practice(session, practice)
     return "invoice_paid"
@@ -156,13 +194,13 @@ async def _handle_payment_failed(session, obj: dict) -> str:
     if practice is None:
         return "no_practice"
     await set_tenant(session, practice.id)
-    session.add(Invoice(
-        id=uuid.uuid4(), practice_id=practice.id,
-        stripe_invoice_id=obj.get("id"),
+    await _upsert_invoice(
+        session, practice.id,
+        stripe_id=obj.get("id"),
         amount_cents=int(obj.get("amount_due") or 0),
-        status="open",
+        status_="open",
         paid_at=None,
-    ))
+    )
     # Grace period: Stripe will retry. We mark past_due but do NOT suspend yet —
     # suspension happens on customer.subscription.deleted (Stripe gave up).
     await mark_past_due(session, practice.id)

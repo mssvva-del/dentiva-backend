@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,15 @@ class Invoice(UUIDPKMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "invoices"
+    # One row per Stripe invoice — Stripe redelivers webhooks, so the handler
+    # upserts on this. Partial unique (only when set) so non-Stripe/manual rows
+    # with NULL stripe_invoice_id aren't constrained.
+    __table_args__ = (
+        Index(
+            "uq_invoices_stripe_id", "stripe_invoice_id", unique=True,
+            postgresql_where=text("stripe_invoice_id IS NOT NULL"),
+        ),
+    )
 
     practice_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("practices.id"), nullable=False

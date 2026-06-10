@@ -68,8 +68,8 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
             await conn.execute(text(f"ALTER TABLE {_t} FORCE ROW LEVEL SECURITY"))
             await conn.execute(
                 text(
-                    f"CREATE POLICY tenant_isolation ON {_t} USING "
-                    "(practice_id = NULLIF(current_setting('app.current_practice_id', true), '')::uuid)"
+                    f"CREATE POLICY tenant_isolation ON {_t} USING (practice_id = "
+                    "NULLIF(current_setting('app.current_practice_id', true), '')::uuid)"
                 )
             )
         # Grant the app role DML on the freshly (re)created tables.
