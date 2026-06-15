@@ -48,3 +48,7 @@ class Call(UUIDPKMixin, TimestampMixin, Base):
     emergency_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false", default=False
     )
+    # Billing meter-once stamp: set when this call's minutes were added to usage.
+    # NULL = not yet metered. Guards against double-counting when Retell redelivers
+    # call_ended (webhooks are retried on timeout).
+    usage_metered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

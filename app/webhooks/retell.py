@@ -439,11 +439,14 @@ async def _handle_call_ended(payload: dict) -> dict:
 
         # Billing metering (Phase D): a completed call adds its minutes to the
         # practice's current-period usage. Only count answered calls (a 'missed'
-        # call consumed no agent minutes). Best-effort — never fail the webhook
-        # over metering, but log loudly so under-billing is visible.
-        if call_status == "completed":
+        # call consumed no agent minutes). METER ONCE — Retell redelivers
+        # call_ended on timeout, so we stamp usage_metered_at and skip if already
+        # set (else a retry would double-count minutes). Best-effort — never fail
+        # the webhook over metering, but log loudly so under-billing is visible.
+        if call_status == "completed" and call.usage_metered_at is None:
             try:
                 await record_call_usage(session, call.practice_id, duration_seconds)
+                call.usage_metered_at = ended_at
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "metering failed for call %s (practice %s)",
@@ -567,6 +570,31 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
 
         # Set tenant context so RLS allows patient inserts.
         await set_tenant(session, practice_id)
+
+        # Idempotency: a redelivered book_appointment must NOT create a second
+        # booking. If this call already produced a confirmed booking, return it.
+        if call_internal_id is not None:
+            existing = (
+                await session.execute(
+                    select(Booking).where(
+                        Booking.source_call_id == call_internal_id,
+                        Booking.status == "confirmed",
+                    )
+                )
+            ).scalars().first()
+            if existing is not None:
+                ts = existing.appointment_at
+                return {
+                    "booked": True,
+                    "appointment": {
+                        "date": ts.date().isoformat(),
+                        "time": ts.strftime("%H:%M"),
+                        "provider": existing.provider_name or "Dr. Smith",
+                        "procedure": existing.procedure_type or procedure,
+                    },
+                    "message": "That appointment is already booked.",
+                    "available_slots": [],
+                }
 
         # Practice name for the confirmation SMS (sent after commit).
         if resolved_practice is not None:

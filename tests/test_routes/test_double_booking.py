@@ -39,12 +39,14 @@ async def test_no_two_confirmed_bookings_same_slot(client, db_session):
     practice, _ = await seed_practice(
         db_session, name="DoubleBook Dental", clerk_org_id="org_db1", clerk_user_id="user_db1"
     )
-    r1 = await _book(client, phone=_PHONE_A)
+    # Two DIFFERENT callers (distinct call_ids) competing for the same day — same
+    # call_id would now be idempotent (one booking), which isn't what we're testing.
+    r1 = await _book(client, phone=_PHONE_A, call_id="db-call-a")
     assert r1.status_code == 200 and r1.json()["booked"] is True
     first_slot = r1.json()["appointment"]["time"]
 
     # Second patient, same day — must NOT land on the same provider+time as #1.
-    r2 = await _book(client, phone=_PHONE_B)
+    r2 = await _book(client, phone=_PHONE_B, call_id="db-call-b")
     assert r2.status_code == 200
     body2 = r2.json()
 

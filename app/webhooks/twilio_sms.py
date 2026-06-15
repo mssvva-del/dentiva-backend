@@ -32,11 +32,13 @@ import uuid
 from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, Request, Response
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import app.db as _app_db
 from app.config import get_settings
 from app.db import set_tenant
 from app.models.audit_log import AuditLog
+from app.models.processed_webhook_event import ProcessedWebhookEvent
 from app.services.sms import send_cancellation_notice, send_waitlist_opening
 from app.webhooks.retell import (
     _backfill_from_waitlist,
@@ -134,6 +136,15 @@ async def twilio_sms_webhook(request: Request) -> Response:
             logger.warning("twilio-sms: bad signature — ignoring")
             return _twiml()
 
+    # Idempotency: Twilio redelivers on timeout. Atomically "claim" this MessageSid
+    # — if it was already claimed, skip re-processing (else a CONFIRM/CANCEL could
+    # double-apply). Claim-first is safe because _handle_sms is fail-safe (always
+    # 200), so Twilio only retries on timeout, not on a handled error.
+    sid = params.get("MessageSid", "")
+    if sid and await _already_claimed(sid):
+        logger.info("twilio-sms: duplicate delivery sid=%s — skipping", sid)
+        return _twiml()
+
     intent = _classify(body)
     logger.info("twilio-sms: from=…%s intent=%s", from_number[-4:] if from_number else "??", intent)
 
@@ -142,6 +153,22 @@ async def twilio_sms_webhook(request: Request) -> Response:
     except Exception:  # noqa: BLE001 — never retry-storm Twilio
         logger.exception("twilio-sms: handler failed")
         return _twiml()
+
+
+async def _already_claimed(sid: str) -> bool:
+    """Record this MessageSid; return True if it was ALREADY recorded (duplicate).
+
+    INSERT … ON CONFLICT DO NOTHING is atomic: the first delivery inserts a row
+    (rowcount 1 → not a duplicate), a redelivery conflicts (rowcount 0 → duplicate).
+    """
+    async with _app_db.async_session_factory() as session:
+        result = await session.execute(
+            pg_insert(ProcessedWebhookEvent)
+            .values(id=uuid.uuid4(), source="twilio_sms", event_id=sid)
+            .on_conflict_do_nothing(index_elements=["source", "event_id"])
+        )
+        await session.commit()
+    return result.rowcount == 0
 
 
 async def _handle_sms(from_number: str, intent: str) -> Response:
