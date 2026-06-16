@@ -197,6 +197,11 @@ class Settings(BaseSettings):
     maintenance_interval_seconds: int = 86_400  # once a day
     processed_event_ttl_days: int = 90
 
+    # Sentry error monitoring. Empty DSN → disabled (dev/tests). PII is sent only
+    # via our scrubbed before_send (send_default_pii stays False — HIPAA).
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = 0.0  # perf tracing off until we need it
+
     @model_validator(mode="after")
     def _guard_production(self) -> "Settings":
         """Fail-safe: never let dangerous dev flags run in production."""

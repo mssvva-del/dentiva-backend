@@ -18,6 +18,7 @@ from app.api import retell_llm_relay
 from app.config import get_settings
 from app.logging_config import setup_logging
 from app.middleware.request_context import RequestContextMiddleware
+from app.observability.sentry import init_sentry
 from app.routes import (
     admin,
     billing,
@@ -40,6 +41,8 @@ from app.webhooks import clerk, retell, stripe, twilio_sms
 
 _log_settings = get_settings()
 setup_logging(_log_settings.log_level, json_logs=_log_settings.json_logs)
+# Initialise Sentry BEFORE the app/middleware so its integrations hook in.
+init_sentry(_log_settings)
 logger = logging.getLogger(__name__)
 
 
