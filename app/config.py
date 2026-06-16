@@ -190,6 +190,13 @@ class Settings(BaseSettings):
     http_retry_attempts: int = 2  # total tries for idempotent calls (1 = no retry)
     http_retry_base_delay: float = 0.2  # seconds; exponential backoff base
 
+    # Maintenance: prune the webhook-dedup ledger. The idempotency window only
+    # needs to outlast a provider's redelivery horizon (hours), so 90 days is a
+    # very safe TTL that keeps the table small. Runs daily; on by default (cheap).
+    maintenance_enabled: bool = True
+    maintenance_interval_seconds: int = 86_400  # once a day
+    processed_event_ttl_days: int = 90
+
     @model_validator(mode="after")
     def _guard_production(self) -> "Settings":
         """Fail-safe: never let dangerous dev flags run in production."""

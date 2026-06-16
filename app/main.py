@@ -34,6 +34,7 @@ from app.routes import (
     waitlist,
 )
 from app.services.call_sync import call_sync_loop
+from app.services.maintenance import maintenance_loop
 from app.services.reminders import reminder_loop
 from app.webhooks import clerk, retell, stripe, twilio_sms
 
@@ -56,6 +57,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.reminders_enabled:
         tasks.append(asyncio.create_task(reminder_loop()))
         logger.info("Appointment-reminder background task started")
+
+    if settings.maintenance_enabled:
+        tasks.append(asyncio.create_task(maintenance_loop()))
+        logger.info("Maintenance background task started")
 
     try:
         yield
