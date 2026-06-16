@@ -1,0 +1,88 @@
+name: backend-ci
+
+# Audit: the repo had no CI. This runs lint + the full test suite (incl. the RLS
+# isolation tests) on every push/PR, plus a tenant-isolation gate that fails if a
+# required tenant table ever loses DB-level RLS.
+on:
+  push:
+    branches: [feat/platform-iter1, main]
+  pull_request:
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The roles/DB names conftest.py and Alembic expect. dentiva = superuser
+      # (bypasses RLS, runs migrations + builds the test schema); dentiva_app =
+      # the RLS-enforced role the app connects as.
+      DATABASE_URL: postgresql+asyncpg://dentiva_app:dentiva_app@localhost:5432/dentiva
+      DATABASE_URL_SYNC: postgresql+psycopg2://dentiva:dentiva@localhost:5432/dentiva
+      AUTH_DEV_BYPASS: "true"
+      # Test-only Fernet key — NOT a secret (encrypts throwaway test PII only).
+      ENCRYPTION_KEY: "0zYl473AKy_jkO-pqSBSbmcHNdCFyBX6INNyIRXwR4U="
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Bootstrap DB roles (match conftest expectations)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c "CREATE ROLE dentiva LOGIN SUPERUSER PASSWORD 'dentiva';"
+          psql -h localhost -U postgres -c "CREATE DATABASE dentiva OWNER dentiva;"
+          psql -h localhost -U postgres -c "CREATE ROLE dentiva_app LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'dentiva_app';"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Tests (pytest)
+        run: pytest -q
+
+      - name: Tenant-isolation gate (RLS coverage at HEAD)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          GATE_DB=dentiva_rlsgate
+          psql -h localhost -U postgres -c "CREATE DATABASE ${GATE_DB} OWNER dentiva;"
+          # Run the REAL migrations on a throwaway DB. Alembic derives its sync URL
+          # from DATABASE_URL (see Settings._normalize_db_urls), so we point that at
+          # the superuser role 'dentiva' — migrations need CREATE on schema public.
+          DATABASE_URL="postgresql+asyncpg://dentiva:dentiva@localhost:5432/${GATE_DB}" \
+            alembic upgrade head
+          # The gate script reads DATABASE_URL_SYNC from the raw env directly.
+          DATABASE_URL_SYNC="postgresql+psycopg2://dentiva:dentiva@localhost:5432/${GATE_DB}" \
+            python scripts/check_rls_coverage.py
