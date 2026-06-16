@@ -33,6 +33,7 @@ from app.adapters.open_dental.models import (
     PMSProvider,
 )
 from app.config import get_settings
+from app.utils.resilience import make_timeout, retry_async
 
 logger = logging.getLogger("dentiva.pms.open_dental")
 
@@ -71,7 +72,7 @@ class OpenDentalClient(PMSAdapter):
         customer_key: str | None = None,
         base_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
-        timeout: float = 15.0,
+        timeout: httpx.Timeout | float | None = None,
     ) -> None:
         s = get_settings()
         self._dev_key = developer_key or s.open_dental_dev_key
@@ -79,7 +80,11 @@ class OpenDentalClient(PMSAdapter):
         self._base_url = (base_url or s.open_dental_api_url).rstrip("/")
         # Injectable transport so tests stub responses with httpx.MockTransport.
         self._transport = transport
-        self._timeout = timeout
+        # Split connect/read timeout: a dead host fails fast, a slow-but-alive one
+        # gets the longer read budget.
+        self._timeout = timeout or make_timeout(s.http_connect_timeout, s.http_read_timeout)
+        self._retry_attempts = s.http_retry_attempts
+        self._retry_base_delay = s.http_retry_base_delay
 
     # ── low-level request ────────────────────────────────────────────────────
     def _auth_header(self) -> dict[str, str]:
@@ -87,6 +92,20 @@ class OpenDentalClient(PMSAdapter):
         return {"Authorization": f"ODFHIR {self._dev_key}/{self._customer_key}"}
 
     async def _request(self, method: str, path: str, **kw) -> httpx.Response:
+        """Issue a request. Idempotent reads (GET) are retried on transient
+        failure (PMSUnavailable); writes are single-shot — a retried POST could
+        create a duplicate appointment, so we never auto-retry them."""
+        if method.upper() == "GET" and self._retry_attempts > 1:
+            return await retry_async(
+                lambda: self._request_once(method, path, **kw),
+                attempts=self._retry_attempts,
+                base_delay=self._retry_base_delay,
+                retry_on=PMSUnavailable,
+                label=f"Open Dental {method} {path}",
+            )
+        return await self._request_once(method, path, **kw)
+
+    async def _request_once(self, method: str, path: str, **kw) -> httpx.Response:
         # Defense-in-depth against cross-tenant calls: never hit Open Dental with
         # a missing key. A blank customer key would otherwise mean "use whatever
         # the env default points at" — i.e. potentially ANOTHER clinic's office.

@@ -211,3 +211,48 @@ def test_factory_per_practice_open_dental_requires_customer_key():
         get_pms_adapter(pms_system="open_dental", customer_key=None)
     # mock path is always fine.
     assert get_pms_adapter(pms_system="mock") is not None
+
+
+# ── resilience: retry idempotent reads, never retry writes (Addition 3) ───────
+async def test_get_retried_on_transient_then_succeeds():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503)  # transient -> PMSUnavailable -> retry
+        return httpx.Response(200, json={"PatNum": 1, "FName": "A", "LName": "B"})
+
+    c = _client(handler)
+    c._retry_base_delay = 0  # no real sleep in tests
+    patient = await c.get_patient("1")
+    assert patient is not None
+    assert calls["n"] == 2  # retried once, second try won
+
+
+async def test_get_4xx_not_retried():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(404)  # 4xx -> PMSError, NOT a transient
+
+    c = _client(handler)
+    c._retry_base_delay = 0
+    assert await c.get_patient("1") is None
+    assert calls["n"] == 1  # PMSError is not in retry_on
+
+
+async def test_post_write_not_retried_on_transient():
+    """A retried POST could double-book — writes must be single-shot."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503)
+
+    c = _client(handler)
+    c._retry_base_delay = 0
+    with pytest.raises(PMSUnavailable):
+        await c.create_patient("A", "B", "+15551234567")
+    assert calls["n"] == 1  # no retry on a write

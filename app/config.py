@@ -182,6 +182,14 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 240  # general endpoints, per client IP
     rate_limit_webhook_per_minute: int = 600  # webhooks (a single call bursts many)
 
+    # Outbound HTTP resilience (audit Addition 3). Connect fails fast; read gets
+    # the longer budget. Retry applies ONLY to idempotent reads (GET) — writes are
+    # never auto-retried (a retried POST could double-book).
+    http_connect_timeout: float = 5.0
+    http_read_timeout: float = 15.0
+    http_retry_attempts: int = 2  # total tries for idempotent calls (1 = no retry)
+    http_retry_base_delay: float = 0.2  # seconds; exponential backoff base
+
     @model_validator(mode="after")
     def _guard_production(self) -> "Settings":
         """Fail-safe: never let dangerous dev flags run in production."""
