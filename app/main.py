@@ -16,6 +16,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import retell_llm_relay
 from app.config import get_settings
+from app.logging_config import setup_logging
+from app.middleware.request_context import RequestContextMiddleware
 from app.routes import (
     admin,
     billing,
@@ -35,7 +37,8 @@ from app.services.call_sync import call_sync_loop
 from app.services.reminders import reminder_loop
 from app.webhooks import clerk, retell, stripe, twilio_sms
 
-logging.basicConfig(level=get_settings().log_level.upper())
+_log_settings = get_settings()
+setup_logging(_log_settings.log_level, json_logs=_log_settings.json_logs)
 logger = logging.getLogger(__name__)
 
 
@@ -94,6 +97,11 @@ if _rl_settings.rate_limit_enabled:
     logger.info("Rate limiting enabled (%s/min, webhooks %s/min)",
                 _rl_settings.rate_limit_per_minute,
                 _rl_settings.rate_limit_webhook_per_minute)
+
+# Outermost middleware: assign request_id before anything else runs, so every
+# log line (including rate-limit rejections) is correlated and the response
+# always carries X-Request-ID. Added last → wraps the whole stack.
+app.add_middleware(RequestContextMiddleware)
 
 # Map HTTP status -> stable error code for the unified envelope.
 _STATUS_CODE_MAP = {

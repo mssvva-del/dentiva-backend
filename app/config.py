@@ -151,6 +151,10 @@ class Settings(BaseSettings):
     # Misc
     environment: str = "development"
     log_level: str = "INFO"
+    # Emit one-JSON-object-per-line logs (request_id + practice_id + PHI scrub).
+    # Off by default so local dev keeps human-readable logs; turn on in prod for
+    # machine-parseable, correlatable logs (and as the substrate Sentry plugs into).
+    json_logs: bool = False
 
     # Auth bypass — ONLY for local tests/dev when no Clerk instance is reachable.
     # Never enable in staging/production.

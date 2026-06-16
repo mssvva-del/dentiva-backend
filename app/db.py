@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
+from app.logging_config import practice_id_var
 
 
 class Base(DeclarativeBase):
@@ -43,6 +44,9 @@ async def set_tenant(session: AsyncSession, practice_id: UUID) -> None:
     transaction-local setting would be lost between them. The setting is cleared
     when the connection is returned to the pool / closed.
     """
+    # Mirror the bound tenant into the log context so every subsequent log line
+    # for this request is tagged with the practice (non-PHI id only).
+    practice_id_var.set(str(practice_id))
     await session.execute(
         text("SELECT set_config('app.current_practice_id', :pid, false)"),
         {"pid": str(practice_id)},
