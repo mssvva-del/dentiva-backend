@@ -23,6 +23,7 @@ Fail-safe: any error returns an empty TwiML 200 so Twilio doesn't retry-storm.
 """
 
 from __future__ import annotations
+from app.api.dependencies.twilio_auth import verify_twilio_signature
 
 import base64
 import hashlib
