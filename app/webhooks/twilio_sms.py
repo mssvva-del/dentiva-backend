@@ -1,3 +1,4 @@
+from app.api.dependencies.twilio_auth import verify_twilio_signature
 """Inbound Twilio SMS webhook — two-way texting.
 
 Patients reply to our outbound texts (reminders, confirmations) and we act on

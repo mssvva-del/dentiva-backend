@@ -14,7 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import retell_llm_relay
 from app.config import get_settings
 from app.logging_config import setup_logging
 from app.middleware.request_context import RequestContextMiddleware
@@ -75,7 +74,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 await task
 
 
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
+from app.security import verify_security_config
+
 app = FastAPI(title="Dentiva Backend", version="0.1.0", lifespan=lifespan)
+# ── Rate limiting ────────────────────────────────────────────────
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+# ─────────────────────────────────────────────────────────────────
+
 
 # CORS — allow local dev and any Vercel deployment (including preview URLs).
 app.add_middleware(
@@ -194,9 +205,7 @@ app.include_router(retell.router)
 app.include_router(twilio_sms.router)
 app.include_router(clerk.router)
 app.include_router(stripe.router)
-# Groq custom-LLM relay (/ws/retell-llm) — NOT used by the live agent (native
 # retell-llm). Mounted only when explicitly enabled, so an unauthenticated WS
 # isn't exposed by default (Security Sprint M7).
 if get_settings().enable_llm_relay:
-    app.include_router(retell_llm_relay.router)
     logger.info("Groq LLM relay mounted (ENABLE_LLM_RELAY=true)")
