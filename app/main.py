@@ -51,9 +51,9 @@ logger = logging.getLogger(__name__)
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    verify_security_config(settings)
     """Start/stop background workers alongside the app."""
     settings = get_settings()
+    verify_security_config(settings)
     tasks: list[asyncio.Task] = []
     if settings.call_sync_enabled and settings.retell_api_key:
         tasks.append(asyncio.create_task(call_sync_loop()))
