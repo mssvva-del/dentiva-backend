@@ -12,10 +12,13 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
 from app.logging_config import setup_logging
+from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.request_context import RequestContextMiddleware
 from app.observability.sentry import init_sentry
 from app.routes import (
@@ -74,11 +77,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 await task
 
 
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
-from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
-from app.security import verify_security_config
+
 
 app = FastAPI(title="Dentiva Backend", version="0.1.0", lifespan=lifespan)
 # ── Rate limiting ────────────────────────────────────────────────

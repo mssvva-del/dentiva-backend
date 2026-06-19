@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import logging
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import Depends, HTTPException, Request
 
@@ -114,7 +114,7 @@ async def verify_twilio_signature(
     # ------------------------------------------------------------------
     # Retrieve required config values.
     # ------------------------------------------------------------------
-    auth_token: Optional[str] = getattr(settings, "twilio_auth_token", None)
+    auth_token: str | None = getattr(settings, "twilio_auth_token", None)
     if not auth_token:
         # Should not happen when validate=True, but guard defensively.
         logger.error(
@@ -135,7 +135,7 @@ async def verify_twilio_signature(
     # ------------------------------------------------------------------
     # Retrieve the Twilio signature from the request headers.
     # ------------------------------------------------------------------
-    twilio_sig: Optional[str] = request.headers.get(_TWILIO_SIGNATURE_HEADER)
+    twilio_sig: str | None = request.headers.get(_TWILIO_SIGNATURE_HEADER)
     if not twilio_sig:
         _log_failure(request, reason="missing_header")
         raise HTTPException(
@@ -155,7 +155,7 @@ async def verify_twilio_signature(
     # signature computation.  An empty dict is fine for GET requests or
     # JSON bodies (Twilio's status callbacks are always form-encoded).
     # ------------------------------------------------------------------
-    post_params: Dict[str, str] = {}
+    post_params: dict[str, str] = {}
     content_type: str = request.headers.get("content-type", "")
     if "application/x-www-form-urlencoded" in content_type and body:
         post_params = dict(urllib.parse.parse_qsl(body.decode("utf-8", errors="replace")))
@@ -196,8 +196,8 @@ def _reconstruct_public_url(request: Request) -> str:
     scheme and host from ``X-Forwarded-Proto`` / ``X-Forwarded-Host`` when
     those headers are present.
     """
-    forwarded_proto: Optional[str] = request.headers.get("X-Forwarded-Proto")
-    forwarded_host: Optional[str] = request.headers.get("X-Forwarded-Host")
+    forwarded_proto: str | None = request.headers.get("X-Forwarded-Proto")
+    forwarded_host: str | None = request.headers.get("X-Forwarded-Host")
 
     url = request.url
     scheme: str = forwarded_proto.split(",")[0].strip() if forwarded_proto else url.scheme
@@ -218,7 +218,7 @@ def _client_ip(request: Request) -> str:
     We log the IP for forensic purposes but never log the request body to
     protect PHI (Twilio form payloads often contain phone numbers).
     """
-    forwarded_for: Optional[str] = request.headers.get("X-Forwarded-For")
+    forwarded_for: str | None = request.headers.get("X-Forwarded-For")
     if forwarded_for:
         return forwarded_for.split(",")[0].strip()
     client = request.client

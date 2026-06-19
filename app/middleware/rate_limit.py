@@ -26,7 +26,6 @@ because SlowAPI reads the request object to resolve the rate-limit key.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
@@ -42,7 +41,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _extract_clerk_user_id(request: Request) -> Optional[str]:
+def _extract_clerk_user_id(request: Request) -> str | None:
     """
     Pull the Clerk `sub` claim from an already-decoded JWT payload.
 
@@ -177,7 +176,7 @@ def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> Res
         app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
     """
     limit_str = getattr(exc, "limit", None)
-    retry_after: Optional[str] = None
+    retry_after: str | None = None
 
     # SlowAPI attaches response headers to the exception; surface Retry-After.
     if hasattr(exc, "retry_after"):

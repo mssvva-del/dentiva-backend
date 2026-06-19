@@ -1,4 +1,3 @@
-from app.security import check_emergency_lock
 """
 Retell webhook signature validation dependency.
 
@@ -27,7 +26,6 @@ still call ``await request.body()`` or ``await request.json()`` normally.
 
 Usage
 -----
-    from app.api.dependencies.retell_auth import verify_retell_signature
 
     @router.post("/webhooks/retell")
     async def retell_webhook(
@@ -43,9 +41,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
-from typing import Optional
 
-from app.api.dependencies.retell_auth import verify_retell_signature
 from fastapi import Depends, HTTPException, Request
 
 # ---------------------------------------------------------------------------
@@ -96,7 +92,7 @@ async def verify_retell_signature(
     """
     global _dev_mode_warned  # noqa: PLW0603
 
-    secret: Optional[str] = getattr(settings, "retell_webhook_secret", None)
+    secret: str | None = getattr(settings, "retell_webhook_secret", None)
 
     # ------------------------------------------------------------------
     # Dev / backward-compat mode: skip validation when secret is absent.
@@ -122,7 +118,7 @@ async def verify_retell_signature(
     # ------------------------------------------------------------------
     # Retrieve signature from header.
     # ------------------------------------------------------------------
-    received_sig: Optional[str] = request.headers.get(_RETELL_SIGNATURE_HEADER)
+    received_sig: str | None = request.headers.get(_RETELL_SIGNATURE_HEADER)
     if not received_sig:
         _log_failure(request, reason="missing_header")
         raise HTTPException(
@@ -163,7 +159,7 @@ def _client_ip(request: Request) -> str:
     falls back to the direct connection address.  We log the IP for
     forensics but never log the request body to protect PHI.
     """
-    forwarded_for: Optional[str] = request.headers.get("X-Forwarded-For")
+    forwarded_for: str | None = request.headers.get("X-Forwarded-For")
     if forwarded_for:
         # X-Forwarded-For may contain a comma-separated chain; the leftmost
         # entry is the original client IP.
