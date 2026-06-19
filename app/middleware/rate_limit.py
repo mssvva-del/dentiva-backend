@@ -94,12 +94,10 @@ def _key_for_ip(request: Request) -> str:
 _storage = MemoryStorage()
 
 limiter = Limiter(
-    key_func=_key_for_authenticated_endpoint,  # default key for all endpoints
+    key_func=_key_for_authenticated_endpoint,
     default_limits=["120/minute"],
-    storage_uri=None,           # use the storage kwarg instead
-    storage=_storage,           # type: ignore[call-arg]
-    headers_enabled=True,       # emit X-RateLimit-* response headers
-    swallow_errors=False,       # surface errors rather than silently pass
+    headers_enabled=True,
+    swallow_errors=False,
     enabled=True,
 )
 

@@ -6,6 +6,7 @@ Security model
 Twilio signs every incoming HTTP request with an HMAC-SHA1 signature computed
 over the full request URL plus the sorted POST parameters:
 
+    from twilio.request_validator import RequestValidator  # lazy import
     validator = RequestValidator(auth_token)
     valid = validator.validate(url, post_params, X-Twilio-Signature)
 
@@ -53,14 +54,6 @@ import urllib.parse
 from typing import Any, Dict, Optional
 
 from fastapi import Depends, HTTPException, Request
-
-try:
-    from twilio.request_validator import RequestValidator  # type: ignore[import]
-except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "The 'twilio' package is required for Twilio signature validation. "
-        "Add it to your requirements: pip install twilio"
-    ) from exc
 
 try:
     from app.config import Settings, get_settings  # type: ignore[import]
@@ -172,6 +165,7 @@ async def verify_twilio_signature(
     # This internally computes HMAC-SHA1 over the URL + sorted params,
     # base64-encodes the digest, and does a constant-time comparison.
     # ------------------------------------------------------------------
+    from twilio.request_validator import RequestValidator  # lazy import
     validator = RequestValidator(auth_token)
     is_valid: bool = validator.validate(
         uri=public_url,

@@ -1,4 +1,3 @@
-from app.api.dependencies.twilio_auth import verify_twilio_signature
 """Inbound Twilio SMS webhook — two-way texting.
 
 Patients reply to our outbound texts (reminders, confirmations) and we act on
@@ -24,6 +23,7 @@ Fail-safe: any error returns an empty TwiML 200 so Twilio doesn't retry-storm.
 """
 
 from __future__ import annotations
+from app.api.dependencies.twilio_auth import verify_twilio_signature
 
 import base64
 import hashlib
