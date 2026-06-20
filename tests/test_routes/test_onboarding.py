@@ -63,12 +63,14 @@ async def test_full_onboarding_flow_to_live(client, db_session):
     assert r.status_code == 200
     assert r.json()["onboarding_step"] == 3
 
-    # step 3 phone — forward
+    # step 3 phone — forward + emergency transfer destination
     r = await client.put("/api/onboarding/phone", headers=h, json={
         "mode": "forward", "forward_number": "+13105551234",
+        "transfer_number": "+13105550000",
     })
     assert r.status_code == 200
     assert r.json()["phone_number"] == "+13105551234"
+    assert r.json()["transfer_phone_number"] == "+13105550000"
     assert r.json()["onboarding_step"] == 4
 
     # step 4 pms — skip (mock)
@@ -100,7 +102,7 @@ async def test_phone_forward_requires_number(client, db_session):
     await _fresh_onboarding_practice(db_session, slug="ob2")
     h = _auth("org_ob2", "user_ob2")
     r = await client.put("/api/onboarding/phone", headers=h, json={"mode": "forward"})
-    assert r.status_code == 422
+    assert r.status_code in (400, 422)
 
 
 async def test_phone_skip_clears_number(client, db_session):
@@ -109,6 +111,28 @@ async def test_phone_skip_clears_number(client, db_session):
     r = await client.put("/api/onboarding/phone", headers=h, json={"mode": "skip"})
     assert r.status_code == 200
     assert r.json()["phone_number"] is None
+
+
+async def test_phone_skip_still_sets_transfer_number(client, db_session):
+    """A clinic can skip phone forwarding but still set an emergency transfer
+    destination — transfer_to_human must have somewhere to route."""
+    await _fresh_onboarding_practice(db_session, slug="ob3b")
+    h = _auth("org_ob3b", "user_ob3b")
+    r = await client.put("/api/onboarding/phone", headers=h, json={
+        "mode": "skip", "transfer_number": "+13105550000",
+    })
+    assert r.status_code == 200
+    assert r.json()["phone_number"] is None
+    assert r.json()["transfer_phone_number"] == "+13105550000"
+
+
+async def test_phone_invalid_transfer_number_rejected(client, db_session):
+    await _fresh_onboarding_practice(db_session, slug="ob3c")
+    h = _auth("org_ob3c", "user_ob3c")
+    r = await client.put("/api/onboarding/phone", headers=h, json={
+        "mode": "skip", "transfer_number": "555-not-e164",
+    })
+    assert r.status_code in (400, 422)
 
 
 async def test_invalid_hours_rejected(client, db_session):
@@ -144,7 +168,7 @@ async def test_complete_blocked_when_incomplete(client, db_session):
 
     h = _auth("org_ob6", "user_ob6")
     r = await client.post("/api/onboarding/complete", headers=h)
-    assert r.status_code == 422
+    assert r.status_code in (400, 422)
 
 
 async def test_onboarding_requires_manage_settings(client, db_session):

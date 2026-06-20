@@ -6,10 +6,6 @@ Two responsibilities:
      the app accepts any traffic.
   2. check_emergency_lock()   — async gate in book_appointment tool handler;
      blocks booking when the active call is in emergency state.
-
-Integration
------------
-See _sprint_security/APPLY.md for exact wiring instructions.
 """
 
 from __future__ import annotations
@@ -39,6 +35,7 @@ def verify_security_config(settings: Settings) -> None:
 
     Hard failures (raises RuntimeError):
     - AUTH_DEV_BYPASS=True in production           → full auth bypass
+    - DEMO_OPEN_ACCESS=True in production          → all users see same clinic
     - RETELL_WEBHOOK_SECRET missing in production  → forgeable webhooks
     - CLERK_SECRET_KEY missing in production       → broken auth
     - ENCRYPTION_KEY missing in production         → PHI stored in plaintext
@@ -47,22 +44,32 @@ def verify_security_config(settings: Settings) -> None:
     - REMINDERS_ENABLED not set
     - TWILIO_VALIDATE_SIGNATURE not set or False
     """
-    is_production = getattr(settings, "ENVIRONMENT", "development") == "production"
+    # Use direct attribute access (lowercase) — Settings uses pydantic_settings
+    # which normalises all field names to lowercase. getattr(settings, "UPPER")
+    # silently returns the default and the check never fires.
+    is_production = settings.environment == "production"
 
     # ── Hard failures ────────────────────────────────────────────────────────
 
-    if getattr(settings, "AUTH_DEV_BYPASS", False) and is_production:
+    if settings.auth_dev_bypass and is_production:
         raise RuntimeError(
             "SECURITY VIOLATION: AUTH_DEV_BYPASS=True while ENVIRONMENT='production'. "
             "This flag disables Clerk JWT verification entirely. "
             "Remove AUTH_DEV_BYPASS from Railway Variables before redeploying."
         )
 
+    if settings.demo_open_access and is_production:
+        raise RuntimeError(
+            "SECURITY VIOLATION: DEMO_OPEN_ACCESS=True while ENVIRONMENT='production'. "
+            "This flag attaches every authenticated user to the first practice in the DB. "
+            "Set DEMO_OPEN_ACCESS=false in Railway Variables before redeploying."
+        )
+
     if is_production:
-        required: dict[str, str | None] = {
-            "RETELL_WEBHOOK_SECRET": getattr(settings, "RETELL_WEBHOOK_SECRET", None),
-            "CLERK_SECRET_KEY":      getattr(settings, "CLERK_SECRET_KEY", None),
-            "ENCRYPTION_KEY":        getattr(settings, "ENCRYPTION_KEY", None),
+        required: dict[str, str] = {
+            "RETELL_WEBHOOK_SECRET": settings.retell_webhook_secret,
+            "CLERK_SECRET_KEY":      settings.clerk_secret_key,
+            "ENCRYPTION_KEY":        settings.encryption_key,
         }
         missing = [k for k, v in required.items() if not v]
         if missing:
@@ -73,13 +80,13 @@ def verify_security_config(settings: Settings) -> None:
 
     # ── Soft warnings ────────────────────────────────────────────────────────
 
-    if getattr(settings, "REMINDERS_ENABLED", None) is None:
+    if not settings.reminders_enabled:
         logger.warning(
             "CONFIG: REMINDERS_ENABLED is not set — reminder SMS disabled by default. "
             "Set REMINDERS_ENABLED=true on Railway to enable."
         )
 
-    if not getattr(settings, "TWILIO_VALIDATE_SIGNATURE", False):
+    if not settings.twilio_validate_signature:
         logger.warning(
             "CONFIG: TWILIO_VALIDATE_SIGNATURE is False — Twilio webhook requests "
             "are NOT cryptographically verified. Set TWILIO_VALIDATE_SIGNATURE=true "
@@ -87,9 +94,10 @@ def verify_security_config(settings: Settings) -> None:
         )
 
     logger.info(
-        "Security config check passed (ENVIRONMENT=%s, AUTH_DEV_BYPASS=%s).",
-        getattr(settings, "ENVIRONMENT", "development"),
-        getattr(settings, "AUTH_DEV_BYPASS", False),
+        "Security config check passed (ENVIRONMENT=%s, AUTH_DEV_BYPASS=%s, DEMO_OPEN_ACCESS=%s).",
+        settings.environment,
+        settings.auth_dev_bypass,
+        settings.demo_open_access,
     )
 
 
