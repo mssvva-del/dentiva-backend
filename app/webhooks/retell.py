@@ -157,6 +157,22 @@ def _contains_emergency_keywords(args: dict) -> bool:
 
 
 async def _resolve_practice(agent_id: str | None) -> Practice | None:
+    """Resolve which practice a call belongs to from its Retell ``agent_id``.
+
+    Routing rule (HIPAA-safe — never silently attribute a call to the wrong
+    clinic):
+      * ``agent_id`` matches a ``practices.retell_agent_id`` → that practice.
+      * ``agent_id`` is None or unmatched → fall back to the only practice in
+        the DB ONLY when exactly one exists (single-tenant / weekend mode).
+        With 2+ practices the tenant is ambiguous, so we REFUSE (return None)
+        and log critically rather than leak one clinic's call into another's
+        records.
+
+    The previous implementation always fell back to ``SELECT ... LIMIT 1``,
+    which once a second clinic onboards routes every unmatched call to whichever
+    practice sorts first — a cross-tenant PHI leak. Closing that requires each
+    practice to carry its own ``retell_agent_id``.
+    """
     async with _app_db.async_session_factory() as session:
         if agent_id:
             result = await session.execute(
@@ -165,9 +181,22 @@ async def _resolve_practice(agent_id: str | None) -> Practice | None:
             practice = result.scalar_one_or_none()
             if practice:
                 return practice
-        # Fallback: use the first practice in the DB (single-practice weekend mode).
-        result = await session.execute(select(Practice).limit(1))
-        return result.scalar_one_or_none()
+
+        # No match: only safe to guess in the unambiguous single-practice case.
+        rows = (await session.execute(select(Practice).limit(2))).scalars().all()
+        if len(rows) == 1:
+            return rows[0]
+        if not rows:
+            return None
+        logger.critical(
+            "resolve_practice: REFUSING to route — agent_id=%r matched no "
+            "practice and %d practices exist. Set practices.retell_agent_id for "
+            "each clinic (its Retell agent id). Returning None to avoid a "
+            "cross-tenant data leak.",
+            agent_id,
+            len(rows),
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------

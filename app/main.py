@@ -12,7 +12,6 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.security import verify_security_config
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -37,6 +36,7 @@ from app.routes import (
     voice,
     waitlist,
 )
+from app.security import verify_security_config
 from app.services.call_sync import call_sync_loop
 from app.services.maintenance import maintenance_loop
 from app.services.reminders import reminder_loop
