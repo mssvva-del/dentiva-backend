@@ -91,6 +91,7 @@ def _state(practice: Practice) -> OnboardingState:
         timezone=practice.timezone,
         business_hours=practice.business_hours,
         phone_number=practice.phone_number,
+        transfer_phone_number=practice.transfer_phone_number,
         pms_system=practice.pms_system,
         languages_enabled=list(practice.languages_enabled),
         agent_settings=practice.agent_settings,
@@ -167,9 +168,16 @@ async def step_phone(
         p.phone_number = payload.forward_number
     else:
         p.phone_number = None
+    # Emergency/live-handoff transfer destination. Independent of mode: a clinic
+    # may skip phone forwarding but still want transfer_to_human to reach a real
+    # person. Only overwrite when explicitly provided so re-saving the step
+    # without it doesn't wipe a previously set number.
+    if payload.transfer_number is not None:
+        p.transfer_phone_number = payload.transfer_number
     _advance(p, 3)
     await _audit(db, p, user, "onboarding_step",
-                 {"step": 3, "name": "phone", "mode": payload.mode})
+                 {"step": 3, "name": "phone", "mode": payload.mode,
+                  "transfer_set": payload.transfer_number is not None})
     await db.commit()
     await db.refresh(p)
     return _state(p)

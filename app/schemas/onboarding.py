@@ -70,14 +70,19 @@ class PhoneStep(BaseModel):
     # No real number provisioning yet.
     mode: Literal["forward", "skip"]
     forward_number: str | None = None
+    # Where transfer_to_human routes an emergency/live handoff. Optional and
+    # independent of mode; falls back to phone_number on the backend when unset.
+    # Collected here so a clinic going live has a working transfer destination
+    # instead of a NULL that silently breaks the emergency workflow.
+    transfer_number: str | None = None
 
-    @field_validator("forward_number")
+    @field_validator("forward_number", "transfer_number")
     @classmethod
     def _valid_number(cls, v: str | None) -> str | None:
         if v is None or v == "":
             return None
         if not _E164_RE.match(v):
-            raise ValueError("forward_number must be E.164, e.g. +13105551234")
+            raise ValueError("number must be E.164, e.g. +13105551234")
         return v
 
 
@@ -122,6 +127,7 @@ class OnboardingState(BaseModel):
     timezone: str
     business_hours: dict
     phone_number: str | None
+    transfer_phone_number: str | None = None
     pms_system: str
     languages_enabled: list[str]
     agent_settings: dict | None
