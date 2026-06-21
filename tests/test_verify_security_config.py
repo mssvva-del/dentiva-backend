@@ -17,6 +17,7 @@ from app.security import verify_security_config
 def _prod_settings(**overrides) -> Settings:
     base = dict(
         environment="production",
+        auth_dev_bypass=False,
         retell_webhook_secret="whsec_test",
         clerk_secret_key="sk_test",
         encryption_key="enc_test",
