@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import async_session_factory, set_tenant
 from app.middleware.auth import AuthClaims, authenticate
+from app.models.audit_log import AuditLog
 from app.models.practice import Practice
 from app.models.user import User
 
@@ -79,9 +80,11 @@ async def _lazy_provision_user(session, claims: AuthClaims) -> User | None:
         )
     ).scalar_one_or_none()
 
+    practice_was_new = False
     if practice is None:
         # The org creator's first login: stand up their practice in onboarding and
         # make them owner. Mirrors the organization.created + membership webhooks.
+        practice_was_new = True
         practice = Practice(
             id=uuid.uuid4(),
             clerk_org_id=org_id,
@@ -135,6 +138,30 @@ async def _lazy_provision_user(session, claims: AuthClaims) -> User | None:
         "lazy provisioning: user=%s practice_org=%s role=%s",
         claims.clerk_user_id[:12], org_id[:12], role,
     )
+    # S6: audit the lazy-provisioning path — a high-privilege, irreversible
+    # auto-create of a practice+user from a JWT claim. Non-fatal: the user is
+    # already committed, so a failed audit write must never block login.
+    if user is not None:
+        try:
+            session.add(
+                AuditLog(
+                    id=uuid.uuid4(),
+                    practice_id=practice.id,
+                    user_id=user.id,
+                    action="lazy_provisioning",
+                    resource_type="user",
+                    resource_id=user.id,
+                    audit_metadata={
+                        "clerk_org_id": org_id,
+                        "role": role,
+                        "practice_created": practice_was_new,
+                    },
+                )
+            )
+            await session.commit()
+        except Exception as audit_exc:
+            logger.warning("lazy provisioning audit log failed: %s", audit_exc)
+            await session.rollback()
     return user
 
 

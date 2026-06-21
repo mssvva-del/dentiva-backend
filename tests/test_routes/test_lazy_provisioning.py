@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import select
 
 from app.config import get_settings
+from app.models.audit_log import AuditLog
 from app.models.practice import Practice
 from app.models.user import User
 from tests.conftest import seed_practice
@@ -56,6 +57,31 @@ async def test_new_org_creates_practice_in_onboarding_as_owner(client, db_sessio
     ).scalar_one()
     assert user.practice_id == practice.id
     assert user.email == "founder@clinic.com"
+
+
+async def test_lazy_provisioning_writes_audit_log(client, db_session, lazy_on):
+    # S6: the lazy-provisioning path must leave a searchable audit trail.
+    r = await client.get("/api/me", headers=_auth("org_audit1", "user_audit1",
+                                                  email="founder@audit.com"))
+    assert r.status_code == 200
+
+    practice = (
+        await db_session.execute(
+            select(Practice).where(Practice.clerk_org_id == "org_audit1")
+        )
+    ).scalar_one()
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.practice_id == practice.id,
+                AuditLog.action == "lazy_provisioning",
+            )
+        )
+    ).scalar_one()
+    assert audit.resource_type == "user"
+    assert audit.audit_metadata["practice_created"] is True
+    assert audit.audit_metadata["role"] == "owner"
+    assert audit.audit_metadata["clerk_org_id"] == "org_audit1"
 
 
 async def test_join_existing_practice_as_staff(client, db_session, lazy_on):
