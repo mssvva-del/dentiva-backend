@@ -6,11 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import VIEW_CALLS, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.booking import Booking
 from app.models.call import Call
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.models.user import User
 from app.schemas.call import (
     ActiveCallsResponse,
     ActiveCallSummary,
@@ -64,6 +66,7 @@ async def list_calls(
     search: str | None = Query(default=None),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_CALLS)),
 ) -> CallListResponse:
     base = select(Call).where(Call.practice_id == practice.id)
     if direction:
@@ -129,6 +132,7 @@ async def list_calls(
 async def list_active_calls(
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_CALLS)),
 ) -> ActiveCallsResponse:
     """Return calls currently in progress (started but not yet ended). Max 10."""
     rows = (
@@ -168,6 +172,7 @@ async def get_call(
     call_id: str,
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_CALLS)),
 ) -> CallDetail:
     """Return full call details including parsed transcript. 404 if not found or wrong tenant."""
     result = await db.execute(
