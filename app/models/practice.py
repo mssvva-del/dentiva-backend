@@ -63,3 +63,9 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     # shared agent in Iter 1); ready for when agents are parameterized per
     # practice. Nullable until the wizard fills it.
     agent_settings: Mapped[dict | None] = mapped_column(JSONB)
+    # Clinic knowledge base: providers, appointment types, insurances, policies,
+    # emergency protocol. Stored as JSONB (migration u6p7q8r9s0t1). The AI agent
+    # injects this into its system prompt to behave as *this clinic's* agent.
+    # Nullable — practices that haven't filled it in yet fall back to generic
+    # agent behaviour.
+    knowledge_base: Mapped[dict | None] = mapped_column(JSONB)
