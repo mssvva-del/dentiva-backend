@@ -148,6 +148,12 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # CORS — comma-separated list of EXACT allowed origins (no wildcards). The
+    # browser sends credentials, so wildcards are unsafe and disallowed by the
+    # CORS spec anyway. Defaults to local dev; set CORS_ALLOWED_ORIGINS in prod
+    # to the exact dashboard domain(s), e.g. "https://dentiva-dashboard.vercel.app".
+    cors_allowed_origins: str = "http://localhost:3000"
+
     # Misc
     environment: str = "development"
     log_level: str = "INFO"
@@ -210,6 +216,15 @@ class Settings(BaseSettings):
                 "AUTH_DEV_BYPASS must NOT be enabled when ENVIRONMENT=production."
             )
         return self
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parse CORS_ALLOWED_ORIGINS (comma-separated) into a clean list.
+
+        Trims whitespace and drops empty entries so a trailing comma or padded
+        env value can't inject a bogus/empty origin.
+        """
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
 
 @lru_cache

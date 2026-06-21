@@ -28,13 +28,13 @@ from app.routes import (
     callbacks,
     calls,
     dashboard,
+    knowledge_base,
     me,
     onboarding,
     patients,
     practice,
     team,
     voice,
-    knowledge_base,
     waitlist,
 )
 from app.security import verify_security_config
@@ -90,16 +90,13 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 # ─────────────────────────────────────────────────────────────────
 
 
-# CORS — allow local dev and any Vercel deployment (including preview URLs).
+# CORS — exact allowed origins from CORS_ALLOWED_ORIGINS (comma-separated env).
+# No wildcards/regex: credentials are sent, so origins must be explicit. Set the
+# exact prod dashboard domain(s) in Railway; defaults to local dev.
+_cors_settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://*.vercel.app",
-        # Add your specific production domain here, e.g.:
-        # "https://dentiva.app",
-    ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origins=_cors_settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
