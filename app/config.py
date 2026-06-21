@@ -62,7 +62,14 @@ class Settings(BaseSettings):
         return self
 
     # Encryption
+    # ENCRYPTION_KEY is the PRIMARY (current) Fernet key — all new ciphertext is
+    # written with it. To rotate, generate a new key, move the old one into
+    # ENCRYPTION_KEYS_OLD (comma-separated, decrypt-only) and set the new one as
+    # ENCRYPTION_KEY. Old data keeps decrypting via the retired keys until it's
+    # re-encrypted. Never delete an old key while any row may still hold data
+    # encrypted with it.
     encryption_key: str = ""
+    encryption_keys_old: str = ""
 
     # Clerk
     clerk_publishable_key: str = ""
