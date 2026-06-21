@@ -31,9 +31,25 @@ def _to_async_url(url: str) -> str:
     return url
 
 
-def _to_sync_url(async_url: str) -> str:
-    """Derive the psycopg2 (sync) URL used by Alembic from the async URL."""
-    return async_url.replace("+asyncpg://", "+psycopg2://")
+def _to_sync_url(url: str) -> str:
+    """Normalize ANY Postgres URL to the psycopg2 (sync) driver used by Alembic.
+
+    Mirrors ``_to_async_url`` but targets psycopg2, so it works both for a URL
+    derived from ``DATABASE_URL`` (async) and for an explicitly-provided
+    ``DATABASE_URL_SYNC`` that may arrive as ``postgres://`` / ``postgresql://``
+    / ``postgresql+asyncpg://``.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+    if url.startswith("postgresql+asyncpg://"):
+        url = "postgresql://" + url[len("postgresql+asyncpg://") :]
+    elif url.startswith("postgresql+psycopg://"):
+        url = "postgresql://" + url[len("postgresql+psycopg://") :]
+    if url.startswith("postgresql+psycopg2://"):
+        return url
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://") :]
+    return url
 
 
 class Settings(BaseSettings):
@@ -55,10 +71,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _normalize_db_urls(self) -> "Settings":
-        # Accept a single plain DATABASE_URL (Railway/Render style) and derive
-        # both the async and the sync driver URLs from it.
+        # Accept a single plain DATABASE_URL (Railway/Render style) and derive the
+        # async driver URL from it.
         self.database_url = _to_async_url(self.database_url)
-        self.database_url_sync = _to_sync_url(self.database_url)
+        # DATABASE_URL_SYNC (Alembic) is normally derived from DATABASE_URL — but
+        # when it's set EXPLICITLY, honor it. This lets the app connect as a
+        # restricted RLS role (DATABASE_URL=dentiva_app) while migrations still run
+        # as the superuser (DATABASE_URL_SYNC=postgresql://dentiva:...). Without
+        # this, deriving sync from async would run Alembic as the unprivileged role
+        # and break DDL migrations on deploy.
+        if "database_url_sync" in self.model_fields_set:
+            self.database_url_sync = _to_sync_url(self.database_url_sync)
+        else:
+            self.database_url_sync = _to_sync_url(self.database_url)
         return self
 
     # Encryption
