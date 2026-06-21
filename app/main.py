@@ -34,6 +34,7 @@ from app.routes import (
     practice,
     team,
     voice,
+    knowledge_base,
     waitlist,
 )
 from app.security import verify_security_config
@@ -206,6 +207,7 @@ app.include_router(retell.router)
 app.include_router(twilio_sms.router)
 app.include_router(clerk.router)
 app.include_router(stripe.router)
+app.include_router(knowledge_base.router)
 # retell-llm). Mounted only when explicitly enabled, so an unauthenticated WS
 # isn't exposed by default (Security Sprint M7).
 if get_settings().enable_llm_relay:
