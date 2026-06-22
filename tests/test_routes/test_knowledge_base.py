@@ -16,6 +16,7 @@ import uuid
 
 from sqlalchemy import select
 
+from app.models.audit_log import AuditLog
 from app.models.practice import Practice
 from app.models.user import User
 from tests.conftest import seed_practice
@@ -126,6 +127,33 @@ async def test_put_and_get_knowledge_base(client, db_session):
     get_r = await client.get("/api/knowledge-base", headers=h)
     assert get_r.status_code == 200
     assert get_r.json()["knowledge_base"]["providers"][0]["name"] == "Dr. Sarah Smith"
+
+
+async def test_put_writes_audit_log(client, db_session):
+    """PUT /api/knowledge-base records an audit row with section counts."""
+    practice, _owner = await _fresh_onboarding_practice(db_session, slug="kbaudit")
+    h = _auth("org_kbaudit", "user_kbaudit")
+
+    payload = {
+        "providers": [{"name": "Dr. A"}, {"name": "Dr. B"}],
+        "appointment_types": [{"name": "Cleaning"}],
+        "insurances": ["Delta Dental"],
+    }
+    put_r = await client.put("/api/knowledge-base", headers=h, json=payload)
+    assert put_r.status_code == 200, put_r.text
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.practice_id == practice.id,
+                AuditLog.action == "knowledge_base_updated",
+            )
+        )
+    ).scalar_one()
+    assert audit.resource_type == "practice"
+    assert audit.audit_metadata["providers_count"] == 2
+    assert audit.audit_metadata["appointment_types_count"] == 1
+    assert audit.audit_metadata["insurances_count"] == 1
 
 
 async def test_put_partial_knowledge_base(client, db_session):
