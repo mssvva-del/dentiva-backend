@@ -205,6 +205,19 @@ app.include_router(twilio_sms.router)
 app.include_router(clerk.router)
 app.include_router(stripe.router)
 app.include_router(knowledge_base.router)
+# PLACEHOLDER — Recall / reactivation campaigns (see _docs/RECALL_CAMPAIGNS.md).
+# When app/routes/recall.py lands, mount it here AND rate-limit the outbound
+# trigger routes hard, e.g.:
+#     app.include_router(recall.router)
+#     # on POST /api/recall/campaigns/{id}/launch and /import:
+#     @router.post(".../launch")
+#     @limiter.limit("5/minute")
+#     async def launch(...): ...
+# WHY a tight limit specifically here: these endpoints fan out into OUTBOUND calls
+# and SMS (real money + a federal TCPA/telephony footprint). A loose limit lets a
+# bug or a compromised token dial thousands of patients before anyone notices —
+# unlike read endpoints, the blast radius is external and irreversible. Keep the
+# launch/import limit far stricter than the generic per-IP limit.
 # retell-llm). Mounted only when explicitly enabled, so an unauthenticated WS
 # isn't exposed by default (Security Sprint M7).
 if get_settings().enable_llm_relay:
