@@ -21,17 +21,25 @@ from app.schemas.call import (
     CallSummary,
     TranscriptTurn,
 )
-from app.utils.redact import redact_name
+from app.utils.redact import redact_name, redact_pii_text
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 
-def _parse_transcript(transcript_jsonb: list | dict | None) -> list[TranscriptTurn]:
+def _parse_transcript(
+    transcript_jsonb: list | dict | None,
+    extra_terms: list[str] | None = None,
+) -> list[TranscriptTurn]:
     """Convert transcript_jsonb to typed transcript turns.
 
     Retell stores transcripts as a list of dicts with keys:
       role (str), content (str), words (list, optional)
     The API_CONTRACT uses "text" for the content field.
+
+    PHI: the spoken text is free-form and may contain phone numbers, emails, or
+    the patient's name, so each turn's text is run through redact_pii_text before
+    it leaves the API. ``extra_terms`` (the patient's known name) masks names that
+    can't be detected by shape alone.
     """
     if not transcript_jsonb:
         return []
@@ -44,6 +52,7 @@ def _parse_transcript(transcript_jsonb: list | dict | None) -> list[TranscriptTu
             continue
         role = item.get("role", "unknown")
         text = item.get("content") or item.get("text") or ""
+        text = redact_pii_text(text, extra_terms=extra_terms) or ""
         # "agent" from Retell -> rename for API consumers.
         if role == "agent":
             role = "agent"
@@ -183,12 +192,15 @@ async def get_call(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found.")
 
     patient_name = None
+    name_terms: list[str] = []
     if call.patient_id:
         patient = (
             await db.execute(select(Patient).where(Patient.id == call.patient_id))
         ).scalar_one_or_none()
         if patient:
             patient_name = redact_name(patient.first_name, patient.last_name)
+            # Known name → mask any spoken occurrences in the transcript too.
+            name_terms = [t for t in (patient.first_name, patient.last_name) if t]
 
     booking = (
         await db.execute(
@@ -215,7 +227,7 @@ async def get_call(
         outcome=call.outcome,
         booking_id=str(booking) if booking else None,
         recording_url=recording_url,
-        transcript=_parse_transcript(call.transcript_jsonb),
+        transcript=_parse_transcript(call.transcript_jsonb, extra_terms=name_terms),
         call_intent=call.call_intent,
         patient_sentiment=call.patient_sentiment,
         escalation_needed=call.escalation_needed,
