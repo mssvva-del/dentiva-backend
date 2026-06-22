@@ -1,4 +1,11 @@
-"""Helpers to produce non-PHI representations for the frontend."""
+"""Helpers to produce non-PHI representations for the frontend.
+
+WHY a boundary utility and not a model/column transform: the DB intentionally
+stores full data (the agent needs real names/phones to book and text patients).
+Masking happens only on the way OUT, in the routes that serialise transcripts to
+the dashboard — so PHI never leaves the API, while internal flows keep the
+originals. Apply these at the response edge, not in the SQLAlchemy models.
+"""
 
 from __future__ import annotations
 

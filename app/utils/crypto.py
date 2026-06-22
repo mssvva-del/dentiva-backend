@@ -38,7 +38,12 @@ def _multifernet() -> MultiFernet:
             'print(Fernet.generate_key().decode())"'
         )
     old = [k.strip() for k in settings.encryption_keys_old.split(",") if k.strip()]
-    # Primary first → it's the one used to encrypt; old keys are decrypt-only.
+    # WHY order is critical: MultiFernet ALWAYS encrypts with the first key and
+    # tries the rest only for decrypt. So primary MUST be first — put an old key
+    # first by mistake and new data gets written under a retired key.
+    # To rotate: generate a new key, move the current ENCRYPTION_KEY into
+    # ENCRYPTION_KEYS_OLD, set the new key as ENCRYPTION_KEY (decrypt of old data
+    # keeps working; re-encrypt lazily via rotate_pii before dropping the old key).
     return MultiFernet([_as_fernet(primary), *(_as_fernet(k) for k in old)])
 
 

@@ -162,8 +162,14 @@ def require_permission(permission: str):
     `get_current_user` is imported lazily inside the closure to avoid a circular
     import (app.dependencies imports from app.auth in later phases).
     """
+    # WHY a dependency, not a decorator: it must run inside FastAPI's DI graph so
+    # it can depend on get_current_user (which validates the Clerk JWT) and so the
+    # 403 fires during request resolution, before the handler body — a decorator
+    # couldn't inject the resolved User or compose with the other Depends().
     from app.dependencies import get_current_user
 
+    # WHY user.role: the role lives on OUR users row (set at provisioning), not in
+    # the Clerk token — Clerk org roles are mapped to clinic roles once, at login.
     async def dependency(user: User = Depends(get_current_user)) -> User:
         if not has_clinic_permission(user.role, permission):
             raise HTTPException(

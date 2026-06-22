@@ -34,6 +34,9 @@ class Call(UUIDPKMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text)
     recording_path: Mapped[str | None] = mapped_column(Text)
+    # WHY no encryption here but PII still inside: the transcript is free text and
+    # callers may speak names/phone/DOB. Stored raw (the agent/analytics need it),
+    # so it MUST be masked on the way out — see app/utils/redact.redact_transcript.
     transcript_jsonb: Mapped[dict | list | None] = mapped_column(JSONB)
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     language_detected: Mapped[str | None] = mapped_column(Text)

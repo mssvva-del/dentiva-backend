@@ -66,6 +66,9 @@ async def list_calls(
     search: str | None = Query(default=None),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    # WHY both a permission gate AND a practice_id filter: defense in depth.
+    # require_permission stops a wrong-role user; the practice_id WHERE (backed by
+    # RLS in get_tenant_db) stops cross-tenant reads. Neither alone is enough.
     _user: User = Depends(require_permission(VIEW_CALLS)),
 ) -> CallListResponse:
     base = select(Call).where(Call.practice_id == practice.id)

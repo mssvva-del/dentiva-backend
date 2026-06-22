@@ -64,6 +64,9 @@ async def put_knowledge_base(
     payload: KnowledgeBase,
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    # WHY MANAGE_SETTINGS on PUT but not GET: the KB drives the agent's behaviour
+    # for the whole clinic, so editing is owner/manager-only — but any staff member
+    # may need to read it. Asymmetric gate by design.
     user: User = Depends(require_permission(MANAGE_SETTINGS)),
 ) -> KnowledgeBaseResponse:
     """Save (full replace) the knowledge base for this practice.
