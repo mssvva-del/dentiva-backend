@@ -18,10 +18,15 @@ class Patient(UUIDPKMixin, TimestampMixin, Base):
         UniqueConstraint("practice_id", "pms_external_id", name="uq_patient_practice_pms"),
     )
 
+    # WHY practice_id is NON-NULL: it's the tenant key the RLS policy filters on.
+    # A null here would be invisible to every tenant (and a hole in isolation), so
+    # the column must always be set — never insert a patient without a practice.
     practice_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("practices.id"), nullable=False
     )
     pms_external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # WHY EncryptedString (not Text): these are PHI. Stored as bytea ciphertext
+    # (Fernet) so a DB dump/backup never exposes names/phone/DOB in cleartext.
     # Encrypted PII columns (bytea under the hood).
     first_name: Mapped[str | None] = mapped_column(EncryptedString)
     last_name: Mapped[str | None] = mapped_column(EncryptedString)

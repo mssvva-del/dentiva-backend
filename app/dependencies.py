@@ -213,6 +213,12 @@ async def get_tenant_db(
     practice: Practice = Depends(get_current_practice),
 ) -> AsyncGenerator[AsyncSession, None]:
     """Yield a DB session with RLS tenant context set to the caller's practice."""
+    # WHY separate from a plain get_db: RLS policies key off app.current_practice_id,
+    # so PHI routes MUST take this dependency — a bare session has no tenant set and
+    # (as dentiva_app) would see zero rows, or as superuser would see ALL tenants.
     async with async_session_factory() as session:
+        # WHY before yield: set_tenant runs inside the same transaction the route
+        # will query on. If a query ran before this, RLS would evaluate with an
+        # unset practice id → wrong/empty results. Tenant must be set first.
         await set_tenant(session, practice.id)
         yield session
