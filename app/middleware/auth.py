@@ -22,6 +22,10 @@ from app.config import get_settings
 _JWKS_TTL_SECONDS = 3600
 _jwks_keys: dict | None = None
 _jwks_fetched_at: float = 0.0
+# Cache is keyed by the URL it was fetched from. When CLERK_JWKS_URL changes
+# (e.g. dev→prod Clerk instance), a stale cache must NOT be served — otherwise
+# every prod token fails "Signing key not found" until the TTL expires.
+_jwks_url: str | None = None
 
 
 @dataclass
@@ -45,10 +49,15 @@ def _extract_org_role(claims: dict) -> str | None:
     return None
 
 
-async def _get_jwks(jwks_url: str) -> dict:
-    global _jwks_keys, _jwks_fetched_at
+async def _get_jwks(jwks_url: str, *, force: bool = False) -> dict:
+    global _jwks_keys, _jwks_fetched_at, _jwks_url
     now = time.time()
-    if _jwks_keys is not None and now - _jwks_fetched_at < _JWKS_TTL_SECONDS:
+    fresh = (
+        _jwks_keys is not None
+        and _jwks_url == jwks_url
+        and now - _jwks_fetched_at < _JWKS_TTL_SECONDS
+    )
+    if fresh and not force:
         return _jwks_keys
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(jwks_url)
@@ -56,7 +65,12 @@ async def _get_jwks(jwks_url: str) -> dict:
         jwks = resp.json()
     _jwks_keys = jwks
     _jwks_fetched_at = now
+    _jwks_url = jwks_url
     return jwks
+
+
+def _find_signing_key(jwks: dict, kid: str | None) -> dict | None:
+    return next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
 
 
 def _extract_org_id(claims: dict) -> str | None:
@@ -113,7 +127,14 @@ async def authenticate(
         jwks = await _get_jwks(settings.clerk_jwks_url)
         unverified = jwt.get_unverified_header(token)
         kid = unverified.get("kid")
-        key = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+        key = _find_signing_key(jwks, kid)
+        if key is None:
+            # The kid isn't in our cached keys. This happens on legitimate Clerk
+            # key rotation and right after a dev→prod instance switch. Force one
+            # refresh before failing, so a new signing key doesn't 401 every
+            # request until the TTL expires.
+            jwks = await _get_jwks(settings.clerk_jwks_url, force=True)
+            key = _find_signing_key(jwks, kid)
         if key is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
