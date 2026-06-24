@@ -172,6 +172,15 @@ class Settings(BaseSettings):
     # practice keys yet (Step 3 wires per-practice). Empty in prod.
     open_dental_customer_key: str = ""
 
+    # NexHealth (Synchronizer aggregator — covers Dentrix/Eaglesoft/Open Dental/etc).
+    # Primary PMS path for Phase 1. Empty keys → use the in-memory mock source so
+    # the Reactivation Engine builds/tests without real access. Real keys go in
+    # _KEYS_PRIVATE.md → Railway env (NOT git). Confirm prod vs sandbox on arrival.
+    nexhealth_api_url: str = "https://nexhealth.info"
+    nexhealth_api_key: str = ""
+    nexhealth_subdomain: str = ""      # practice subdomain in NexHealth
+    nexhealth_location_id: str = ""    # NexHealth location id
+
     # LLM (Groq primary, Anthropic fallback — OpenAI unused in weekend mode)
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
