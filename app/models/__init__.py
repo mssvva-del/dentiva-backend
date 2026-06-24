@@ -11,6 +11,11 @@ from app.models.invoice import Invoice
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
+from app.models.reactivation import (
+    ReactivationCampaign,
+    ReactivationTarget,
+    ReactivationTouch,
+)
 from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
 from app.models.user import User
@@ -32,4 +37,7 @@ __all__ = [
     "UsageRecord",
     "FeatureFlag",
     "ProcessedWebhookEvent",
+    "ReactivationCampaign",
+    "ReactivationTarget",
+    "ReactivationTouch",
 ]

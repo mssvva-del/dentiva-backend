@@ -33,6 +33,10 @@ REQUIRED_RLS = {
     "callback_requests",
     "waitlist_entries",
     "invitations",
+    # Reactivation Engine (Phase 1) — hold a clinic's dormant-patient recall list.
+    "reactivation_campaigns",
+    "reactivation_targets",
+    "reactivation_touches",
 }
 
 

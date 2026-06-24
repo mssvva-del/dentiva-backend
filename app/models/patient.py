@@ -40,3 +40,11 @@ class Patient(UUIDPKMixin, TimestampMixin, Base):
     sms_opt_out: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false", default=False
     )
+    # Preferred conversation language (EN/ES) for voice + SMS, honored by the
+    # receptionist and reactivation outreach. WHY plain Text, not EncryptedString:
+    # it's a preference, not PHI — and we need it in cleartext to filter/segment
+    # campaigns by language in SQL. Defaults to 'en'; set from call language
+    # detection or PMS pull.
+    preferred_language: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="en", default="en"
+    )
