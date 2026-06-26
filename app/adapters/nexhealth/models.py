@@ -35,3 +35,18 @@ class PMSReactivationRecord(BaseModel):
     # as opted-out. Defaults True; the campaign layer also re-checks our own
     # sms_opt_out + TCPA quiet hours.
     contactable: bool = True
+
+
+class NexHealthSlot(BaseModel):
+    """An open appointment slot offered by the PMS (for anti-double-book check)."""
+
+    start_time: str            # ISO datetime
+    provider_id: str
+    operatory_id: str | None = None
+
+
+class NexHealthAppointment(BaseModel):
+    """The PMS's record of an appointment we created (write-back result)."""
+
+    appointment_id: str        # NexHealth appointment id → stored on our booking
+    start_time: str

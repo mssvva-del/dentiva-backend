@@ -25,7 +25,11 @@ from datetime import date
 
 import httpx
 
-from app.adapters.nexhealth.models import PMSReactivationRecord
+from app.adapters.nexhealth.models import (
+    NexHealthAppointment,
+    NexHealthSlot,
+    PMSReactivationRecord,
+)
 from app.adapters.nexhealth.source import ReactivationSource
 from app.config import get_settings
 from app.utils.resilience import make_timeout, retry_async
@@ -59,6 +63,10 @@ class NexHealthError(Exception):
 
 class NexHealthUnavailable(Exception):
     """Transient NexHealth failure (5xx / network / timeout) — retryable."""
+
+
+def _str_or_none(value: object) -> str | None:
+    return str(value) if value not in (None, "") else None
 
 
 def _parse_date(value: object) -> date | None:
@@ -151,6 +159,94 @@ class NexHealthClient(ReactivationSource):
                 retry_on=NexHealthUnavailable, label=f"NexHealth GET {path}",
             )
         return await _once()
+
+    async def _post(self, path: str, body: dict) -> httpx.Response:
+        """Authenticated POST. SINGLE-SHOT — never auto-retried: a retried create
+        could double-book the patient (the caller decides any fallback)."""
+        if self._token is None:
+            self._token = await self._fetch_token()
+        scoped = {"subdomain": self._subdomain, "location_id": self._location_id}
+        headers = {"Authorization": f"Bearer {self._token}", **_BASE_HEADERS}
+        async with await self._client() as client:
+            try:
+                resp = await client.post(path, params=scoped, json=body, headers=headers)
+            except httpx.HTTPError as exc:
+                raise NexHealthUnavailable(str(exc)) from exc
+        if resp.status_code in (401, 500, 502, 503, 504):
+            # Auth-expiry or server error → transient. We do NOT auto-retry a write;
+            # the caller falls back (graceful degradation) rather than risk a double.
+            self._token = None if resp.status_code == 401 else self._token
+            raise NexHealthUnavailable(f"NexHealth {resp.status_code} on POST {path}")
+        if resp.status_code >= 400:
+            raise NexHealthError(f"NexHealth {resp.status_code} on POST {path}")
+        return resp
+
+    # ── booking write-back (block 8) ──────────────────────────────────────────
+    @staticmethod
+    def _slots_from(payload: dict) -> list[NexHealthSlot]:
+        """Flatten NexHealth's appointment_slots response into flat slots.
+        Shape (TO VERIFY against sandbox): data may be a list of provider buckets
+        ``[{pid, lid, slots:[{time, operatory_id}]}]`` or already-flat slots."""
+        data = payload.get("data") or []
+        out: list[NexHealthSlot] = []
+        for bucket in data if isinstance(data, list) else []:
+            if not isinstance(bucket, dict):
+                continue
+            pid = str(bucket.get("pid") or bucket.get("provider_id") or "")
+            nested = bucket.get("slots")
+            if isinstance(nested, list):
+                for s in nested:
+                    out.append(NexHealthSlot(
+                        start_time=str(s.get("time") or s.get("start_time") or ""),
+                        provider_id=pid,
+                        operatory_id=_str_or_none(s.get("operatory_id")),
+                    ))
+            elif bucket.get("time") or bucket.get("start_time"):
+                out.append(NexHealthSlot(
+                    start_time=str(bucket.get("time") or bucket.get("start_time")),
+                    provider_id=pid,
+                    operatory_id=_str_or_none(bucket.get("operatory_id")),
+                ))
+        return out
+
+    async def find_appointment_slots(
+        self, *, start_date: str, days: int = 1, provider_ids: list[str] | None = None
+    ) -> list[NexHealthSlot]:
+        """Open slots from start_date over N days (used for the anti-double-book
+        re-check before writing an appointment back)."""
+        params: dict = {"start_date": start_date, "days": days}
+        if provider_ids:
+            params["pids[]"] = provider_ids
+        return self._slots_from((await self._get("/appointment_slots", params)).json())
+
+    async def create_appointment(
+        self,
+        *,
+        patient_pms_id: str,
+        provider_id: str,
+        start_time: str,
+        operatory_id: str | None = None,
+        note: str | None = None,
+    ) -> NexHealthAppointment:
+        """Write an appointment back to the PMS. Returns the PMS appointment id."""
+        appt: dict = {
+            "patient_id": patient_pms_id,
+            "provider_id": provider_id,
+            "start_time": start_time,
+        }
+        if operatory_id:
+            appt["operatory_id"] = operatory_id
+        if note:
+            appt["note"] = note
+        data = (await self._post("/appointments", {"appt": appt})).json().get("data") or {}
+        created = data.get("appt") if isinstance(data.get("appt"), dict) else data
+        appt_id = created.get("id") if isinstance(created, dict) else None
+        if appt_id is None:
+            raise NexHealthError("create-appointment response missing id")
+        return NexHealthAppointment(
+            appointment_id=str(appt_id),
+            start_time=str(created.get("start_time") or start_time),
+        )
 
     # ── pull ──────────────────────────────────────────────────────────────────
     @staticmethod
