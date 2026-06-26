@@ -110,6 +110,12 @@ class Settings(BaseSettings):
     retell_webhook_secret: str = ""
     retell_api_key: str = ""
     retell_agent_id: str = ""
+    # Outbound voice (reactivation block 7). Empty from-number → no real calls are
+    # placed; the worker DEFERS voice touches until a real US number is attached
+    # (gated: a number on Retell, set in Railway env). Per-language agents can be
+    # added here later; default falls back to retell_agent_id.
+    retell_from_number: str = ""
+    retell_agent_id_es: str = ""  # optional Spanish-specific outbound agent
 
     # Stripe (Phase D). Test-mode keys first; Sergio provides them later. When
     # stripe_secret_key is empty, billing API calls (checkout) return a clear
