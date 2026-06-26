@@ -48,13 +48,22 @@ _BASE_HEADERS = {"Accept": _ACCEPT, "User-Agent": _UA}
 
 
 def _money_to_cents(value: object) -> int:
-    """NexHealth 'balance' (string/number dollars) → int cents. Dirty/blank → 0."""
+    """Dollar amount (string/number) → int cents. Dirty/blank → 0."""
     if value in (None, "", False):
         return 0
     try:
         return round(float(value) * 100)
     except (TypeError, ValueError):
         return 0
+
+
+def _balance_to_cents(balance: object) -> int:
+    """NexHealth patient 'balance' → int cents. CONFIRMED against sandbox: it's an
+    object ``{"amount": "12.50", "currency": "USD"}`` — NOT a flat string. We still
+    accept a flat value for forward/back compatibility and mocked tests."""
+    if isinstance(balance, dict):
+        return _money_to_cents(balance.get("amount"))
+    return _money_to_cents(balance)
 
 
 class NexHealthError(Exception):
@@ -210,11 +219,26 @@ class NexHealthClient(ReactivationSource):
         return out
 
     async def find_appointment_slots(
-        self, *, start_date: str, days: int = 1, provider_ids: list[str] | None = None
+        self,
+        *,
+        start_date: str,
+        days: int = 1,
+        provider_ids: list[str] | None = None,
+        slot_length: int = 60,
     ) -> list[NexHealthSlot]:
         """Open slots from start_date over N days (used for the anti-double-book
-        re-check before writing an appointment back)."""
-        params: dict = {"start_date": start_date, "days": days}
+        re-check before writing an appointment back).
+
+        CONFIRMED against sandbox 2026-06-26: requires ``lids[]`` (location) +
+        ``slot_length`` in addition to ``start_date``/``days``; returns
+        ``data: [{lid, pid, slots: [{time, end_time, operatory_id}]}]`` — exactly
+        what _slots_from parses."""
+        params: dict = {
+            "start_date": start_date,
+            "days": days,
+            "lids[]": self._location_id,
+            "slot_length": slot_length,
+        }
         if provider_ids:
             params["pids[]"] = provider_ids
         return self._slots_from((await self._get("/appointment_slots", params)).json())
@@ -228,7 +252,14 @@ class NexHealthClient(ReactivationSource):
         operatory_id: str | None = None,
         note: str | None = None,
     ) -> NexHealthAppointment:
-        """Write an appointment back to the PMS. Returns the PMS appointment id."""
+        """Write an appointment back to the PMS. Returns the PMS appointment id.
+
+        CONFIRMED against sandbox 2026-06-26 (status 201): body is
+        ``{"appt": {patient_id, provider_id, operatory_id, start_time, note?}}``.
+        Do NOT send ``appointment_type_id`` — the sandbox rejects it with
+        "appointment_type_id was not found to be configured for the requested slot"
+        unless it matches the operatory's configured types. The response ``data`` is
+        the appointment object directly (id, start_time as ISO …Z, end_time, …)."""
         appt: dict = {
             "patient_id": patient_pms_id,
             "provider_id": provider_id,
@@ -239,6 +270,7 @@ class NexHealthClient(ReactivationSource):
         if note:
             appt["note"] = note
         data = (await self._post("/appointments", {"appt": appt})).json().get("data") or {}
+        # data is the appt object directly; tolerate a {"appt": {...}} wrapper too.
         created = data.get("appt") if isinstance(data.get("appt"), dict) else data
         appt_id = created.get("id") if isinstance(created, dict) else None
         if appt_id is None:
@@ -278,15 +310,49 @@ class NexHealthClient(ReactivationSource):
             email=d.get("email") or None,
             preferred_language=(d.get("preferred_language") or "en").lower()[:2],
             # last_visit / recall_due are NOT on the patient object (confirmed
-            # against sandbox 2026-06-24) — they need appointments/recalls
-            # endpoints, enriched in a follow-up. Default None for now.
+            # against sandbox 2026-06-26) — last_visit is enriched from the
+            # /appointments endpoint (see _last_visit_map). recall_due has no
+            # sandbox source (/recalls → 404) so it stays None until a PMS exposes it.
             last_visit_date=_parse_date(d.get("last_visit_date")),
             recall_due_date=_parse_date(d.get("recall_due_date")),
-            # balance IS on the patient object (dollars) → cents.
-            balance_cents=_money_to_cents(d.get("balance")),
+            # balance is an OBJECT {amount, currency} on the patient (CONFIRMED
+            # sandbox 2026-06-26) — _balance_to_cents reads .amount.
+            balance_cents=_balance_to_cents(d.get("balance")),
             # Not contactable if the patient unsubscribed from SMS or is inactive.
             contactable=not (bool(d.get("unsubscribe_sms")) or bool(d.get("inactive"))),
         )
+
+    async def _last_visit_map(self, *, today: date) -> dict[str, date]:
+        """Build {patient_id → most-recent past visit date} from /appointments.
+
+        last_visit is NOT on the patient object; the segmentation "lapsed" signal
+        comes from the patient's newest completed (not cancelled/unavailable/deleted)
+        appointment that started on or before today. One paginated sweep, then a
+        dict lookup — cheaper than per-patient calls."""
+        out: dict[str, date] = {}
+        page, per_page = 1, 100
+        while True:
+            params = {"page": page, "per_page": per_page,
+                      "start": "2000-01-01", "end": today.isoformat()}
+            rows = (await self._get("/appointments", params)).json().get("data") or []
+            if not isinstance(rows, list) or not rows:
+                break
+            for a in rows:
+                if not isinstance(a, dict):
+                    continue
+                if a.get("cancelled") or a.get("unavailable") or a.get("deleted"):
+                    continue
+                pid = a.get("patient_id")
+                d = _parse_date(a.get("start_time"))
+                if pid is None or d is None or d > today:
+                    continue
+                key = str(pid)
+                if key not in out or d > out[key]:
+                    out[key] = d
+            if len(rows) < per_page:
+                break
+            page += 1
+        return out
 
     async def pull_reactivation_records(
         self, *, updated_since: date | None = None, limit: int = 1000
@@ -309,4 +375,16 @@ class NexHealthClient(ReactivationSource):
             if len(rows) < per_page:
                 break  # last page
             page += 1
-        return out[:limit]
+        out = out[:limit]
+
+        # Best-effort enrichment: fill last_visit_date from /appointments. A failure
+        # here must NEVER drop the pull — segmentation just falls back to "no last
+        # visit known" for those patients.
+        try:
+            visits = await self._last_visit_map(today=date.today())
+            for rec in out:
+                if rec.last_visit_date is None:
+                    rec.last_visit_date = visits.get(rec.pms_external_id)
+        except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
+            logger.warning("last_visit enrichment skipped: %s", type(exc).__name__)
+        return out

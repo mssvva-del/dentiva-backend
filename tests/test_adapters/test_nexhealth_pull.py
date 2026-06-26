@@ -109,6 +109,88 @@ async def test_balance_and_contactability_mapping():
     assert recs["3"].balance_cents == 0    # missing balance → 0, no crash
 
 
+async def test_balance_object_shape_confirmed_sandbox():
+    """CONFIRMED sandbox 2026-06-26: balance is an object {amount, currency}, not a
+    flat string. _balance_to_cents must read .amount."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        if request.url.path == "/patients":
+            return httpx.Response(200, json={"data": {"patients": [
+                {"id": 1, "balance": {"amount": "12.50", "currency": "USD"}},
+                {"id": 2, "balance": {"amount": "0", "currency": "USD"}},
+            ]}})
+        return httpx.Response(200, json={"data": []})  # /appointments → no visits
+
+    recs = {r.pms_external_id: r for r in await _client(handler).pull_reactivation_records()}
+    assert recs["1"].balance_cents == 1250
+    assert recs["2"].balance_cents == 0
+
+
+async def test_last_visit_enriched_from_appointments():
+    """last_visit is NOT on the patient; it's the newest non-cancelled past
+    appointment from /appointments (CONFIRMED sandbox)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        if request.url.path == "/patients":
+            return httpx.Response(200, json={"data": {"patients": [
+                {"id": 1}, {"id": 2}, {"id": 3},
+            ]}})
+        # /appointments — patient 1 has two past visits, patient 2 only a cancelled
+        # one, patient 3 none.
+        return httpx.Response(200, json={"data": [
+            {"patient_id": 1, "start_time": "2024-01-10T09:00:00.000Z"},
+            {"patient_id": 1, "start_time": "2025-03-02T09:00:00.000Z"},  # newest
+            {"patient_id": 2, "start_time": "2025-05-01T09:00:00.000Z", "cancelled": True},
+        ]})
+
+    recs = {r.pms_external_id: r for r in await _client(handler).pull_reactivation_records()}
+    assert recs["1"].last_visit_date == date(2025, 3, 2)  # most recent, not cancelled
+    assert recs["2"].last_visit_date is None              # only a cancelled appt
+    assert recs["3"].last_visit_date is None              # no appts
+
+
+async def test_find_slots_sends_lids_and_slot_length():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        captured["lids"] = request.url.params.get("lids[]")
+        captured["slot_length"] = request.url.params.get("slot_length")
+        captured["pids"] = request.url.params.get("pids[]")
+        return httpx.Response(200, json={"data": [
+            {"lid": 42, "pid": 7, "slots": [{"time": "2026-07-06T13:00:00-05:00",
+                                             "end_time": "x", "operatory_id": 3}]},
+        ]})
+
+    slots = await _client(handler).find_appointment_slots(
+        start_date="2026-07-06", days=5, provider_ids=["7"], slot_length=30)
+    assert captured["lids"] == "42"          # location_id scoped in as lids[]
+    assert captured["slot_length"] == "30"
+    assert captured["pids"] == "7"
+    assert slots[0].provider_id == "7" and slots[0].operatory_id == "3"
+
+
+async def test_create_appointment_parses_flat_data():
+    """CONFIRMED sandbox 201: response data is the appt object directly."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        assert request.method == "POST"
+        body = httpx.Request("POST", request.url, content=request.content).content
+        assert b"appointment_type_id" not in body  # never sent (sandbox rejects it)
+        return httpx.Response(201, json={"data": {
+            "id": 999, "start_time": "2026-07-06T13:00:00.000Z", "end_time": "x"}})
+
+    appt = await _client(handler).create_appointment(
+        patient_pms_id="1", provider_id="7", start_time="2026-07-06T13:00:00-05:00",
+        operatory_id="3", note="Dentovox reactivation")
+    assert appt.appointment_id == "999"
+    assert appt.start_time == "2026-07-06T13:00:00.000Z"
+
+
 async def test_401_triggers_token_refresh():
     state = {"patients_calls": 0, "auth_calls": 0}
 
