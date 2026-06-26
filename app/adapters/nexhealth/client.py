@@ -32,8 +32,25 @@ from app.utils.resilience import make_timeout, retry_async
 
 logger = logging.getLogger("dentiva.pms.nexhealth")
 
-# NexHealth versioned Accept header (TO VERIFY exact version against sandbox).
+# NexHealth versioned Accept header (CONFIRMED against sandbox 2026-06-24).
 _ACCEPT = "application/vnd.Nexhealth+json;version=2"
+# WHY a real User-Agent is REQUIRED: NexHealth sits behind Cloudflare, which
+# blocks the default httpx UA (error 1010 → 403). Confirmed against the sandbox —
+# without this every live request fails. Identify ourselves explicitly.
+_UA = "Dentovox/1.0 (+https://dentovox.com)"
+
+# Base headers on every authenticated call.
+_BASE_HEADERS = {"Accept": _ACCEPT, "User-Agent": _UA}
+
+
+def _money_to_cents(value: object) -> int:
+    """NexHealth 'balance' (string/number dollars) → int cents. Dirty/blank → 0."""
+    if value in (None, "", False):
+        return 0
+    try:
+        return round(float(value) * 100)
+    except (TypeError, ValueError):
+        return 0
 
 
 class NexHealthError(Exception):
@@ -88,7 +105,8 @@ class NexHealthClient(ReactivationSource):
         async with await self._client() as client:
             try:
                 resp = await client.post(
-                    "/authenticates", headers={"Authorization": self._api_key}
+                    "/authenticates",
+                    headers={"Authorization": self._api_key, **_BASE_HEADERS},
                 )
             except httpx.HTTPError as exc:
                 raise NexHealthUnavailable(f"auth transport error: {exc}") from exc
@@ -110,7 +128,7 @@ class NexHealthClient(ReactivationSource):
             if self._token is None:
                 self._token = await self._fetch_token()
             scoped = {"subdomain": self._subdomain, "location_id": self._location_id, **params}
-            headers = {"Authorization": f"Bearer {self._token}", "Accept": _ACCEPT}
+            headers = {"Authorization": f"Bearer {self._token}", **_BASE_HEADERS}
             async with await self._client() as client:
                 try:
                     resp = await client.get(path, params=scoped, headers=headers)
@@ -163,9 +181,15 @@ class NexHealthClient(ReactivationSource):
             phone=bio.get("phone_number") or d.get("phone_number") or "",
             email=d.get("email") or None,
             preferred_language=(d.get("preferred_language") or "en").lower()[:2],
+            # last_visit / recall_due are NOT on the patient object (confirmed
+            # against sandbox 2026-06-24) — they need appointments/recalls
+            # endpoints, enriched in a follow-up. Default None for now.
             last_visit_date=_parse_date(d.get("last_visit_date")),
             recall_due_date=_parse_date(d.get("recall_due_date")),
-            contactable=not bool(d.get("unsubscribe_sms")),
+            # balance IS on the patient object (dollars) → cents.
+            balance_cents=_money_to_cents(d.get("balance")),
+            # Not contactable if the patient unsubscribed from SMS or is inactive.
+            contactable=not (bool(d.get("unsubscribe_sms")) or bool(d.get("inactive"))),
         )
 
     async def pull_reactivation_records(

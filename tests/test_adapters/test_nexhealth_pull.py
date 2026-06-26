@@ -56,6 +56,8 @@ async def test_auth_then_paginated_pull():
     seen = {"auth": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        # Cloudflare requires a real UA on EVERY call (else 1010/403) — assert it.
+        assert (request.headers.get("user-agent") or "").startswith("Dentovox")
         if request.url.path == "/authenticates":
             seen["auth"] += 1
             assert request.headers.get("authorization") == "KEY"
@@ -86,6 +88,25 @@ async def test_dirty_patient_without_id_skipped():
 
     recs = await _client(handler).pull_reactivation_records()
     assert [r.pms_external_id for r in recs] == ["7"]
+
+
+async def test_balance_and_contactability_mapping():
+    """Real NexHealth patient shape (confirmed against sandbox): balance in
+    dollars on the patient; not-contactable if unsubscribe_sms OR inactive."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        return httpx.Response(200, json={"data": {"patients": [
+            {"id": 1, "balance": "45.50", "unsubscribe_sms": False, "inactive": False},
+            {"id": 2, "balance": "0", "unsubscribe_sms": True},   # opted out
+            {"id": 3, "inactive": True},                          # inactive
+        ]}})
+
+    recs = {r.pms_external_id: r for r in await _client(handler).pull_reactivation_records()}
+    assert recs["1"].balance_cents == 4550 and recs["1"].contactable is True
+    assert recs["2"].contactable is False  # unsubscribe_sms
+    assert recs["3"].contactable is False  # inactive
+    assert recs["3"].balance_cents == 0    # missing balance → 0, no crash
 
 
 async def test_401_triggers_token_refresh():
