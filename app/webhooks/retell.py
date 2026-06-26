@@ -210,8 +210,14 @@ async def _upsert_patient(
     first_name: str,
     last_name: str,
     phone: str,
+    language: str | None = None,
 ) -> Patient:
-    """Return existing patient by phone or create a stub for this call."""
+    """Return existing patient by phone or create a stub for this call.
+
+    ``language`` is the language this call was conducted in. For a NEW patient we
+    store it as preferred_language so downstream SMS + reactivation speak their
+    language. We do NOT overwrite an existing patient's stored preference (a
+    relative may call in a different language)."""
     # Look up by encrypted phone — requires scanning; acceptable for weekend scale.
     result = await session.execute(
         select(Patient).where(Patient.practice_id == practice_id)
@@ -224,7 +230,8 @@ async def _upsert_patient(
         except Exception:
             pass
 
-    # Create a new stub patient.
+    # Create a new stub patient. Only 'es'/'en' supported; default 'en'.
+    preferred_language = "es" if (language or "").lower().startswith("es") else "en"
     patient = Patient(
         id=uuid.uuid4(),
         practice_id=practice_id,
@@ -232,6 +239,7 @@ async def _upsert_patient(
         first_name=first_name,
         last_name=last_name,
         phone=phone,
+        preferred_language=preferred_language,
     )
     session.add(patient)
     await session.flush()
@@ -635,8 +643,15 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
                 )
             ).scalar_one_or_none() or "our office"
 
-        # Upsert patient.
-        patient = await _upsert_patient(session, practice_id, first_name, last_name, phone)
+        # Language this call was conducted in — the agent passes it, falling back
+        # to Retell's mid-call detection on the call row. Drives preferred_language
+        # for the new patient and the confirmation SMS language.
+        call_language = args.get("language") or (call.language_detected if call else None)
+
+        # Upsert patient (stores preferred_language on a new patient).
+        patient = await _upsert_patient(
+            session, practice_id, first_name, last_name, phone, language=call_language
+        )
         patient_opted_out = patient.sms_opt_out
 
         # Double-book guard: pick the first offered slot not already taken.
@@ -713,6 +728,7 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         time=booked_time,
         provider=booked_provider,
         opted_out=patient_opted_out,
+        language=patient.preferred_language,
     )
     logger.info("book_appointment: sms %s", sms_result)
 

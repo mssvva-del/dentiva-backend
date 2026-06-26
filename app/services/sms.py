@@ -59,6 +59,12 @@ def _last4(phone: str | None) -> str:
 # --------------------------------------------------------------------------- #
 # Message body
 # --------------------------------------------------------------------------- #
+def _norm_lang(language: str | None) -> str:
+    """Normalize any language tag to the two we support: 'es' or 'en'. Mirrors the
+    reactivation copy module so a Spanish caller gets Spanish everywhere."""
+    return "es" if (language or "en").lower().startswith("es") else "en"
+
+
 def build_confirmation_body(
     *,
     practice_name: str,
@@ -66,9 +72,22 @@ def build_confirmation_body(
     date: str,
     time: str,
     provider: str | None,
+    language: str = "en",
 ) -> str:
-    """Compose the patient-facing confirmation text (kept short — 1 SMS segment)."""
-    greeting = f"Hi {first_name}, " if first_name and first_name != "Unknown" else "Hi, "
+    """Compose the patient-facing confirmation text (kept short — 1 SMS segment).
+
+    Localized EN/ES — the language comes from the call the booking was made on, so
+    a patient who booked in Spanish gets a Spanish confirmation."""
+    unknown = not first_name or first_name == "Unknown"
+    if _norm_lang(language) == "es":
+        greeting = "Hola, " if unknown else f"Hola {first_name}, "
+        with_provider = f" con {provider}" if provider else ""
+        return (
+            f"{greeting}su cita en {practice_name} está confirmada para el "
+            f"{date} a las {time}{with_provider}. Responda a este mensaje o "
+            f"llámenos si necesita reprogramar."
+        )
+    greeting = "Hi, " if unknown else f"Hi {first_name}, "
     with_provider = f" with {provider}" if provider else ""
     return (
         f"{greeting}your appointment at {practice_name} is confirmed for "
@@ -83,9 +102,18 @@ def build_cancellation_body(
     first_name: str | None,
     date: str,
     time: str,
+    language: str = "en",
 ) -> str:
     """Compose the patient-facing cancellation text (kept short — 1 SMS segment)."""
-    greeting = f"Hi {first_name}, " if first_name and first_name != "Unknown" else "Hi, "
+    unknown = not first_name or first_name == "Unknown"
+    if _norm_lang(language) == "es":
+        greeting = "Hola, " if unknown else f"Hola {first_name}, "
+        return (
+            f"{greeting}su cita en {practice_name} el {date} a las {time} ha sido "
+            f"cancelada. Llámenos cuando quiera para reprogramar — con gusto le "
+            f"ayudamos."
+        )
+    greeting = "Hi, " if unknown else f"Hi {first_name}, "
     return (
         f"{greeting}your appointment at {practice_name} on {date} at {time} has "
         f"been cancelled. Call us anytime to rebook — we're happy to help."
@@ -220,6 +248,7 @@ async def send_booking_confirmation(
     time: str,
     provider: str | None,
     opted_out: bool = False,
+    language: str = "en",
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     """Build + send a booking confirmation. Fail-safe wrapper around send_sms."""
@@ -229,6 +258,7 @@ async def send_booking_confirmation(
         date=date,
         time=time,
         provider=provider,
+        language=language,
     )
     return await send_sms(to, body, opted_out=opted_out, client=client)
 
@@ -241,6 +271,7 @@ async def send_cancellation_notice(
     date: str,
     time: str,
     opted_out: bool = False,
+    language: str = "en",
     client: httpx.AsyncClient | None = None,
 ) -> dict:
     """Build + send a cancellation notice. Fail-safe wrapper around send_sms."""
@@ -249,6 +280,7 @@ async def send_cancellation_notice(
         first_name=first_name,
         date=date,
         time=time,
+        language=language,
     )
     return await send_sms(to, body, opted_out=opted_out, client=client)
 
