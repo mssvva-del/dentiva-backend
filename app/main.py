@@ -40,6 +40,7 @@ from app.routes import (
 from app.security import verify_security_config
 from app.services.call_sync import call_sync_loop
 from app.services.maintenance import maintenance_loop
+from app.services.reactivation.worker import reactivation_worker_loop
 from app.services.reminders import reminder_loop
 from app.webhooks import clerk, retell, stripe, twilio_sms
 
@@ -69,6 +70,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.maintenance_enabled:
         tasks.append(asyncio.create_task(maintenance_loop()))
         logger.info("Maintenance background task started")
+
+    if settings.reactivation_enabled:
+        tasks.append(asyncio.create_task(reactivation_worker_loop()))
+        logger.info("Reactivation worker background task started")
 
     try:
         yield

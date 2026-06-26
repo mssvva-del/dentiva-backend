@@ -250,6 +250,13 @@ class Settings(BaseSettings):
     maintenance_interval_seconds: int = 86_400  # once a day
     processed_event_ttl_days: int = 90
 
+    # Reactivation Engine worker (block: queue). The targets table IS the durable
+    # job queue (next_touch_at = scheduled time); this loop just drains due touches
+    # per practice on an interval. OFF by default — turned on once the live-loop
+    # (real number + PMS) is wired, so it never auto-dials on the demo.
+    reactivation_enabled: bool = False
+    reactivation_interval_seconds: int = 300  # how often the worker drains due touches
+
     # Sentry error monitoring. Empty DSN → disabled (dev/tests). PII is sent only
     # via our scrubbed before_send (send_default_pii stays False — HIPAA).
     sentry_dsn: str = ""
