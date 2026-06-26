@@ -33,6 +33,7 @@ from app.routes import (
     onboarding,
     patients,
     practice,
+    reactivation,
     team,
     voice,
     waitlist,
@@ -208,6 +209,7 @@ app.include_router(calls.router)
 app.include_router(bookings.router)
 app.include_router(callbacks.router)
 app.include_router(patients.router)
+app.include_router(reactivation.router)
 app.include_router(dashboard.router)
 app.include_router(waitlist.router)
 app.include_router(voice.router)
