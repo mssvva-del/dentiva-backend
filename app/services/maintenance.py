@@ -57,7 +57,12 @@ async def scrub_expired_transcripts(
     for analytics/billing. Returns rows scrubbed. 0 retention days disables it.
 
     Runs per-practice (calls are RLS-scoped, so a cross-tenant UPDATE as the app
-    role would silently touch only one tenant) — set_tenant per practice."""
+    role would silently touch only one tenant) — set_tenant per practice.
+
+    NOTE: this nulls the recording_path POINTER. When recordings live in external
+    object storage (S3 signed URLs in prod), the audio file itself must be expired
+    by a bucket lifecycle policy or an enqueued delete — nulling the column alone
+    does not remove the stored PHI. Tracked as a prod follow-up."""
     now = now or datetime.now(tz=UTC)
     days = (
         retention_days if retention_days is not None

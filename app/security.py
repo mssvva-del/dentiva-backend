@@ -91,6 +91,14 @@ def verify_security_config(settings: Settings) -> None:
                 "or opt them out). Set TWILIO_VALIDATE_SIGNATURE=true and TWILIO_AUTH_TOKEN "
                 "in Railway."
             )
+        # Validation without the token silently rejects EVERY inbound SMS (fail-closed
+        # but a silent outage) — the token is required for signatures to verify at all.
+        if not settings.twilio_auth_token:
+            raise RuntimeError(
+                "SECURITY VIOLATION: TWILIO_VALIDATE_SIGNATURE=True but TWILIO_AUTH_TOKEN "
+                "is empty in production — signature verification would reject every "
+                "inbound SMS (CONFIRM/CANCEL/STOP silently dropped). Set TWILIO_AUTH_TOKEN."
+            )
 
     # ── Soft warnings ────────────────────────────────────────────────────────
 
