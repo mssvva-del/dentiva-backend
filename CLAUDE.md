@@ -1,158 +1,74 @@
-# Dentiva Backend — Working Agreement
+# Dentovox Backend — Engineering Guide
 
-You are the backend engineer for Dentiva. Your scope is this folder only.
-
-**WEEKEND MODE: Build to run locally on Sergio's M2 Mac via Docker. No AWS. No cloud deployments. Use free tier services only.**
+FastAPI backend for Dentovox: an AI voice receptionist + patient reactivation engine
+for US dental practices. Multi-tenant, HIPAA-minded. Scope = this folder.
 
 ## Stack
+- Python 3.12, FastAPI, Pydantic v2 settings
+- SQLAlchemy 2 (async, asyncpg) + Alembic, PostgreSQL 15
+- Clerk JWT auth · Retell (voice) · Groq (LLM) · Twilio (SMS) · NexHealth/Open Dental (PMS)
+- pytest (async) · ruff (lint) · Sentry (PHI-scrubbed)
 
-- Python 3.12, FastAPI, Pydantic v2
-- PostgreSQL 15 via SQLAlchemy 2 + Alembic
-- Pytest for tests
-- Deployment (later): AWS Lambda + API Gateway
-- Local dev: Docker Compose (Postgres only — Mac has Docker Desktop)
-
-## Mandatory first read
-
-Before ANY work, view these files:
-1. `/Users/sergmols/Projects/dentiva-starter/_docs/ARCHITECTURE.md`
-2. `/Users/sergmols/Projects/dentiva-starter/_shared/API_CONTRACT.md`
-3. `/Users/sergmols/Projects/dentiva-starter/_shared/DATA_MODEL.md`
-4. `./START_PROMPT.md`
-
-Then say "Ready for Phase 1" — do not start coding yet.
-
-## Hard rules
-
-1. **Scope**: only endpoints listed in `API_CONTRACT.md` for Iter 1. Out of scope = STOP.
-2. **No PHI in logs**: never log patient names, phone, DOB. Use `patient_id` references.
-3. **Multi-tenancy everywhere**: every query touching PHI filters by `practice_id`. SQLAlchemy session-level filter. Test for missing filters.
-4. **Idempotency**: webhook handlers idempotent via `retell_call_id` dedup.
-5. **Secrets**: never hardcode. Use `.env` locally (gitignored).
-6. **No deploy without tests**: every endpoint needs happy-path + auth failure + multi-tenant isolation tests.
-7. **Weekend Mode**: NO AWS calls. NO production secrets. Mock external services when convenient.
-
-## When stuck
-
-If <80% confident:
-- STOP coding
-- Write question to `/Users/sergmols/Projects/dentiva-starter/_docs/QUESTIONS.md`
-- Tell user "I have a question in _docs/QUESTIONS.md"
-
-Do NOT guess. Do NOT "try and iterate" — past CRM bugs came from this pattern.
-
-## Phase structure
-
-Each phase ends with:
-- All new tests pass: `pytest -v`
-- Lint clean: `ruff check .` and `mypy app/`
-- Docker compose starts: `docker compose up -d && curl localhost:8000/health`
-- Git commit with conventional message: `feat:`, `fix:`, `chore:`
-- Update `/Users/sergmols/Projects/dentiva-starter/_docs/PROGRESS.md`
-
-If ANY criterion fails — Phase NOT done.
-
-## Folder layout
-
+## Commands
+```bash
+docker compose up -d db                       # Postgres on :5432
+export DATABASE_URL="postgresql+asyncpg://dentiva:dentiva@localhost:5432/dentiva"
+.venv/bin/alembic upgrade head                # apply migrations
+.venv/bin/python -m pytest -q                 # full suite (needs db up)
+.venv/bin/ruff check app/ tests/              # lint (must be clean)
 ```
-dentiva-backend/
-├── app/
-│   ├── main.py              # FastAPI entry
-│   ├── config.py            # Pydantic settings
-│   ├── db.py                # SQLAlchemy session
-│   ├── models/              # SQLAlchemy models (one per table)
-│   ├── schemas/             # Pydantic request/response
-│   ├── routes/              # FastAPI routers
-│   ├── services/            # Business logic
-│   ├── webhooks/            # Webhook handlers
-│   ├── adapters/            # External APIs (Open Dental, Retell)
-│   ├── middleware/          # Auth, tenant context, audit
-│   └── utils/               # Encryption, formatting
-├── migrations/              # Alembic
-├── tests/
-│   ├── conftest.py
-│   ├── test_routes/
-│   ├── test_services/
-│   └── test_adapters/
-├── docker-compose.yml       # Postgres only — backend runs natively
-├── Dockerfile               # For later AWS deployment
-├── pyproject.toml
-├── alembic.ini
-├── .env.example
-└── CLAUDE.md (this file)
+Migrations run as superuser `dentiva`; the app connects as `dentiva_app` (NOBYPASSRLS).
+
+## Layout
+```
+app/
+  main.py            FastAPI app: lifespan (background loops), router mounts, gated features
+  config.py          Pydantic Settings (all env flags)
+  db.py              async engine, Base, set_tenant() — RLS tenant context
+  models/            SQLAlchemy models (one per table)
+  schemas/           Pydantic request/response
+  routes/            HTTP routers (/api/*)
+  webhooks/          retell.py (voice tools), twilio_sms.py, clerk.py, stripe.py
+  services/          business logic — reactivation/ (the engine), sms, booking, llm/
+  adapters/          PMS clients — nexhealth/, open_dental/ (+ mocks)
+  api/llm_relay.py   Retell custom-LLM WebSocket → Groq (gated, ENABLE_LLM_RELAY)
+  utils/crypto.py    Fernet PII encrypt/decrypt + phone_hmac (searchable hash)
+migrations/          Alembic revisions
+tests/               test_routes/ test_services/ test_adapters/ (conftest builds schema + RLS)
+scripts/             one-off ops (backfill_phone_hmac, seeds)
 ```
 
-## Key patterns
+## Conventions (non-negotiable)
+- **Multi-tenancy = Postgres RLS.** Every PHI query runs after `await set_tenant(session, practice_id)`.
+  Tables carry FORCE RLS; the app role can't bypass it. New PHI table → add to the RLS list
+  (conftest + scripts/check_rls_coverage.py) or the gate fails.
+- **No PHI in logs.** Never log names/phone/DOB/transcript. Log `patient_id`, last-4, counts.
+- **PII columns** use `EncryptedString` (Fernet bytea). Phone is also mirrored to the
+  deterministic, indexed `patients.phone_hmac` — look patients up by that, never by scanning.
+- **Webhooks are idempotent** (retell_call_id / event id dedup). Writes are never auto-retried
+  (double-book risk); external calls go through `utils/resilience` (timeout + retry on reads).
+- **Schema changes need a migration** (up + down, tested `alembic upgrade/downgrade`).
+- **Every endpoint** needs happy-path + auth-failure + tenant-isolation tests. `ruff` clean.
+- **Branch + PR.** Do NOT merge to `main` — `feat/reactivation` is the integration branch;
+  main is gated on a live-clinic check (audit RISK 1). Commit style: `feat:`/`fix:`/`perf:`/`chore:`.
 
-### Multi-tenant query helper
-```python
-# app/db.py
-def tenant_query(model, practice_id: UUID):
-    return select(model).where(model.practice_id == practice_id)
-```
+## Key entry points
+- **Voice call** → `webhooks/retell.py`: function-call router (book/reschedule/cancel/waitlist/
+  transfer) + a PROGRAMMATIC emergency lock (persisted in `calls.emergency_active`, not prompt-based).
+- **Reactivation engine** → `services/reactivation/`: NexHealth pull → segmentation → scoring →
+  scheduler → outreach (SMS+voice) → PMS write-back → ROI. Worker loop in `worker.py`, gated by
+  `REACTIVATION_ENABLED` (off by default — never auto-dials the demo).
+- **Groq relay** → `api/llm_relay.py`: runs the receptionist on our Groq loop; gated
+  `ENABLE_LLM_RELAY` (off — demo uses Retell-managed model). Conversational only; tools stay on
+  the signed webhook.
 
-### Webhook idempotency
-```python
-async def handle_retell_webhook(payload: dict, db: AsyncSession):
-    if await call_already_processed(payload['call_id'], db):
-        return {"ok": True, "deduplicated": True}
-    # process...
-```
+## Gated flags (default OFF — flip deliberately)
+`REACTIVATION_ENABLED`, `ENABLE_LLM_RELAY`, `SMS_ENABLED`, `REMINDERS_ENABLED`.
 
-### Encrypted PII
-```python
-# app/utils/crypto.py
-def encrypt_pii(value: str) -> bytes
-def decrypt_pii(blob: bytes) -> str
+## When unsure (<80% confident)
+STOP. Write the question to `_docs/QUESTIONS.md` and tell the user. Don't guess or "try and iterate".
 
-# In model:
-class Patient(Base):
-    first_name = Column(EncryptedString)
-```
-
-## Phase 1 acceptance (high level)
-
-By end of Phase 1:
-- FastAPI boots, `/health` returns `{"status":"ok"}`
-- All tables from `DATA_MODEL.md` exist via Alembic migration
-- `GET /api/practice/me` works with Clerk JWT
-- Mock Open Dental adapter (returns fake patient — real integration later)
-- Tests cover all above
-- Multi-tenant isolation test passes
-
-Phase 2 = Retell webhook + booking flow.
-Phase 3 = Hardening + audit logs.
-
-Read `START_PROMPT.md` for detailed steps.
-
-## Things to ask user about (in QUESTIONS.md)
-
-If user hasn't given you these, ask:
-
-1. Clerk Publishable + Secret keys
-2. Retell test mode webhook signing secret (will create later)
-3. Database encryption key (or "generate one for me")
-
-For Open Dental — use MOCK adapter on weekend (real integration is Phase 2 of Iter 2).
-
-## When user says "next phase"
-
-Don't auto-start. Re-read CLAUDE.md and START_PROMPT.md, summarize next steps in 3 bullets, wait for "go".
-
-## Token economy
-
-- Don't re-read same file twice in one session — remember contents
-- Don't paste large files in responses; reference paths
-- Use `grep` and `view` with `view_range` instead of full reads
-- Run tests with `-x` (stop at first failure)
-- If directory has >20 files, ask before recursive view
-
-## Anti-patterns (from past projects — DO NOT repeat)
-
-- ❌ "Let me try refactoring" without writing test first
-- ❌ Code that "should work" without running it
-- ❌ DB schema changes without migration file
-- ❌ Auth logic inside routes (goes in middleware)
-- ❌ Catching all exceptions silently
-- ❌ Different error shapes from different endpoints
-- ❌ Installing packages "just in case"
+## Anti-patterns (do not repeat)
+Refactor without a test · code that "should work" un-run · schema change without migration ·
+auth logic inside routes (belongs in deps/middleware) · silent `except:` · PHI in logs ·
+scanning+decrypting to find a patient (use `phone_hmac`) · installing packages "just in case".
