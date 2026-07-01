@@ -84,6 +84,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Close the pooled Groq client (no-op if the relay never ran).
+        from app.services.llm.groq_client import aclose_pool
+
+        await aclose_pool()
 
 
 
@@ -218,6 +222,14 @@ app.include_router(twilio_sms.router)
 app.include_router(clerk.router)
 app.include_router(stripe.router)
 app.include_router(knowledge_base.router)
+
+# Groq custom-LLM relay for Retell — mounted ONLY when enabled, so the demo keeps
+# using the Retell-managed model until a clinic is deliberately switched over.
+if get_settings().enable_llm_relay:
+    from app.api.llm_relay import router as llm_relay_router
+
+    app.include_router(llm_relay_router)
+    logger.info("Groq LLM relay mounted at /ws/retell-llm (ENABLE_LLM_RELAY=true)")
 # PLACEHOLDER — Recall / reactivation campaigns (see _docs/RECALL_CAMPAIGNS.md).
 # When app/routes/recall.py lands, mount it here AND rate-limit the outbound
 # trigger routes hard, e.g.:
@@ -231,7 +243,3 @@ app.include_router(knowledge_base.router)
 # bug or a compromised token dial thousands of patients before anyone notices —
 # unlike read endpoints, the blast radius is external and irreversible. Keep the
 # launch/import limit far stricter than the generic per-IP limit.
-# retell-llm). Mounted only when explicitly enabled, so an unauthenticated WS
-# isn't exposed by default (Security Sprint M7).
-if get_settings().enable_llm_relay:
-    logger.info("Groq LLM relay mounted (ENABLE_LLM_RELAY=true)")
