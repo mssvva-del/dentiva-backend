@@ -41,6 +41,7 @@ from app.services.sms import (
     send_cancellation_notice,
     send_waitlist_opening,
 )
+from app.utils.crypto import phone_hmac
 
 logger = logging.getLogger("dentiva.webhooks.retell")
 
@@ -218,17 +219,10 @@ async def _upsert_patient(
     store it as preferred_language so downstream SMS + reactivation speak their
     language. We do NOT overwrite an existing patient's stored preference (a
     relative may call in a different language)."""
-    # Look up by encrypted phone — requires scanning; acceptable for weekend scale.
-    result = await session.execute(
-        select(Patient).where(Patient.practice_id == practice_id)
-    )
-    patients = result.scalars().all()
-    for p in patients:
-        try:
-            if p.phone == phone:
-                return p
-        except Exception:
-            pass
+    # Indexed lookup by the deterministic phone hash — no full-table scan / decrypt.
+    existing = await _find_patient_by_phone(session, practice_id, phone)
+    if existing is not None:
+        return existing
 
     # Create a new stub patient. Only 'es'/'en' supported; default 'en'.
     preferred_language = "es" if (language or "").lower().startswith("es") else "en"
@@ -249,19 +243,29 @@ async def _upsert_patient(
 async def _find_patient_by_phone(
     session, practice_id: uuid.UUID, phone: str
 ) -> Patient | None:
-    """Read-only lookup of a patient by (encrypted) phone within a practice."""
-    if not phone:
+    """Read-only lookup of a patient by phone within a practice — indexed via the
+    deterministic phone hash (no scan/decrypt).
+
+    Deterministic on collision: family members can share one phone in a practice.
+    We return the OLDEST match (stable) and log when more than one exists so the
+    ambiguity is visible rather than silently picking a random row."""
+    h = phone_hmac(phone)
+    if not h:
         return None
-    result = await session.execute(
-        select(Patient).where(Patient.practice_id == practice_id)
-    )
-    for p in result.scalars().all():
-        try:
-            if p.phone == phone:
-                return p
-        except Exception:  # noqa: BLE001 — decrypt failures on stray rows are non-fatal
-            pass
-    return None
+    rows = (
+        await session.execute(
+            select(Patient)
+            .where(Patient.practice_id == practice_id, Patient.phone_hmac == h)
+            .order_by(Patient.created_at.asc())
+            .limit(2)
+        )
+    ).scalars().all()
+    if len(rows) > 1:
+        logger.warning(
+            "phone lookup: %d patients share this number in practice %s — using oldest",
+            len(rows), practice_id,
+        )
+    return rows[0] if rows else None
 
 
 async def _slot_taken(

@@ -13,13 +13,68 @@ provides integrity, so a tampered ciphertext raises ``InvalidToken`` on decrypt.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import re
 from functools import lru_cache
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from app.config import get_settings
 
-__all__ = ["encrypt_pii", "decrypt_pii", "rotate_pii", "InvalidToken"]
+__all__ = [
+    "encrypt_pii",
+    "decrypt_pii",
+    "rotate_pii",
+    "InvalidToken",
+    "normalize_phone",
+    "phone_hmac",
+]
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic phone hash — a SEARCHABLE sidecar for the encrypted phone.
+#
+# Fernet ciphertext is non-deterministic, so an encrypted phone can't be indexed
+# or queried — the old code loaded every patient in a practice and decrypted each
+# to find one by number (O(n) + crypto on the voice hot path). Instead we store a
+# stable HMAC-SHA256 of the NORMALIZED phone in an indexed column: lookups become a
+# single indexed equality, no decryption. The HMAC key is derived from the primary
+# encryption key so no new secret is needed, and the raw phone is not recoverable
+# from the hash (keyed + one-way).
+# --------------------------------------------------------------------------- #
+@lru_cache
+def _phone_hash_key() -> bytes:
+    # Derived from the PRIMARY ENCRYPTION_KEY (domain-separated with a prefix so it
+    # is not the Fernet key). CAVEAT: unlike decryption there is no _OLD fallback —
+    # if ENCRYPTION_KEY is rotated, every stored phone_hmac becomes stale, so a key
+    # rotation MUST be followed by re-running scripts/backfill_phone_hmac.py.
+    key = get_settings().encryption_key
+    if not key:
+        raise RuntimeError("ENCRYPTION_KEY is not set — cannot derive phone hash key")
+    return hashlib.sha256(("phone-hmac:" + key).encode("utf-8")).digest()
+
+
+def normalize_phone(phone: str | None) -> str | None:
+    """Reduce a phone to comparable digits so formatting differences don't cause
+    misses. Strips non-digits; drops a US leading '1' so +1XXXXXXXXXX, 1XXXXXXXXXX
+    and (XXX) XXX-XXXX all hash the same. None if empty. US-centric (this is a
+    US-only dental product) — no general country-code handling."""
+    if not phone:
+        return None
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits or None
+
+
+def phone_hmac(phone: str | None) -> str | None:
+    """Stable HMAC-SHA256 of the normalized phone (hex), or None. Deterministic
+    across the fleet → storable + queryable on an index."""
+    norm = normalize_phone(phone)
+    if norm is None:
+        return None
+    return hmac.new(_phone_hash_key(), norm.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _as_fernet(key: str) -> Fernet:
