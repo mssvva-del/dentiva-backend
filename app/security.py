@@ -78,6 +78,20 @@ def verify_security_config(settings: Settings) -> None:
                 f"{', '.join(missing)}. Set them in Railway → dentiva-backend → Variables."
             )
 
+        # The inbound Twilio SMS webhook is ALWAYS mounted and acts on the caller's
+        # From-number (CANCEL a booking, STOP-opt-out, waitlist backfill). Without
+        # signature validation anyone who knows a patient's phone number can forge
+        # these — so it must be verified in production, exactly like Retell/Clerk/
+        # Stripe. Hard-fail rather than warn.
+        if not settings.twilio_validate_signature:
+            raise RuntimeError(
+                "SECURITY VIOLATION: TWILIO_VALIDATE_SIGNATURE=False while "
+                "ENVIRONMENT='production'. The inbound Twilio SMS webhook would be "
+                "unauthenticated (a forged request could cancel a patient's appointment "
+                "or opt them out). Set TWILIO_VALIDATE_SIGNATURE=true and TWILIO_AUTH_TOKEN "
+                "in Railway."
+            )
+
     # ── Soft warnings ────────────────────────────────────────────────────────
 
     if not settings.reminders_enabled:
@@ -86,11 +100,10 @@ def verify_security_config(settings: Settings) -> None:
             "Set REMINDERS_ENABLED=true on Railway to enable."
         )
 
-    if not settings.twilio_validate_signature:
+    if not is_production and not settings.twilio_validate_signature:
         logger.warning(
             "CONFIG: TWILIO_VALIDATE_SIGNATURE is False — Twilio webhook requests "
-            "are NOT cryptographically verified. Set TWILIO_VALIDATE_SIGNATURE=true "
-            "in production (after confirming your public webhook URL in Twilio Console)."
+            "are NOT cryptographically verified (dev). Required in production."
         )
 
     logger.info(

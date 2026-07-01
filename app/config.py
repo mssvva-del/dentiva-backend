@@ -249,6 +249,9 @@ class Settings(BaseSettings):
     maintenance_enabled: bool = True
     maintenance_interval_seconds: int = 86_400  # once a day
     processed_event_ttl_days: int = 90
+    # PHI data-minimization: after this many days, scrub call transcripts +
+    # recording paths (keep the call row's metadata for analytics/billing). 0 = off.
+    call_transcript_retention_days: int = 365
 
     # Reactivation Engine worker (block: queue). The targets table IS the durable
     # job queue (next_touch_at = scheduled time); this loop just drains due touches

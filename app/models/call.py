@@ -4,12 +4,12 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Text
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 from app.models.mixins import TimestampMixin, UUIDPKMixin
+from app.models.types import EncryptedJSON
 
 
 class Call(UUIDPKMixin, TimestampMixin, Base):
@@ -35,9 +35,10 @@ class Call(UUIDPKMixin, TimestampMixin, Base):
     outcome: Mapped[str | None] = mapped_column(Text)
     recording_path: Mapped[str | None] = mapped_column(Text)
     # WHY no encryption here but PII still inside: the transcript is free text and
-    # callers may speak names/phone/DOB. Stored raw (the agent/analytics need it),
-    # so it MUST be masked on the way out — see app/utils/redact.redact_transcript.
-    transcript_jsonb: Mapped[dict | list | None] = mapped_column(JSONB)
+    # callers may speak names/phone/DOB. Encrypted at rest (EncryptedJSON/Fernet →
+    # bytea) so a DB dump never exposes full conversations; still masked on the way
+    # OUT for display — see app/utils/redact.redact_transcript.
+    transcript_jsonb: Mapped[dict | list | None] = mapped_column(EncryptedJSON)
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     language_detected: Mapped[str | None] = mapped_column(Text)
     call_intent: Mapped[str | None] = mapped_column(Text)

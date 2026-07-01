@@ -20,10 +20,13 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select, update
 
 import app.db as app_db
 from app.config import get_settings
+from app.db import set_tenant
+from app.models.call import Call
+from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
 
 logger = logging.getLogger(__name__)
@@ -46,6 +49,44 @@ async def prune_processed_events(
     return result.rowcount or 0
 
 
+async def scrub_expired_transcripts(
+    *, now: datetime | None = None, retention_days: int | None = None
+) -> int:
+    """PHI data-minimization: null out transcripts + recording paths on calls older
+    than the retention window, keeping the row's metadata (outcome, duration, timing)
+    for analytics/billing. Returns rows scrubbed. 0 retention days disables it.
+
+    Runs per-practice (calls are RLS-scoped, so a cross-tenant UPDATE as the app
+    role would silently touch only one tenant) — set_tenant per practice."""
+    now = now or datetime.now(tz=UTC)
+    days = (
+        retention_days if retention_days is not None
+        else get_settings().call_transcript_retention_days
+    )
+    if not days or days <= 0:
+        return 0
+    cutoff = now - timedelta(days=days)
+
+    scrubbed = 0
+    async with app_db.async_session_factory() as session:
+        practice_ids = (await session.execute(select(Practice.id))).scalars().all()
+    for pid in practice_ids:
+        async with app_db.async_session_factory() as session:
+            await set_tenant(session, pid)
+            result = await session.execute(
+                update(Call)
+                .where(
+                    Call.practice_id == pid,
+                    Call.started_at < cutoff,
+                    (Call.transcript_jsonb.isnot(None)) | (Call.recording_path.isnot(None)),
+                )
+                .values(transcript_jsonb=None, recording_path=None)
+            )
+            await session.commit()
+            scrubbed += result.rowcount or 0
+    return scrubbed
+
+
 async def maintenance_loop() -> None:
     """Run maintenance forever on a fixed interval."""
     interval = get_settings().maintenance_interval_seconds
@@ -55,6 +96,9 @@ async def maintenance_loop() -> None:
             removed = await prune_processed_events()
             if removed:
                 logger.info("maintenance: pruned %s processed_webhook_events", removed)
+            scrubbed = await scrub_expired_transcripts()
+            if scrubbed:
+                logger.info("maintenance: scrubbed PHI on %s expired calls", scrubbed)
         except asyncio.CancelledError:
             logger.info("maintenance loop cancelled — stopping")
             raise
