@@ -10,6 +10,8 @@ The Price-ID mapping comes from env (test-mode IDs first).
 
 from __future__ import annotations
 
+import re
+
 import httpx
 
 from app.config import get_settings
@@ -82,3 +84,122 @@ async def create_checkout_session(
     if resp.status_code >= 400:
         raise BillingNotConfigured(f"Stripe error {resp.status_code}: {resp.text[:200]}")
     return resp.json()["url"]
+
+
+# ---------------------------------------------------------------------------
+# Coupons (ADM2) — Stripe-native discounts, applied to a clinic's subscription.
+# We deliberately use Stripe Coupon objects instead of a homegrown discount table:
+# Stripe then handles proration/invoicing math and the discount shows up on real
+# invoices. All calls form-encoded httpx (same pattern as checkout above), with an
+# injectable transport so tests never hit the network.
+# ---------------------------------------------------------------------------
+
+
+class StripeError(Exception):
+    """Stripe request failed. ``status_code`` lets the route map 4xx → 422 and
+    upstream 5xx / transport failures → 502 (honest gateway error)."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _require_key() -> str:
+    settings = get_settings()
+    if not settings.stripe_secret_key:
+        raise BillingNotConfigured("STRIPE_SECRET_KEY not set")
+    return settings.stripe_secret_key
+
+
+async def _stripe_request(
+    method: str,
+    path: str,
+    data: dict | None = None,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    key = _require_key()
+    try:
+        async with httpx.AsyncClient(timeout=15, transport=transport) as client:
+            resp = await client.request(
+                method, f"{_STRIPE_API}{path}", data=data, auth=(key, "")
+            )
+    except httpx.HTTPError as exc:
+        # Stripe unreachable / timeout — never let a transport error escape as a
+        # raw 500; the route maps this to a clean 502.
+        raise StripeError(
+            f"Stripe unreachable: {type(exc).__name__}", status_code=502
+        ) from exc
+    if resp.status_code >= 400:
+        # Stripe error bodies are JSON {error:{message}} — surface the message,
+        # bounded, never the key.
+        try:
+            msg = resp.json().get("error", {}).get("message", "")[:200]
+        except Exception:  # noqa: BLE001
+            msg = resp.text[:200]
+        raise StripeError(f"Stripe {resp.status_code}: {msg}", status_code=resp.status_code)
+    return resp.json()
+
+
+async def create_coupon(
+    *,
+    name: str,
+    percent_off: float | None = None,
+    amount_off_cents: int | None = None,
+    duration: str = "once",
+    duration_in_months: int | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    """Create a Stripe coupon. Exactly one of percent_off / amount_off_cents.
+    duration: once | repeating (needs duration_in_months) | forever."""
+    data: dict = {"name": name, "duration": duration}
+    if percent_off is not None:
+        data["percent_off"] = str(percent_off)
+    if amount_off_cents is not None:
+        data["amount_off"] = str(amount_off_cents)
+        data["currency"] = "usd"
+    if duration == "repeating" and duration_in_months:
+        data["duration_in_months"] = str(duration_in_months)
+    return await _stripe_request("POST", "/coupons", data, transport=transport)
+
+
+async def list_coupons(
+    *, transport: httpx.AsyncBaseTransport | None = None
+) -> list[dict]:
+    body = await _stripe_request("GET", "/coupons?limit=100", transport=transport)
+    return body.get("data", [])
+
+
+def _safe_id(value: str, what: str) -> str:
+    """Validate a Stripe object id before interpolating it into a URL path —
+    defense-in-depth against path tricks if a future caller passes raw input."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value or ""):
+        raise StripeError(f"invalid {what} id", status_code=422)
+    return value
+
+
+async def delete_coupon(
+    coupon_id: str, *, transport: httpx.AsyncBaseTransport | None = None
+) -> None:
+    await _stripe_request(
+        "DELETE", f"/coupons/{_safe_id(coupon_id, 'coupon')}", transport=transport
+    )
+
+
+async def apply_coupon_to_subscription(
+    stripe_subscription_id: str,
+    coupon_id: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    """Attach a coupon to an existing Stripe subscription (discount applies from
+    the next invoice per the coupon's duration).
+
+    NOTE: ``discounts[0][coupon]`` REPLACES the subscription's discounts array —
+    one discount per clinic by design; applying coupon B removes coupon A."""
+    return await _stripe_request(
+        "POST",
+        f"/subscriptions/{_safe_id(stripe_subscription_id, 'subscription')}",
+        {"discounts[0][coupon]": _safe_id(coupon_id, "coupon")},
+        transport=transport,
+    )
