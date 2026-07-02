@@ -8,6 +8,7 @@ from app.models.dentiva_staff import DentivaStaff
 from app.models.feature_flag import FeatureFlag
 from app.models.invitation import Invitation
 from app.models.invoice import Invoice
+from app.models.lead import Lead
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
@@ -36,6 +37,7 @@ __all__ = [
     "Invoice",
     "UsageRecord",
     "FeatureFlag",
+    "Lead",
     "ProcessedWebhookEvent",
     "ReactivationCampaign",
     "ReactivationTarget",
