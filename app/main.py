@@ -92,7 +92,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 
-app = FastAPI(title="Dentiva Backend", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Dentovox Backend", version="0.1.0", lifespan=lifespan)
 # WHY middleware order matters: Starlette runs middleware in REVERSE order of
 # add_middleware() — last added is outermost (runs first on the way in). So the
 # order below is deliberate: RequestContextMiddleware is added LAST so it wraps
