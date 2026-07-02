@@ -87,7 +87,8 @@ async def test_full_refund_flips_status(client, db_session, monkeypatch):
                           headers=_h("fin_r1"), json={})
     assert r.status_code == 200
     assert r.json()["status"] == "refunded"
-    assert refunded == {"id": "in_test", "amount": None}  # full refund
+    # Full refund sends the explicit REMAINING amount (bounded accounting).
+    assert refunded == {"id": "in_test", "amount": 24900}
 
     # already refunded → 409 (can't refund twice)
     r2 = await client.post(f"/api/admin/invoices/{inv.id}/refund",
@@ -148,3 +149,71 @@ async def test_admin_lists_clinic_invoices(client, db_session):
     r = await client.get(f"/api/admin/clinics/{practice.id}/invoices",
                          headers=_h("fin_r4"))
     assert r.status_code == 200 and len(r.json()) == 2
+
+
+async def test_two_partials_bounded_by_remaining(client, db_session, monkeypatch):
+    """Reviewer #2/#3: partials accumulate; the second is bounded by REMAINING, and
+    hitting 100% flips the status to refunded."""
+    await _internal(db_session, clerk_id="fin_r5", role="finance")
+    practice, _ = await seed_practice(db_session, name="RefCo5",
+                                      clerk_org_id="o_ref5", clerk_user_id="u_ref5")
+    inv = await _invoice(db_session, practice.id, stripe_id="in_two", amount=10000)
+    keys = []
+
+    async def _fake_refund(stripe_id, amount=None, *, idempotency_key=None, **_kw):
+        keys.append(idempotency_key)
+        return {"id": f"re_{len(keys)}", "status": "succeeded"}
+    monkeypatch.setattr(admin_mod, "refund_invoice", _fake_refund)
+
+    # 60% partial → ok.
+    r1 = await client.post(f"/api/admin/invoices/{inv.id}/refund",
+                           headers=_h("fin_r5"), json={"amount_cents": 6000})
+    assert r1.status_code == 200 and r1.json()["status"] == "partially_refunded"
+    # Second 60% → exceeds REMAINING (4000) → clean 422 locally, Stripe not called.
+    r2 = await client.post(f"/api/admin/invoices/{inv.id}/refund",
+                           headers=_h("fin_r5"), json={"amount_cents": 6000})
+    assert r2.status_code == 422 and "remaining" in r2.json()["error"]["message"]
+    # Remaining 40% → flips to fully refunded.
+    r3 = await client.post(f"/api/admin/invoices/{inv.id}/refund",
+                           headers=_h("fin_r5"), json={"amount_cents": 4000})
+    assert r3.status_code == 200 and r3.json()["status"] == "refunded"
+    # Idempotency keys are deterministic AND differ across sequential refunds
+    # (prior refunded totals differ) — a same-state duplicate would collide.
+    assert len(keys) == 2 and keys[0] != keys[1]
+    assert keys[0] == f"refund-{inv.id}-6000-0"
+    assert keys[1] == f"refund-{inv.id}-4000-6000"
+
+
+async def test_webhook_does_not_clobber_refunded_status(db_session):
+    """Reviewer #4: a redelivered invoice.paid upsert must NOT flip an admin-refunded
+    invoice back to 'paid' (which would re-arm the refund button)."""
+    from sqlalchemy import text as _text
+
+    from app.webhooks.stripe import _upsert_invoice
+    practice, _ = await seed_practice(db_session, name="RefCo6",
+                                      clerk_org_id="o_ref6", clerk_user_id="u_ref6")
+
+    async def _status(stripe_id: str) -> str:
+        # Raw read — the upsert bypasses the ORM identity map.
+        return (await db_session.execute(
+            _text("SELECT status FROM invoices WHERE stripe_invoice_id = :x"),
+            {"x": stripe_id},
+        )).scalar_one()
+
+    # Invoice already refunded (as the admin refund flow would have set it).
+    await _invoice(db_session, practice.id, stripe_id="in_clob",
+                   status="refunded", amount=5000)
+    # Redelivered invoice.paid upsert with status='paid' → must KEEP 'refunded'.
+    await _upsert_invoice(db_session, practice.id, stripe_id="in_clob",
+                          amount_cents=5000, status_="paid",
+                          paid_at=datetime.now(tz=UTC))
+    await db_session.commit()
+    assert await _status("in_clob") == "refunded"  # not clobbered back to paid
+
+    # But a genuine 'open' invoice DOES accept 'paid'.
+    inv2 = await _invoice(db_session, practice.id, stripe_id="in_open2", status="open")
+    await _upsert_invoice(db_session, practice.id, stripe_id="in_open2",
+                          amount_cents=inv2.amount_cents, status_="paid",
+                          paid_at=datetime.now(tz=UTC))
+    await db_session.commit()
+    assert await _status("in_open2") == "paid"

@@ -35,7 +35,14 @@ class Invoice(UUIDPKMixin, TimestampMixin, Base):
     )
     stripe_invoice_id: Mapped[str | None] = mapped_column(Text)
     amount_cents: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Running total refunded via the admin panel — partial refunds accumulate here,
+    # and the remaining-amount check bounds the next refund (prevents over-refund
+    # across multiple partials). amount == refunded → status 'refunded'.
+    refunded_amount_cents: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     # 'draft' | 'open' | 'paid' | 'uncollectible' | 'void' (Stripe's vocabulary)
+    # + ours: 'partially_refunded' | 'refunded' (admin refunds).
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="open")
     period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

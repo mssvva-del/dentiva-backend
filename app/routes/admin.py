@@ -798,13 +798,17 @@ async def admin_refund_invoice(
 ) -> InvoiceRow:
     """Refund a paid invoice via Stripe (full, or partial with amount_cents).
 
-    Irreversible money movement — the UI must confirm before calling. Local
-    invoice status flips to 'refunded' (full) / 'partially_refunded'."""
+    Irreversible money movement — the UI must confirm before calling. Concurrency-
+    safe: the invoice row is locked (FOR UPDATE) so two simultaneous requests
+    serialize, the refund is bounded by the REMAINING amount (partials accumulate
+    in refunded_amount_cents), and the Stripe call carries a deterministic
+    Idempotency-Key derived from the prior state — an accidental duplicate of the
+    same refund collapses into one money movement on Stripe's side too."""
     if payload.amount_cents is not None and payload.amount_cents <= 0:
         raise HTTPException(status_code=422, detail="amount_cents must be > 0.")
     async with _app_db.async_session_factory() as session:
         inv = (await session.execute(
-            select(Invoice).where(Invoice.id == invoice_id)
+            select(Invoice).where(Invoice.id == invoice_id).with_for_update()
         )).scalar_one_or_none()
         if inv is None:
             raise HTTPException(status_code=404, detail="Invoice not found.")
@@ -817,19 +821,32 @@ async def admin_refund_invoice(
             raise HTTPException(
                 status_code=409, detail=f"Invoice is '{inv.status}' — only paid invoices refund.",
             )
-        if payload.amount_cents is not None and payload.amount_cents > inv.amount_cents:
-            raise HTTPException(status_code=422,
-                                detail="Refund exceeds the invoice amount.")
+        remaining = inv.amount_cents - inv.refunded_amount_cents
+        if remaining <= 0:
+            raise HTTPException(status_code=409, detail="Invoice is already fully refunded.")
+        refund_amount = payload.amount_cents if payload.amount_cents is not None else remaining
+        if refund_amount > remaining:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Refund exceeds the remaining amount ({remaining} cents).",
+            )
+        # Deterministic per prior state: a double-submit of the same refund carries
+        # the SAME key (Stripe dedupes); after this refund lands, the next partial
+        # sees a new refunded total → new key → correctly treated as intentional.
+        idem = f"refund-{invoice_id}-{refund_amount}-{inv.refunded_amount_cents}"
         try:
-            await refund_invoice(inv.stripe_invoice_id, payload.amount_cents)
+            refund = await refund_invoice(
+                inv.stripe_invoice_id, refund_amount, idempotency_key=idem
+            )
         except (BillingNotConfigured, StripeError) as exc:
             raise _stripe_http(exc) from exc
-        full = payload.amount_cents is None or payload.amount_cents >= inv.amount_cents
+        inv.refunded_amount_cents += refund_amount
+        full = inv.refunded_amount_cents >= inv.amount_cents
         inv.status = "refunded" if full else "partially_refunded"
         await _audit(session, ctx, "admin_refund_invoice", practice_id=inv.practice_id,
-                     meta={"invoice": str(invoice_id),
-                           "amount_cents": payload.amount_cents or inv.amount_cents,
-                           "full": full})
+                     meta={"invoice": str(invoice_id), "amount_cents": refund_amount,
+                           "full": full, "refund_id": refund.get("id"),
+                           "refunded_total_cents": inv.refunded_amount_cents})
         await session.commit()
         row = InvoiceRow(
             id=str(inv.id), stripe_invoice_id=inv.stripe_invoice_id,
