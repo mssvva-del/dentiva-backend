@@ -34,6 +34,7 @@ from app.routes import (
     onboarding,
     patients,
     practice,
+    pricing,
     reactivation,
     team,
     voice,
@@ -215,6 +216,7 @@ app.include_router(bookings.router)
 app.include_router(callbacks.router)
 app.include_router(patients.router)
 app.include_router(leads.router)
+app.include_router(pricing.router)
 app.include_router(reactivation.router)
 app.include_router(dashboard.router)
 app.include_router(waitlist.router)
