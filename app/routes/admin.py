@@ -32,6 +32,7 @@ from app.auth.permissions import (
     IMPERSONATE_CLINIC,
     MANAGE_DENTIVA_STAFF,
     MANAGE_FEATURE_FLAGS,
+    MANAGE_LEADS,
     MANAGE_SUBSCRIPTIONS,
     VIEW_ALL_CLINICS,
     VIEW_AUDIT_LOGS,
@@ -46,6 +47,7 @@ from app.models.booking import Booking
 from app.models.call import Call
 from app.models.dentiva_staff import DentivaStaff
 from app.models.feature_flag import FeatureFlag
+from app.models.lead import Lead
 from app.models.practice import Practice
 from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
@@ -528,3 +530,77 @@ async def audit_logs(
         )
         for a in rows
     ]
+
+
+# ===========================================================================
+# 10. Leads inbox (marketing-site demo form → sales)
+# ===========================================================================
+class LeadRow(BaseModel):
+    id: str
+    name: str | None
+    email: str | None
+    phone: str | None
+    clinic_name: str | None
+    message: str | None
+    source: str
+    status: str
+    notes: str | None
+    created_at: datetime
+
+
+class LeadUpdate(BaseModel):
+    status: str | None = None
+    notes: str | None = None
+
+
+_LEAD_STATUSES = frozenset({"new", "contacted", "qualified", "won", "lost"})
+
+
+def _lead_row(lead: Lead) -> LeadRow:
+    return LeadRow(
+        id=str(lead.id), name=lead.name, email=lead.email, phone=lead.phone,
+        clinic_name=lead.clinic_name, message=lead.message, source=lead.source,
+        status=lead.status, notes=lead.notes, created_at=lead.created_at,
+    )
+
+
+@router.get("/leads", response_model=list[LeadRow])
+async def list_leads(
+    status: str | None = None,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_LEADS)),
+) -> list[LeadRow]:
+    """Sales lead inbox — newest first, optionally filtered by status."""
+    async with _app_db.async_session_factory() as session:
+        q = select(Lead)
+        if status:
+            q = q.where(Lead.status == status)
+        rows = (await session.execute(
+            q.order_by(Lead.created_at.desc()).limit(500)
+        )).scalars().all()
+    return [_lead_row(x) for x in rows]
+
+
+@router.patch("/leads/{lead_id}", response_model=LeadRow)
+async def update_lead(
+    lead_id: uuid.UUID,
+    payload: LeadUpdate,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_LEADS)),
+) -> LeadRow:
+    """Move a lead through the pipeline / add sales notes."""
+    if payload.status is not None and payload.status not in _LEAD_STATUSES:
+        raise HTTPException(status_code=422, detail="Unknown lead status.")
+    async with _app_db.async_session_factory() as session:
+        lead = (await session.execute(
+            select(Lead).where(Lead.id == lead_id)
+        )).scalar_one_or_none()
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Lead not found.")
+        if payload.status is not None:
+            lead.status = payload.status
+        if payload.notes is not None:
+            lead.notes = payload.notes
+        await _audit(session, ctx, "admin_update_lead",
+                     meta={"lead": str(lead_id), "status": lead.status})
+        await session.commit()
+        row = _lead_row(lead)
+    return row

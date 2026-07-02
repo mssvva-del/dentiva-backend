@@ -29,6 +29,7 @@ from app.routes import (
     calls,
     dashboard,
     knowledge_base,
+    leads,
     me,
     onboarding,
     patients,
@@ -213,6 +214,7 @@ app.include_router(calls.router)
 app.include_router(bookings.router)
 app.include_router(callbacks.router)
 app.include_router(patients.router)
+app.include_router(leads.router)
 app.include_router(reactivation.router)
 app.include_router(dashboard.router)
 app.include_router(waitlist.router)

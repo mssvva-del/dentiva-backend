@@ -146,6 +146,12 @@ def limit_webhook(limit_string: str = "60/minute"):
     return limiter.limit(limit_string, key_func=_key_for_ip)
 
 
+def limit_public(limit_string: str = "20/minute"):
+    """Per-IP limit for UNAUTHENTICATED public endpoints (e.g. the marketing-site
+    lead form). Caps spam/abuse on an endpoint anyone can POST to."""
+    return limiter.limit(limit_string, key_func=_key_for_ip)
+
+
 def limit_voice(limit_string: str = "10/minute"):
     """
     Decorator for voice/AI endpoints (/api/voice/*).
