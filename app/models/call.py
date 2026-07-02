@@ -71,6 +71,9 @@ class Call(UUIDPKMixin, TimestampMixin, Base):
 # Keep caller_number_hmac in sync with from_number on every write, so calls stay
 # searchable by number even though from_number is now encrypted. At flush time
 # target.from_number is the plaintext (EncryptedString encrypts on the way to DB).
+# NOTE: placeholder from_numbers with no digits ("unknown" / "web" for web calls)
+# hash to None → those calls are simply unsearchable by number (correct — there is
+# no real caller number to match), not a bug.
 @event.listens_for(Call, "before_insert")
 @event.listens_for(Call, "before_update")
 def _sync_caller_number_hmac(_mapper, _connection, target: Call) -> None:
