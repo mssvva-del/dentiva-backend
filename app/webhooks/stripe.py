@@ -142,7 +142,15 @@ async def _upsert_invoice(
     stripe_invoice_id (partial-unique) instead of blind-inserting, which used to
     create duplicate invoice rows on every retry."""
     mutable = {
-        "amount_cents": amount_cents, "status": status_, "paid_at": paid_at,
+        "amount_cents": amount_cents,
+        # Never DOWNGRADE an admin-refunded invoice back to 'paid' on a redelivered
+        # invoice.paid — that would re-arm the refund button after money already
+        # moved. Refund states are terminal for this upsert.
+        "status": text(
+            "CASE WHEN invoices.status IN ('refunded','partially_refunded') "
+            "THEN invoices.status ELSE excluded.status END"
+        ),
+        "paid_at": paid_at,
         "period_start": period_start, "period_end": period_end,
         "updated_at": datetime.now(UTC),
     }

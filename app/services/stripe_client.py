@@ -111,18 +111,33 @@ def _require_key() -> str:
     return settings.stripe_secret_key
 
 
+# Pinned API version: modern account defaults (2025-03-31.basil+) REMOVED
+# invoice.payment_intent, which the refund flow reads — live-verified against our
+# test account (default 2026-06-24.dahlia has no payment_intent at all). Pinning
+# also makes behavior reproducible regardless of the account's default version.
+_STRIPE_VERSION = "2024-06-20"
+
+
 async def _stripe_request(
     method: str,
     path: str,
     data: dict | None = None,
     *,
+    idempotency_key: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict:
     key = _require_key()
+    headers = {"Stripe-Version": _STRIPE_VERSION}
+    if idempotency_key:
+        # Stripe dedupes identical requests carrying the same key — the refund key
+        # is derived from the invoice's prior state, so an accidental double-submit
+        # of the SAME refund collapses into one money movement.
+        headers["Idempotency-Key"] = idempotency_key
     try:
         async with httpx.AsyncClient(timeout=15, transport=transport) as client:
             resp = await client.request(
-                method, f"{_STRIPE_API}{path}", data=data, auth=(key, "")
+                method, f"{_STRIPE_API}{path}", data=data, auth=(key, ""),
+                headers=headers,
             )
     except httpx.HTTPError as exc:
         # Stripe unreachable / timeout — never let a transport error escape as a
@@ -202,4 +217,34 @@ async def apply_coupon_to_subscription(
         f"/subscriptions/{_safe_id(stripe_subscription_id, 'subscription')}",
         {"discounts[0][coupon]": _safe_id(coupon_id, "coupon")},
         transport=transport,
+    )
+
+
+async def refund_invoice(
+    stripe_invoice_id: str,
+    amount_cents: int | None = None,
+    *,
+    idempotency_key: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    """Refund a PAID Stripe invoice (fully, or partially when amount_cents given).
+
+    Two steps: fetch the invoice to get its payment_intent (present on the pinned
+    API version — see _STRIPE_VERSION), then create the refund against that
+    payment. Stripe rejects refunding an unpaid invoice / exceeding the charged
+    amount — those surface as StripeError(4xx) → 422 to the admin. The
+    idempotency_key makes an accidental duplicate submit a no-op on Stripe's side.
+    """
+    inv = await _stripe_request(
+        "GET", f"/invoices/{_safe_id(stripe_invoice_id, 'invoice')}",
+        transport=transport,
+    )
+    payment_intent = inv.get("payment_intent")
+    if not payment_intent:
+        raise StripeError("invoice has no payment to refund", status_code=422)
+    data: dict = {"payment_intent": payment_intent}
+    if amount_cents is not None:
+        data["amount"] = str(amount_cents)
+    return await _stripe_request(
+        "POST", "/refunds", data, idempotency_key=idempotency_key, transport=transport
     )
