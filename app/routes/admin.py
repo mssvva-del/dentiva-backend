@@ -650,7 +650,9 @@ def _coupon_row(c: dict) -> CouponRow:
 def _stripe_http(exc: Exception) -> HTTPException:
     if isinstance(exc, BillingNotConfigured):
         return HTTPException(status_code=503, detail="Billing is not configured yet.")
-    return HTTPException(status_code=422, detail=str(exc))
+    # Upstream 5xx / transport failure → honest 502; Stripe 4xx → 422 (bad input).
+    status = getattr(exc, "status_code", None) or 422
+    return HTTPException(status_code=502 if status >= 500 else 422, detail=str(exc))
 
 
 @router.get("/coupons", response_model=list[CouponRow])
@@ -678,9 +680,11 @@ async def admin_create_coupon(
         raise HTTPException(status_code=422, detail="amount_off_cents must be > 0.")
     if payload.duration not in ("once", "repeating", "forever"):
         raise HTTPException(status_code=422, detail="Unknown duration.")
-    if payload.duration == "repeating" and not payload.duration_in_months:
+    if payload.duration == "repeating" and (
+        payload.duration_in_months is None or payload.duration_in_months <= 0
+    ):
         raise HTTPException(status_code=422,
-                            detail="duration_in_months required for repeating.")
+                            detail="duration_in_months must be > 0 for repeating.")
     try:
         coupon = await create_coupon(
             name=payload.name, percent_off=payload.percent_off,

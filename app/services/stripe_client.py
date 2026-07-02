@@ -10,6 +10,8 @@ The Price-ID mapping comes from env (test-mode IDs first).
 
 from __future__ import annotations
 
+import re
+
 import httpx
 
 from app.config import get_settings
@@ -94,7 +96,12 @@ async def create_checkout_session(
 
 
 class StripeError(Exception):
-    """Stripe rejected the request (4xx) — surfaced to the admin as a 422/502."""
+    """Stripe request failed. ``status_code`` lets the route map 4xx → 422 and
+    upstream 5xx / transport failures → 502 (honest gateway error)."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _require_key() -> str:
@@ -112,10 +119,17 @@ async def _stripe_request(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict:
     key = _require_key()
-    async with httpx.AsyncClient(timeout=15, transport=transport) as client:
-        resp = await client.request(
-            method, f"{_STRIPE_API}{path}", data=data, auth=(key, "")
-        )
+    try:
+        async with httpx.AsyncClient(timeout=15, transport=transport) as client:
+            resp = await client.request(
+                method, f"{_STRIPE_API}{path}", data=data, auth=(key, "")
+            )
+    except httpx.HTTPError as exc:
+        # Stripe unreachable / timeout — never let a transport error escape as a
+        # raw 500; the route maps this to a clean 502.
+        raise StripeError(
+            f"Stripe unreachable: {type(exc).__name__}", status_code=502
+        ) from exc
     if resp.status_code >= 400:
         # Stripe error bodies are JSON {error:{message}} — surface the message,
         # bounded, never the key.
@@ -123,7 +137,7 @@ async def _stripe_request(
             msg = resp.json().get("error", {}).get("message", "")[:200]
         except Exception:  # noqa: BLE001
             msg = resp.text[:200]
-        raise StripeError(f"Stripe {resp.status_code}: {msg}")
+        raise StripeError(f"Stripe {resp.status_code}: {msg}", status_code=resp.status_code)
     return resp.json()
 
 
@@ -156,10 +170,20 @@ async def list_coupons(
     return body.get("data", [])
 
 
+def _safe_id(value: str, what: str) -> str:
+    """Validate a Stripe object id before interpolating it into a URL path —
+    defense-in-depth against path tricks if a future caller passes raw input."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value or ""):
+        raise StripeError(f"invalid {what} id", status_code=422)
+    return value
+
+
 async def delete_coupon(
     coupon_id: str, *, transport: httpx.AsyncBaseTransport | None = None
 ) -> None:
-    await _stripe_request("DELETE", f"/coupons/{coupon_id}", transport=transport)
+    await _stripe_request(
+        "DELETE", f"/coupons/{_safe_id(coupon_id, 'coupon')}", transport=transport
+    )
 
 
 async def apply_coupon_to_subscription(
@@ -169,10 +193,13 @@ async def apply_coupon_to_subscription(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict:
     """Attach a coupon to an existing Stripe subscription (discount applies from
-    the next invoice per the coupon's duration)."""
+    the next invoice per the coupon's duration).
+
+    NOTE: ``discounts[0][coupon]`` REPLACES the subscription's discounts array —
+    one discount per clinic by design; applying coupon B removes coupon A."""
     return await _stripe_request(
         "POST",
-        f"/subscriptions/{stripe_subscription_id}",
-        {"discounts[0][coupon]": coupon_id},
+        f"/subscriptions/{_safe_id(stripe_subscription_id, 'subscription')}",
+        {"discounts[0][coupon]": _safe_id(coupon_id, "coupon")},
         transport=transport,
     )
