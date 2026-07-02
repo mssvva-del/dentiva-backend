@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import false as sa_false
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,7 @@ from app.schemas.call import (
     CallSummary,
     TranscriptTurn,
 )
+from app.utils.crypto import phone_hmac
 from app.utils.redact import redact_name, redact_pii_text
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
@@ -86,10 +88,11 @@ async def list_calls(
     if status:
         base = base.where(Call.status == status)
     if search:
-        search_pattern = f"%{search}%"
-        base = base.where(
-            Call.from_number.ilike(search_pattern) | Call.to_number.ilike(search_pattern)
-        )
+        # from_number/to_number are encrypted now, so a substring ILIKE is no longer
+        # possible. Search a phone query by its deterministic hash (exact match on the
+        # normalized caller number). A non-phone query matches nothing.
+        h = phone_hmac(search)
+        base = base.where(Call.caller_number_hmac == h) if h else base.where(sa_false())
 
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
