@@ -46,16 +46,84 @@ def build_system_prompt(practice: Practice) -> str:
     if langs:
         parts.append(f"Languages enabled: {', '.join(langs)}.")
 
-    # Optional per-clinic knowledge base (FAQ-style facts the clinic supplied).
-    kb = practice.knowledge_base or {}
-    facts = kb.get("facts") if isinstance(kb, dict) else None
-    if isinstance(facts, list) and facts:
-        # Cap BOTH count and length: clinic-supplied text goes verbatim into the
-        # system prompt, so bound it to limit latency + prompt-injection surface.
-        joined = " ".join(str(f) for f in facts[:8])[:600]
-        parts.append(f"CLINIC FACTS (use only these for specifics): {joined}")
+    # Per-clinic knowledge base — the STRUCTURED object filled by onboarding /
+    # analyze-website (schemas/knowledge_base.py: providers, appointment_types,
+    # insurances, self_pay, policies, emergency). This is what makes the agent
+    # "know" this clinic; render it into the prompt (bounded for latency).
+    kb_block = _render_kb(practice.knowledge_base or {})
+    if kb_block:
+        parts.append(kb_block)
 
     return "\n".join(parts)
+
+
+def _render_kb(kb: dict) -> str:
+    """Render the structured KnowledgeBase JSONB into concise prompt lines. Tolerant
+    of missing/partial sections; total length capped so a big KB doesn't blow up
+    latency or the prompt-injection surface."""
+    if not isinstance(kb, dict):
+        return ""
+    lines: list[str] = []
+
+    providers = kb.get("providers")
+    if isinstance(providers, list) and providers:
+        rendered = []
+        for p in providers[:12]:
+            if not isinstance(p, dict) or not p.get("name"):
+                continue
+            tag = p.get("type") or "provider"
+            new = "" if p.get("accepts_new") is None else (
+                ", accepting new" if p.get("accepts_new") else ", not taking new"
+            )
+            rendered.append(f"{p['name']} ({tag}{new})")
+        if rendered:
+            lines.append("PROVIDERS: " + "; ".join(rendered) + ".")
+
+    appts = kb.get("appointment_types")
+    if isinstance(appts, list) and appts:
+        rendered = []
+        for a in appts[:12]:
+            if not isinstance(a, dict) or not a.get("name"):
+                continue
+            mins = f" ({a['minutes']}m)" if a.get("minutes") else ""
+            rendered.append(f"{a['name']}{mins}")
+        if rendered:
+            lines.append("VISIT TYPES: " + "; ".join(rendered) + ".")
+
+    ins = kb.get("insurances")
+    ins_part = ""
+    if isinstance(ins, list) and ins:
+        ins_part = "In-network with " + ", ".join(str(i) for i in ins[:15]) + ". "
+    if kb.get("self_pay") is True:
+        ins_part += "Self-pay patients welcome. "
+    if ins_part:
+        lines.append(
+            "INSURANCE: " + ins_part
+            + "Never promise coverage — offer a callback to verify specifics."
+        )
+
+    pol = kb.get("policies")
+    if isinstance(pol, dict):
+        bits = [
+            f"{label} {pol[key]}"
+            for key, label in (
+                ("cancellation", "Cancellation:"),
+                ("late", "Late:"),
+                ("new_patient", "New patients:"),
+                ("parking", "Parking:"),
+            )
+            if pol.get(key)
+        ]
+        if bits:
+            lines.append("POLICIES: " + " ".join(bits))
+
+    emg = kb.get("emergency")
+    if isinstance(emg, dict) and emg.get("on_call_number") and emg.get("action") == "transfer":
+        lines.append("After-hours emergencies: transfer to the on-call line.")
+
+    # Cap the whole block so a large KB can't bloat the system prompt.
+    block = "\n".join(lines)
+    return block[:1200]
 
 
 def _render_hours(hours: dict) -> str:
