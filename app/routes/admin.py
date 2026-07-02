@@ -30,12 +30,14 @@ import app.db as _app_db
 from app.auth.admin import AdminContext, require_admin_permission
 from app.auth.permissions import (
     IMPERSONATE_CLINIC,
+    MANAGE_BILLING_ALL,
     MANAGE_DENTIVA_STAFF,
     MANAGE_FEATURE_FLAGS,
     MANAGE_LEADS,
     MANAGE_SUBSCRIPTIONS,
     VIEW_ALL_CLINICS,
     VIEW_AUDIT_LOGS,
+    VIEW_BILLING_ALL,
     VIEW_CLINIC_DETAIL,
     VIEW_REVENUE,
     VIEW_SYSTEM_HEALTH,
@@ -609,6 +611,7 @@ async def update_lead(
 # ===========================================================================
 # 11. Coupons / discounts (ADM2) — Stripe-native, applied to clinic subscriptions
 # ===========================================================================
+from app.models.invoice import Invoice  # noqa: E402 — grouped with its section
 from app.services.stripe_client import (  # noqa: E402 — grouped with its section
     BillingNotConfigured,
     StripeError,
@@ -616,6 +619,7 @@ from app.services.stripe_client import (  # noqa: E402 — grouped with its sect
     create_coupon,
     delete_coupon,
     list_coupons,
+    refund_invoice,
 )
 
 
@@ -748,3 +752,88 @@ async def admin_apply_coupon(
                      meta={"coupon": payload.coupon_id})
         await session.commit()
     return {"ok": True, "coupon": payload.coupon_id}
+
+
+# ===========================================================================
+# 12. Invoices + refunds (ADM3) — cancel/refund a clinic's payment
+# ===========================================================================
+class InvoiceRow(BaseModel):
+    id: str
+    stripe_invoice_id: str | None
+    amount_cents: int
+    status: str
+    period_start: datetime | None
+    period_end: datetime | None
+    paid_at: datetime | None
+
+
+@router.get("/clinics/{practice_id}/invoices", response_model=list[InvoiceRow])
+async def admin_list_invoices(
+    practice_id: uuid.UUID,
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_BILLING_ALL)),
+) -> list[InvoiceRow]:
+    """A clinic's invoices (local mirror of Stripe's) — pick one to refund."""
+    async with _app_db.async_session_factory() as session:
+        rows = (await session.execute(
+            select(Invoice).where(Invoice.practice_id == practice_id)
+            .order_by(Invoice.created_at.desc()).limit(100)
+        )).scalars().all()
+    return [InvoiceRow(
+        id=str(i.id), stripe_invoice_id=i.stripe_invoice_id,
+        amount_cents=i.amount_cents, status=i.status,
+        period_start=i.period_start, period_end=i.period_end, paid_at=i.paid_at,
+    ) for i in rows]
+
+
+class RefundRequest(BaseModel):
+    # None → full refund of the invoice's payment.
+    amount_cents: int | None = None
+
+
+@router.post("/invoices/{invoice_id}/refund", response_model=InvoiceRow)
+async def admin_refund_invoice(
+    invoice_id: uuid.UUID,
+    payload: RefundRequest,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_BILLING_ALL)),
+) -> InvoiceRow:
+    """Refund a paid invoice via Stripe (full, or partial with amount_cents).
+
+    Irreversible money movement — the UI must confirm before calling. Local
+    invoice status flips to 'refunded' (full) / 'partially_refunded'."""
+    if payload.amount_cents is not None and payload.amount_cents <= 0:
+        raise HTTPException(status_code=422, detail="amount_cents must be > 0.")
+    async with _app_db.async_session_factory() as session:
+        inv = (await session.execute(
+            select(Invoice).where(Invoice.id == invoice_id)
+        )).scalar_one_or_none()
+        if inv is None:
+            raise HTTPException(status_code=404, detail="Invoice not found.")
+        if not inv.stripe_invoice_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Invoice has no Stripe payment (local/pilot record) — nothing to refund.",
+            )
+        if inv.status not in ("paid", "partially_refunded"):
+            raise HTTPException(
+                status_code=409, detail=f"Invoice is '{inv.status}' — only paid invoices refund.",
+            )
+        if payload.amount_cents is not None and payload.amount_cents > inv.amount_cents:
+            raise HTTPException(status_code=422,
+                                detail="Refund exceeds the invoice amount.")
+        try:
+            await refund_invoice(inv.stripe_invoice_id, payload.amount_cents)
+        except (BillingNotConfigured, StripeError) as exc:
+            raise _stripe_http(exc) from exc
+        full = payload.amount_cents is None or payload.amount_cents >= inv.amount_cents
+        inv.status = "refunded" if full else "partially_refunded"
+        await _audit(session, ctx, "admin_refund_invoice", practice_id=inv.practice_id,
+                     meta={"invoice": str(invoice_id),
+                           "amount_cents": payload.amount_cents or inv.amount_cents,
+                           "full": full})
+        await session.commit()
+        row = InvoiceRow(
+            id=str(inv.id), stripe_invoice_id=inv.stripe_invoice_id,
+            amount_cents=inv.amount_cents, status=inv.status,
+            period_start=inv.period_start, period_end=inv.period_end, paid_at=inv.paid_at,
+        )
+    return row

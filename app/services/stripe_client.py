@@ -203,3 +203,28 @@ async def apply_coupon_to_subscription(
         {"discounts[0][coupon]": _safe_id(coupon_id, "coupon")},
         transport=transport,
     )
+
+
+async def refund_invoice(
+    stripe_invoice_id: str,
+    amount_cents: int | None = None,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    """Refund a PAID Stripe invoice (fully, or partially when amount_cents given).
+
+    Two steps: fetch the invoice to get its payment_intent, then create the refund
+    against that payment. Stripe rejects refunding an unpaid invoice / exceeding
+    the charged amount — those surface as StripeError(4xx) → 422 to the admin.
+    """
+    inv = await _stripe_request(
+        "GET", f"/invoices/{_safe_id(stripe_invoice_id, 'invoice')}",
+        transport=transport,
+    )
+    payment_intent = inv.get("payment_intent")
+    if not payment_intent:
+        raise StripeError("invoice has no payment to refund", status_code=422)
+    data: dict = {"payment_intent": payment_intent}
+    if amount_cents is not None:
+        data["amount"] = str(amount_cents)
+    return await _stripe_request("POST", "/refunds", data, transport=transport)
