@@ -604,3 +604,143 @@ async def update_lead(
         await session.commit()
         row = _lead_row(lead)
     return row
+
+
+# ===========================================================================
+# 11. Coupons / discounts (ADM2) — Stripe-native, applied to clinic subscriptions
+# ===========================================================================
+from app.services.stripe_client import (  # noqa: E402 — grouped with its section
+    BillingNotConfigured,
+    StripeError,
+    apply_coupon_to_subscription,
+    create_coupon,
+    delete_coupon,
+    list_coupons,
+)
+
+
+class CouponCreate(BaseModel):
+    name: str
+    percent_off: float | None = None       # 1–100
+    amount_off_cents: int | None = None    # USD cents
+    duration: str = "once"                 # once | repeating | forever
+    duration_in_months: int | None = None  # required when duration == repeating
+
+
+class CouponRow(BaseModel):
+    id: str
+    name: str | None
+    percent_off: float | None
+    amount_off_cents: int | None
+    duration: str
+    duration_in_months: int | None
+    valid: bool
+
+
+def _coupon_row(c: dict) -> CouponRow:
+    return CouponRow(
+        id=c.get("id", ""), name=c.get("name"),
+        percent_off=c.get("percent_off"), amount_off_cents=c.get("amount_off"),
+        duration=c.get("duration", "once"),
+        duration_in_months=c.get("duration_in_months"),
+        valid=bool(c.get("valid", True)),
+    )
+
+
+def _stripe_http(exc: Exception) -> HTTPException:
+    if isinstance(exc, BillingNotConfigured):
+        return HTTPException(status_code=503, detail="Billing is not configured yet.")
+    return HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/coupons", response_model=list[CouponRow])
+async def admin_list_coupons(
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_SUBSCRIPTIONS)),
+) -> list[CouponRow]:
+    try:
+        return [_coupon_row(c) for c in await list_coupons()]
+    except (BillingNotConfigured, StripeError) as exc:
+        raise _stripe_http(exc) from exc
+
+
+@router.post("/coupons", response_model=CouponRow)
+async def admin_create_coupon(
+    payload: CouponCreate,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_SUBSCRIPTIONS)),
+) -> CouponRow:
+    # Exactly one discount kind; bounds enforced here so Stripe errors stay rare.
+    if (payload.percent_off is None) == (payload.amount_off_cents is None):
+        raise HTTPException(status_code=422,
+                            detail="Provide exactly one of percent_off / amount_off_cents.")
+    if payload.percent_off is not None and not (0 < payload.percent_off <= 100):
+        raise HTTPException(status_code=422, detail="percent_off must be 1–100.")
+    if payload.amount_off_cents is not None and payload.amount_off_cents <= 0:
+        raise HTTPException(status_code=422, detail="amount_off_cents must be > 0.")
+    if payload.duration not in ("once", "repeating", "forever"):
+        raise HTTPException(status_code=422, detail="Unknown duration.")
+    if payload.duration == "repeating" and not payload.duration_in_months:
+        raise HTTPException(status_code=422,
+                            detail="duration_in_months required for repeating.")
+    try:
+        coupon = await create_coupon(
+            name=payload.name, percent_off=payload.percent_off,
+            amount_off_cents=payload.amount_off_cents,
+            duration=payload.duration, duration_in_months=payload.duration_in_months,
+        )
+    except (BillingNotConfigured, StripeError) as exc:
+        raise _stripe_http(exc) from exc
+    async with _app_db.async_session_factory() as session:
+        await _audit(session, ctx, "admin_create_coupon",
+                     meta={"coupon": coupon.get("id"), "name": payload.name})
+        await session.commit()
+    return _coupon_row(coupon)
+
+
+@router.delete("/coupons/{coupon_id}")
+async def admin_delete_coupon(
+    coupon_id: str,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_SUBSCRIPTIONS)),
+) -> dict:
+    try:
+        await delete_coupon(coupon_id)
+    except (BillingNotConfigured, StripeError) as exc:
+        raise _stripe_http(exc) from exc
+    async with _app_db.async_session_factory() as session:
+        await _audit(session, ctx, "admin_delete_coupon", meta={"coupon": coupon_id})
+        await session.commit()
+    return {"ok": True}
+
+
+class ApplyCoupon(BaseModel):
+    coupon_id: str
+
+
+@router.post("/clinics/{practice_id}/apply-coupon")
+async def admin_apply_coupon(
+    practice_id: uuid.UUID,
+    payload: ApplyCoupon,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_SUBSCRIPTIONS)),
+) -> dict:
+    """Attach a Stripe coupon to the clinic's subscription (discount from the next
+    invoice). Clinics without a Stripe subscription (trials/pilots) get a clear 409 —
+    use the existing subscription override for custom pricing there."""
+    async with _app_db.async_session_factory() as session:
+        sub = (await session.execute(
+            select(Subscription).where(Subscription.practice_id == practice_id)
+        )).scalar_one_or_none()
+        if sub is None:
+            raise HTTPException(status_code=404, detail="Clinic has no subscription.")
+        if not sub.stripe_subscription_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Clinic has no Stripe subscription yet — use the subscription "
+                       "override for custom pricing.",
+            )
+        try:
+            await apply_coupon_to_subscription(sub.stripe_subscription_id, payload.coupon_id)
+        except (BillingNotConfigured, StripeError) as exc:
+            raise _stripe_http(exc) from exc
+        await _audit(session, ctx, "admin_apply_coupon", practice_id=practice_id,
+                     meta={"coupon": payload.coupon_id})
+        await session.commit()
+    return {"ok": True, "coupon": payload.coupon_id}

@@ -82,3 +82,97 @@ async def create_checkout_session(
     if resp.status_code >= 400:
         raise BillingNotConfigured(f"Stripe error {resp.status_code}: {resp.text[:200]}")
     return resp.json()["url"]
+
+
+# ---------------------------------------------------------------------------
+# Coupons (ADM2) — Stripe-native discounts, applied to a clinic's subscription.
+# We deliberately use Stripe Coupon objects instead of a homegrown discount table:
+# Stripe then handles proration/invoicing math and the discount shows up on real
+# invoices. All calls form-encoded httpx (same pattern as checkout above), with an
+# injectable transport so tests never hit the network.
+# ---------------------------------------------------------------------------
+
+
+class StripeError(Exception):
+    """Stripe rejected the request (4xx) — surfaced to the admin as a 422/502."""
+
+
+def _require_key() -> str:
+    settings = get_settings()
+    if not settings.stripe_secret_key:
+        raise BillingNotConfigured("STRIPE_SECRET_KEY not set")
+    return settings.stripe_secret_key
+
+
+async def _stripe_request(
+    method: str,
+    path: str,
+    data: dict | None = None,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    key = _require_key()
+    async with httpx.AsyncClient(timeout=15, transport=transport) as client:
+        resp = await client.request(
+            method, f"{_STRIPE_API}{path}", data=data, auth=(key, "")
+        )
+    if resp.status_code >= 400:
+        # Stripe error bodies are JSON {error:{message}} — surface the message,
+        # bounded, never the key.
+        try:
+            msg = resp.json().get("error", {}).get("message", "")[:200]
+        except Exception:  # noqa: BLE001
+            msg = resp.text[:200]
+        raise StripeError(f"Stripe {resp.status_code}: {msg}")
+    return resp.json()
+
+
+async def create_coupon(
+    *,
+    name: str,
+    percent_off: float | None = None,
+    amount_off_cents: int | None = None,
+    duration: str = "once",
+    duration_in_months: int | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    """Create a Stripe coupon. Exactly one of percent_off / amount_off_cents.
+    duration: once | repeating (needs duration_in_months) | forever."""
+    data: dict = {"name": name, "duration": duration}
+    if percent_off is not None:
+        data["percent_off"] = str(percent_off)
+    if amount_off_cents is not None:
+        data["amount_off"] = str(amount_off_cents)
+        data["currency"] = "usd"
+    if duration == "repeating" and duration_in_months:
+        data["duration_in_months"] = str(duration_in_months)
+    return await _stripe_request("POST", "/coupons", data, transport=transport)
+
+
+async def list_coupons(
+    *, transport: httpx.AsyncBaseTransport | None = None
+) -> list[dict]:
+    body = await _stripe_request("GET", "/coupons?limit=100", transport=transport)
+    return body.get("data", [])
+
+
+async def delete_coupon(
+    coupon_id: str, *, transport: httpx.AsyncBaseTransport | None = None
+) -> None:
+    await _stripe_request("DELETE", f"/coupons/{coupon_id}", transport=transport)
+
+
+async def apply_coupon_to_subscription(
+    stripe_subscription_id: str,
+    coupon_id: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    """Attach a coupon to an existing Stripe subscription (discount applies from
+    the next invoice per the coupon's duration)."""
+    return await _stripe_request(
+        "POST",
+        f"/subscriptions/{stripe_subscription_id}",
+        {"discounts[0][coupon]": coupon_id},
+        transport=transport,
+    )
