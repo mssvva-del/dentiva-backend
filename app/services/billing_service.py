@@ -106,7 +106,9 @@ async def suspend_practice(session: AsyncSession, practice: Practice) -> None:
     """
     practice.status = "suspended"
     sub = await get_subscription(session, practice.id)
-    if sub is not None:
+    # 'cancelled' is terminal — the subscription.deleted webhook that follows an
+    # admin's immediate cancel must not relabel it as merely 'suspended'.
+    if sub is not None and sub.status != "cancelled":
         sub.status = "suspended"
 
 
