@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import set_tenant
+from app.models.dentiva_staff import DentivaStaff
 from app.models.invitation import Invitation
 from app.models.practice import Practice
 from app.models.user import User
@@ -71,16 +72,35 @@ def _primary_email(data: dict) -> str:
     return ""
 
 
+def _invited_dentiva_role(data: dict) -> str | None:
+    """Dentiva admin role stamped by an ADM9 staff invitation, if any.
+
+    An instance-level Clerk invitation carries public_metadata that Clerk copies
+    onto the user at signup — {"dentiva_role": "support"} marks the signup as an
+    internal-staff invite. Validated against the RBAC map: an unknown/garbage
+    value must NOT create privileged rows.
+    """
+    from app.auth.permissions import ADMIN_ROLE_PERMISSIONS
+
+    role = (data.get("public_metadata") or {}).get("dentiva_role")
+    return role if role in ADMIN_ROLE_PERMISSIONS else None
+
+
 async def handle_user_created(session: AsyncSession, data: dict) -> str:
     """Upsert a users row for a freshly signed-up Clerk user.
 
     No org yet → practice_id NULL, least-privilege role. The membership event
     later attaches them to a practice with the real role.
+
+    ADM9: signups that arrive via an internal-staff invitation (dentiva_role in
+    public_metadata, stamped by POST /api/admin/staff/invite) are provisioned as
+    is_internal=True + a dentiva_staff row — no manual script step.
     """
     clerk_user_id = data.get("id")
     if not clerk_user_id:
         raise ValueError("user.created missing id")
     email = _primary_email(data)
+    staff_role = _invited_dentiva_role(data)
 
     existing = (
         await session.execute(select(User).where(User.clerk_user_id == clerk_user_id))
@@ -92,17 +112,24 @@ async def handle_user_created(session: AsyncSession, data: dict) -> str:
         logger.info("clerk user.created: user already present (%s)", clerk_user_id[:12])
         return "noop"
 
-    session.add(
-        User(
-            id=uuid.uuid4(),
-            clerk_user_id=clerk_user_id,
-            practice_id=None,          # no clinic until a membership links one
-            email=email or f"{clerk_user_id}@unknown.clerk",
-            role="viewer",             # least privilege until membership assigns
-            is_internal=False,
-            status="active",
-        )
+    user = User(
+        id=uuid.uuid4(),
+        clerk_user_id=clerk_user_id,
+        practice_id=None,          # no clinic until a membership links one
+        email=email or f"{clerk_user_id}@unknown.clerk",
+        role="viewer" if staff_role is None else "staff",
+        is_internal=staff_role is not None,
+        status="active",
     )
+    session.add(user)
+    if staff_role is not None:
+        await session.flush()
+        session.add(DentivaStaff(id=uuid.uuid4(), user_id=user.id, role=staff_role))
+        logger.info(
+            "clerk user.created: provisioned INTERNAL staff %s as %s",
+            clerk_user_id[:12], staff_role,
+        )
+        return f"created_internal:{staff_role}"
     logger.info("clerk user.created: provisioned user %s", clerk_user_id[:12])
     return "created"
 
