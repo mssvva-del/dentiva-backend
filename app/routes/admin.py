@@ -18,6 +18,7 @@ privileged COUNT via the practice filter on non-RLS join tables where possible.)
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -392,6 +393,20 @@ async def update_staff_role(
         ).scalar_one_or_none()
         if staff is None:
             raise HTTPException(status_code=404, detail="Staff member not found.")
+        if staff.role == "super_admin" and payload.role != "super_admin":
+            # Lockout guard: demoting the LAST super_admin freezes staff management
+            # (only super_admin holds MANAGE_DENTIVA_STAFF). Lock rows to serialize
+            # concurrent demotions, then count — same guard as the delete endpoint.
+            sa_rows = (await session.execute(
+                select(DentivaStaff).where(DentivaStaff.role == "super_admin")
+                .with_for_update()
+            )).scalars().all()
+            if len(sa_rows) <= 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot demote the last super_admin — promote someone "
+                           "else first.",
+                )
         staff.role = payload.role
         user = (
             await session.execute(select(User).where(User.id == user_id))
@@ -1123,3 +1138,100 @@ async def admin_resume_subscription(
         await session.commit()
         row = _cancel_row(sub)
     return row
+
+
+# ===========================================================================
+# 15. Staff invite / deactivate (ADM9) — manage internal admins from the panel.
+# Invite: Clerk instance-invitation carrying dentiva_role in public_metadata; on
+# signup the user.created webhook provisions is_internal + dentiva_staff (see
+# clerk_provisioning._invited_dentiva_role). No manual script step.
+# ===========================================================================
+from app.auth.permissions import ADMIN_ROLE_PERMISSIONS  # noqa: E402 — section import
+from app.services.clerk_api import (  # noqa: E402 — grouped with its section
+    ClerkError,
+    create_platform_invitation,
+)
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class StaffInvite(BaseModel):
+    email: str
+    role: str  # super_admin | support | sales | finance | engineer
+
+
+@router.post("/staff/invite")
+async def admin_invite_staff(
+    payload: StaffInvite,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_DENTIVA_STAFF)),
+) -> dict:
+    """Email an internal-staff invitation. The invitee signs up via Clerk's link
+    and lands provisioned with the given Dentiva role — nothing manual."""
+    email = payload.email.strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="Invalid email.")
+    if payload.role not in ADMIN_ROLE_PERMISSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"role must be one of {sorted(ADMIN_ROLE_PERMISSIONS)}.",
+        )
+    async with _app_db.async_session_factory() as session:
+        existing = (await session.execute(
+            select(User).where(func.lower(User.email) == email)
+        )).scalar_one_or_none()
+        if existing is not None and existing.is_internal:
+            raise HTTPException(status_code=409, detail="Already internal staff.")
+        try:
+            invitation_id = await create_platform_invitation(
+                email=email, public_metadata={"dentiva_role": payload.role},
+            )
+        except ClerkError as exc:
+            status_ = exc.status_code or 422
+            raise HTTPException(
+                status_code=502 if status_ >= 500 else (503 if status_ == 503 else 422),
+                detail=str(exc),
+            ) from exc
+        await _audit(session, ctx, "admin_invite_staff",
+                     meta={"email": email, "role": payload.role,
+                           "invitation": invitation_id})
+        await session.commit()
+    return {"ok": True, "invitation_id": invitation_id}
+
+
+@router.delete("/staff/{user_id}")
+async def admin_deactivate_staff(
+    user_id: uuid.UUID,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_DENTIVA_STAFF)),
+) -> dict:
+    """Revoke a person's admin access: removes their dentiva_staff role row —
+    every /api/admin/* request 403s immediately. The Clerk account itself stays
+    (they may still be a clinic user); safe and reversible via a fresh invite."""
+    if user_id == ctx.user.id:
+        raise HTTPException(status_code=409, detail="You cannot deactivate yourself.")
+    async with _app_db.async_session_factory() as session:
+        staff = (await session.execute(
+            select(DentivaStaff).where(DentivaStaff.user_id == user_id)
+        )).scalar_one_or_none()
+        if staff is None:
+            raise HTTPException(status_code=404, detail="No staff role for that user.")
+        if staff.role == "super_admin":
+            # Lockout guard (reviewer): only super_admin holds MANAGE_DENTIVA_STAFF,
+            # so removing the LAST one would freeze staff management forever (two
+            # super_admins nuking each other included). Lock the super_admin rows
+            # to serialize concurrent deactivations, then count.
+            sa_rows = (await session.execute(
+                select(DentivaStaff).where(DentivaStaff.role == "super_admin")
+                .with_for_update()
+            )).scalars().all()
+            if len(sa_rows) <= 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot deactivate the last super_admin — promote "
+                           "someone else first.",
+                )
+        removed_role = staff.role
+        await session.delete(staff)
+        await _audit(session, ctx, "admin_deactivate_staff",
+                     meta={"user_id": str(user_id), "removed_role": removed_role})
+        await session.commit()
+    return {"ok": True, "removed_role": removed_role}

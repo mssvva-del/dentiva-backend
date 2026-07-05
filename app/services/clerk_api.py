@@ -83,3 +83,60 @@ def clinic_role_to_clerk_role(role: str) -> str:
     authorization — Clerk's role only affects Clerk-side org membership UI.
     """
     return "org:admin" if role == "owner" else "org:member"
+
+
+# ---------------------------------------------------------------------------
+# Platform (instance-level) invitations — ADM9 internal-staff invites.
+# ---------------------------------------------------------------------------
+
+
+class ClerkError(Exception):
+    """Clerk request failed where the caller NEEDS to know (admin staff invites).
+    ``status_code`` lets the route map upstream 5xx/transport → 502, 4xx → 422."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def create_platform_invitation(
+    *,
+    email: str,
+    public_metadata: dict | None = None,
+    redirect_url: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> str:
+    """Create an INSTANCE-level Clerk invitation (not org): Clerk emails the person
+    a signup link; on signup the invitation's public_metadata is copied onto the
+    user, so our user.created webhook reads the assigned dentiva_role and
+    provisions the internal staff row automatically.
+
+    Unlike the org-invitation helpers above this is NOT best-effort — the admin
+    clicked "Invite" and must see an honest error, so failures raise ClerkError.
+    """
+    settings = get_settings()
+    if not settings.clerk_secret_key:
+        raise ClerkError("CLERK_SECRET_KEY not configured", status_code=503)
+    body: dict = {"email_address": email}
+    if public_metadata:
+        body["public_metadata"] = public_metadata
+    if redirect_url:
+        body["redirect_url"] = redirect_url
+    try:
+        async with httpx.AsyncClient(timeout=10, transport=transport) as client:
+            resp = await client.post(
+                f"{_CLERK_API_BASE}/invitations",
+                headers={"Authorization": f"Bearer {settings.clerk_secret_key}"},
+                json=body,
+            )
+    except httpx.HTTPError as exc:
+        raise ClerkError(
+            f"Clerk unreachable: {type(exc).__name__}", status_code=502
+        ) from exc
+    if resp.status_code >= 400:
+        try:
+            msg = (resp.json().get("errors") or [{}])[0].get("message", "")[:200]
+        except Exception:  # noqa: BLE001
+            msg = resp.text[:200]
+        raise ClerkError(f"Clerk {resp.status_code}: {msg}", status_code=resp.status_code)
+    return resp.json().get("id", "")
