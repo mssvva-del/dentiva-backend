@@ -236,6 +236,18 @@ async def _handle_subscription_updated(session, obj: dict) -> str:
     ).scalar_one_or_none()
     if sub is None:
         return "no_subscription"
+    # Ordering guard: Stripe redelivers failed webhooks, so an OLD updated-event can
+    # arrive AFTER a newer one (e.g. cancel→resume, then the stale 'cancel' retry).
+    # Applying it would roll status/cancel_at_period_end back — skip stale events.
+    event_ts = obj.get("_event_created")
+    if (
+        event_ts is not None
+        and sub.last_stripe_event_ts is not None
+        and int(event_ts) < sub.last_stripe_event_ts
+    ):
+        return "stale_event_skipped"
+    if event_ts is not None:
+        sub.last_stripe_event_ts = int(event_ts)
     # Map Stripe status → ours where they differ (canceled→cancelled, unpaid→past_due).
     stripe_status = obj.get("status", "")
     mapping = {
@@ -247,6 +259,11 @@ async def _handle_subscription_updated(session, obj: dict) -> str:
         sub.current_period_start = start
     if end := _epoch(obj.get("current_period_end")):
         sub.current_period_end = end
+    # Keep the pending-cancel flag in sync (set/cleared in the Stripe dashboard or
+    # by our admin cancel/resume endpoints). Only when the key is present — its
+    # absence must not clear a scheduled cancellation.
+    if "cancel_at_period_end" in obj:
+        sub.cancel_at_period_end = bool(obj["cancel_at_period_end"])
     return f"synced:{sub.status}"
 
 
@@ -274,6 +291,10 @@ async def stripe_webhook(
 
     event_type = event.get("type")
     obj = (event.get("data") or {}).get("object") or {}
+    # Smuggle the event's creation time to handlers that need ordering protection
+    # (underscore key — cannot collide with Stripe object fields).
+    if event.get("created") is not None:
+        obj["_event_created"] = event["created"]
     handler = _HANDLERS.get(event_type)
     if handler is None:
         logger.info("stripe webhook: ignoring unmodeled event '%s'", event_type)

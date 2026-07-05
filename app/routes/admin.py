@@ -618,10 +618,12 @@ from app.services.stripe_client import (  # noqa: E402 — grouped with its sect
     BillingNotConfigured,
     StripeError,
     apply_coupon_to_subscription,
+    cancel_subscription,
     create_coupon,
     delete_coupon,
     list_coupons,
     refund_invoice,
+    resume_subscription,
 )
 
 
@@ -1010,3 +1012,114 @@ async def admin_update_pricing_config(
             invitee_discount_percent=s.invitee_discount_percent,
             annual_discount_percent=s.annual_discount_percent,
         )
+
+
+# ===========================================================================
+# 14. Subscription cancel / resume (ADM8) — REAL Stripe cancellation, not just
+# the local status override above. Money-adjacent → confirm in the UI first.
+# ===========================================================================
+class CancelRequest(BaseModel):
+    # 'at_period_end' (default): service runs until the paid period ends, then
+    # billing stops. 'immediately': hard cancel right now (no auto-refund — use
+    # the refund endpoint for that).
+    mode: str = "at_period_end"
+
+
+class CancelStateRow(BaseModel):
+    practice_id: str
+    status: str
+    cancel_at_period_end: bool
+    current_period_end: datetime | None
+
+
+def _cancel_row(sub: Subscription) -> CancelStateRow:
+    return CancelStateRow(
+        practice_id=str(sub.practice_id), status=sub.status,
+        cancel_at_period_end=sub.cancel_at_period_end,
+        current_period_end=sub.current_period_end,
+    )
+
+
+@router.post("/clinics/{practice_id}/subscription/cancel", response_model=CancelStateRow)
+async def admin_cancel_subscription(
+    practice_id: uuid.UUID,
+    payload: CancelRequest,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_SUBSCRIPTIONS)),
+) -> CancelStateRow:
+    """Cancel the clinic's Stripe subscription (default: at period end)."""
+    if payload.mode not in ("at_period_end", "immediately"):
+        raise HTTPException(status_code=422,
+                            detail="mode must be 'at_period_end' or 'immediately'.")
+    async with _app_db.async_session_factory() as session:
+        sub = (await session.execute(
+            select(Subscription).where(Subscription.practice_id == practice_id)
+            .with_for_update()
+        )).scalar_one_or_none()
+        if sub is None:
+            raise HTTPException(status_code=404, detail="Clinic has no subscription.")
+        if not sub.stripe_subscription_id:
+            raise HTTPException(
+                status_code=409,
+                detail="No Stripe subscription (pilot/manual deal) — set status via "
+                       "the subscription override instead.",
+            )
+        if sub.status == "cancelled":
+            raise HTTPException(status_code=409, detail="Already cancelled.")
+        if payload.mode == "at_period_end" and sub.cancel_at_period_end:
+            raise HTTPException(status_code=409,
+                                detail="Cancellation is already scheduled.")
+        try:
+            await cancel_subscription(
+                sub.stripe_subscription_id,
+                at_period_end=(payload.mode == "at_period_end"),
+            )
+        except (BillingNotConfigured, StripeError) as exc:
+            raise _stripe_http(exc) from exc
+        if payload.mode == "immediately":
+            sub.status = "cancelled"
+            sub.cancel_at_period_end = False
+            p = (await session.execute(
+                select(Practice).where(Practice.id == practice_id)
+            )).scalar_one_or_none()
+            if p is not None:
+                p.status = "suspended"
+        else:
+            sub.cancel_at_period_end = True
+        await _audit(session, ctx, "admin_cancel_subscription",
+                     practice_id=practice_id, meta={"mode": payload.mode})
+        await session.commit()
+        row = _cancel_row(sub)
+    return row
+
+
+@router.post("/clinics/{practice_id}/subscription/resume", response_model=CancelStateRow)
+async def admin_resume_subscription(
+    practice_id: uuid.UUID,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_SUBSCRIPTIONS)),
+) -> CancelStateRow:
+    """Undo a scheduled at-period-end cancellation (before the period ends)."""
+    async with _app_db.async_session_factory() as session:
+        sub = (await session.execute(
+            select(Subscription).where(Subscription.practice_id == practice_id)
+            .with_for_update()
+        )).scalar_one_or_none()
+        if sub is None:
+            raise HTTPException(status_code=404, detail="Clinic has no subscription.")
+        if not sub.stripe_subscription_id:
+            raise HTTPException(status_code=409, detail="No Stripe subscription.")
+        if sub.status == "cancelled":
+            raise HTTPException(
+                status_code=409,
+                detail="Subscription is fully cancelled — create a new checkout instead.",
+            )
+        if not sub.cancel_at_period_end:
+            raise HTTPException(status_code=409, detail="No pending cancellation.")
+        try:
+            await resume_subscription(sub.stripe_subscription_id)
+        except (BillingNotConfigured, StripeError) as exc:
+            raise _stripe_http(exc) from exc
+        sub.cancel_at_period_end = False
+        await _audit(session, ctx, "admin_resume_subscription", practice_id=practice_id)
+        await session.commit()
+        row = _cancel_row(sub)
+    return row

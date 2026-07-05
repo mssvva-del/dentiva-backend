@@ -220,6 +220,49 @@ async def apply_coupon_to_subscription(
     )
 
 
+async def cancel_subscription(
+    stripe_subscription_id: str,
+    *,
+    at_period_end: bool = True,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    """Cancel a Stripe subscription.
+
+    at_period_end=True (default): the clinic keeps service until the period it
+    already paid for runs out, then Stripe stops billing — sends
+    customer.subscription.updated now and ...deleted at period end.
+    at_period_end=False: immediate hard cancel (DELETE) — Stripe stops billing and
+    sends customer.subscription.deleted right away. No proration/refund happens
+    automatically; use the refund endpoint for that.
+
+    Deliberately NO Idempotency-Key (unlike refund_invoice): these are set-value
+    operations — repeating them converges to the same state, double-submits are
+    already serialized by the route's row lock + status guards, and a state-derived
+    key would make Stripe REPLAY a stale response across a cancel→resume→cancel
+    cycle instead of re-applying the flag (real divergence, worse than none).
+    """
+    sid = _safe_id(stripe_subscription_id, "subscription")
+    if at_period_end:
+        return await _stripe_request(
+            "POST", f"/subscriptions/{sid}",
+            {"cancel_at_period_end": "true"}, transport=transport,
+        )
+    return await _stripe_request("DELETE", f"/subscriptions/{sid}", transport=transport)
+
+
+async def resume_subscription(
+    stripe_subscription_id: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict:
+    """Undo a pending at-period-end cancellation (only works BEFORE the period
+    ends — a fully deleted subscription cannot be resumed, Stripe returns 4xx)."""
+    return await _stripe_request(
+        "POST", f"/subscriptions/{_safe_id(stripe_subscription_id, 'subscription')}",
+        {"cancel_at_period_end": "false"}, transport=transport,
+    )
+
+
 async def refund_invoice(
     stripe_invoice_id: str,
     amount_cents: int | None = None,
