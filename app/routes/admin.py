@@ -34,6 +34,7 @@ from app.auth.permissions import (
     MANAGE_DENTIVA_STAFF,
     MANAGE_FEATURE_FLAGS,
     MANAGE_LEADS,
+    MANAGE_PRICING,
     MANAGE_SUBSCRIPTIONS,
     VIEW_ALL_CLINICS,
     VIEW_AUDIT_LOGS,
@@ -51,6 +52,7 @@ from app.models.dentiva_staff import DentivaStaff
 from app.models.feature_flag import FeatureFlag
 from app.models.lead import Lead
 from app.models.practice import Practice
+from app.models.pricing_plan import PricingPlan
 from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
 from app.models.user import User
@@ -854,3 +856,157 @@ async def admin_refund_invoice(
             period_start=inv.period_start, period_end=inv.period_end, paid_at=inv.paid_at,
         )
     return row
+
+
+# ===========================================================================
+# 13. Pricing + business config (ADM6) — editable price grid + referral knobs.
+# The public site reads GET /api/pricing; these endpoints let staff change prices
+# and percents WITHOUT a deploy. Separate from billing/plans.py (Stripe metering).
+# ===========================================================================
+class PricingPlanRow(BaseModel):
+    plan_key: str
+    name: str
+    monthly_cents: int
+    annual_monthly_cents: int
+    soft_cap_minutes: int
+    overage_cents_per_min: int
+    reactivation_level: str
+    per_location: bool
+    highlight: bool
+    sort_order: int
+    is_active: bool
+
+
+class PricingPlanUpdate(BaseModel):
+    # All optional → partial update (PATCH-like). Only provided fields change.
+    name: str | None = None
+    monthly_cents: int | None = None
+    annual_monthly_cents: int | None = None
+    soft_cap_minutes: int | None = None
+    overage_cents_per_min: int | None = None
+    reactivation_level: str | None = None
+    per_location: bool | None = None
+    highlight: bool | None = None
+    sort_order: int | None = None
+    is_active: bool | None = None
+
+
+class PricingConfigRow(BaseModel):
+    referrer_reward_months: int
+    invitee_discount_percent: int
+    annual_discount_percent: int
+
+
+class PricingConfigUpdate(BaseModel):
+    referrer_reward_months: int | None = None
+    invitee_discount_percent: int | None = None
+    annual_discount_percent: int | None = None
+
+
+def _plan_row(p: PricingPlan) -> PricingPlanRow:
+    return PricingPlanRow(
+        plan_key=p.plan_key, name=p.name, monthly_cents=p.monthly_cents,
+        annual_monthly_cents=p.annual_monthly_cents, soft_cap_minutes=p.soft_cap_minutes,
+        overage_cents_per_min=p.overage_cents_per_min,
+        reactivation_level=p.reactivation_level, per_location=p.per_location,
+        highlight=p.highlight, sort_order=p.sort_order, is_active=p.is_active,
+    )
+
+
+class AdminPricing(BaseModel):
+    plans: list[PricingPlanRow]
+    config: PricingConfigRow
+
+
+@router.get("/pricing", response_model=AdminPricing)
+async def admin_get_pricing(
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_PRICING)),
+) -> AdminPricing:
+    """Full editable grid (incl. inactive plans) + referral/annual config."""
+    from app.services.pricing import get_all_plans, get_or_create_settings
+    async with _app_db.async_session_factory() as session:
+        plans = await get_all_plans(session)
+        s = await get_or_create_settings(session)
+        await session.commit()
+        return AdminPricing(
+            plans=[_plan_row(p) for p in plans],
+            config=PricingConfigRow(
+                referrer_reward_months=s.referrer_reward_months,
+                invitee_discount_percent=s.invitee_discount_percent,
+                annual_discount_percent=s.annual_discount_percent,
+            ),
+        )
+
+
+_REACTIVATION_LEVELS = ("none", "basic", "full")
+
+
+@router.put("/pricing/{plan_key}", response_model=PricingPlanRow)
+async def admin_update_plan(
+    plan_key: str,
+    payload: PricingPlanUpdate,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_PRICING)),
+) -> PricingPlanRow:
+    """Edit one plan's price/limits. Money fields must be non-negative; percent-like
+    fields are validated so a typo can't publish a broken grid to the public site."""
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=422, detail="No fields to update.")
+    for money in ("monthly_cents", "annual_monthly_cents", "soft_cap_minutes",
+                  "overage_cents_per_min", "sort_order"):
+        if money in fields and fields[money] < 0:
+            raise HTTPException(status_code=422, detail=f"{money} must be >= 0.")
+    if "reactivation_level" in fields and fields["reactivation_level"] not in _REACTIVATION_LEVELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"reactivation_level must be one of {_REACTIVATION_LEVELS}.",
+        )
+    async with _app_db.async_session_factory() as session:
+        plan = (await session.execute(
+            select(PricingPlan).where(PricingPlan.plan_key == plan_key).with_for_update()
+        )).scalar_one_or_none()
+        if plan is None:
+            raise HTTPException(status_code=404, detail=f"No plan '{plan_key}'.")
+        before = _plan_row(plan).model_dump()
+        for k, v in fields.items():
+            setattr(plan, k, v)
+        await _audit(session, ctx, "admin_update_pricing_plan",
+                     meta={"plan_key": plan_key, "before": before, "changes": fields})
+        await session.commit()
+        return _plan_row(plan)
+
+
+@router.put("/pricing-config", response_model=PricingConfigRow)
+async def admin_update_pricing_config(
+    payload: PricingConfigUpdate,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_PRICING)),
+) -> PricingConfigRow:
+    """Edit referral reward months + invitee/annual discount percents (singleton)."""
+    from app.services.pricing import get_or_create_settings
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=422, detail="No fields to update.")
+    # Bounded 0–24: a fat-fingered (or compromised-account) huge value would hand out
+    # unlimited free-month credits — cap it well below anything a real promo needs.
+    if "referrer_reward_months" in fields and not (0 <= fields["referrer_reward_months"] <= 24):
+        raise HTTPException(status_code=422, detail="referrer_reward_months must be 0–24.")
+    for pct in ("invitee_discount_percent", "annual_discount_percent"):
+        if pct in fields and not (0 <= fields[pct] <= 100):
+            raise HTTPException(status_code=422, detail=f"{pct} must be 0–100.")
+    async with _app_db.async_session_factory() as session:
+        s = await get_or_create_settings(session)
+        before = {
+            "referrer_reward_months": s.referrer_reward_months,
+            "invitee_discount_percent": s.invitee_discount_percent,
+            "annual_discount_percent": s.annual_discount_percent,
+        }
+        for k, v in fields.items():
+            setattr(s, k, v)
+        await _audit(session, ctx, "admin_update_pricing_config",
+                     meta={"before": before, "changes": fields})
+        await session.commit()
+        return PricingConfigRow(
+            referrer_reward_months=s.referrer_reward_months,
+            invitee_discount_percent=s.invitee_discount_percent,
+            annual_discount_percent=s.annual_discount_percent,
+        )
