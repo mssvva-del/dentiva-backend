@@ -23,18 +23,26 @@ class BillingNotConfigured(Exception):
     """Raised when a Stripe call is attempted without configured keys."""
 
 
+# Deprecated → current tier, so an old checkout link (starter/practice/group)
+# still resolves to a live price instead of a hard failure.
+_LEGACY_PLAN_ALIASES = {"starter": "after_hours", "practice": "full_time", "group": "multi"}
+
+
 def _price_id(plan_key: str, billing_cycle: str) -> str:
     """Resolve our plan+cycle to the configured Stripe Price ID (or '')."""
     s = get_settings()
+    key = _LEGACY_PLAN_ALIASES.get(plan_key, plan_key)
     table = {
-        ("starter", "monthly"): s.stripe_price_starter_monthly,
-        ("starter", "annual"): s.stripe_price_starter_annual,
-        ("practice", "monthly"): s.stripe_price_practice_monthly,
-        ("practice", "annual"): s.stripe_price_practice_annual,
-        ("group", "monthly"): s.stripe_price_group_monthly,
-        ("group", "annual"): s.stripe_price_group_annual,
+        ("after_hours", "monthly"): s.stripe_price_after_hours_monthly,
+        ("after_hours", "annual"): s.stripe_price_after_hours_annual,
+        ("full_time", "monthly"): s.stripe_price_full_time_monthly,
+        ("full_time", "annual"): s.stripe_price_full_time_annual,
+        ("growth", "monthly"): s.stripe_price_growth_monthly,
+        ("growth", "annual"): s.stripe_price_growth_annual,
+        ("multi", "monthly"): s.stripe_price_multi_monthly,
+        ("multi", "annual"): s.stripe_price_multi_annual,
     }
-    return table.get((plan_key, billing_cycle), "")
+    return table.get((key, billing_cycle), "")
 
 
 async def create_checkout_session(
