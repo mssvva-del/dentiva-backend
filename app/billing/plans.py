@@ -1,26 +1,30 @@
-"""Dentiva plan catalog (Platform Iter 1, Phase D).
+"""Dentiva plan catalog (billing/metering).
 
-SINGLE SOURCE OF TRUTH for pricing. Sergio's FINAL numbers (2026-06):
-  Starter  $149/mo · 500 min  · overage $0.30/min
-  Practice $349/mo · 1000 min · overage $0.25/min
-  Group    $599/mo · 2000 min · overage $0.20/min  (per location)
-  Annual billing: 17% discount on the yearly total.
+SINGLE SOURCE OF TRUTH for the BILLED catalog. Sergio's approved grid (ADM7,
+2026-07-05 — see dentiva-docs PRICING_DECISION):
+  After-Hours    $239/mo · 1500 min · overage $0.18/min
+  Full-Time      $379/mo · 2500 min · overage $0.15/min   (most popular)
+  Growth         $579/mo · 4000 min · overage $0.13/min
+  Multi-Location $849/mo · 3000 min · overage $0.11/min   (per location)
+  Annual billing: 16% discount on the yearly total.
 
-All money is stored and computed in INTEGER CENTS — never floats — so rounding is
-exact and matches Stripe. The admin panel (Phase E) may override price / included
-minutes / overage per client via the subscription row; this catalog is the
-DEFAULT a plan starts from.
+This catalog drives metering (included minutes, overage) and the Stripe checkout
+price mapping. It mirrors the ADM6 marketing grid (pricing_plans table) key-for-
+key; the marketing table is what the site EDITS/displays, this is what BILLS —
+keep the two in sync when tiers change.
 
-These are plan *definitions*, not Stripe IDs. The real Stripe Price IDs are
-injected via env at Phase D wiring (test mode first); see app/config Stripe block.
+All money is stored and computed in INTEGER CENTS — never floats. The admin panel
+may override price / minutes / overage per client via the subscription row; this
+catalog is the DEFAULT a plan starts from. Real Stripe Price IDs are injected via
+env (scripts/sync_stripe_catalog.py creates them); see app/config Stripe block.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Annual discount: 17% off the 12-month total (≈2 months free).
-ANNUAL_DISCOUNT = 0.17
+# Annual discount: 16% off the 12-month total (matches the ADM6 grid / site).
+ANNUAL_DISCOUNT = 0.16
 
 # Rough per-minute cost of a call (Retell + LLM + Cartesia TTS), in cents. Used by
 # the admin margin view only — a planning estimate, NOT an invoice input. Tune as
@@ -31,12 +35,12 @@ ESTIMATED_COST_CENTS_PER_MIN = 8
 
 @dataclass(frozen=True)
 class Plan:
-    key: str                 # 'starter' | 'practice' | 'group'
+    key: str                 # after_hours | full_time | growth | multi
     name: str
     monthly_price_cents: int
-    included_minutes: int
+    included_minutes: int         # fair-use soft cap
     overage_cents_per_min: int   # charged per minute beyond included_minutes
-    per_location: bool = False   # Group is priced per location
+    per_location: bool = False   # Multi-Location is priced per location
 
     @property
     def annual_total_cents(self) -> int:
@@ -52,19 +56,32 @@ class Plan:
 
 # Catalog keyed by plan id. Order matters for display (cheapest first).
 PLANS: dict[str, Plan] = {
-    "starter": Plan(
-        key="starter", name="Starter",
-        monthly_price_cents=14900, included_minutes=500, overage_cents_per_min=30,
+    "after_hours": Plan(
+        key="after_hours", name="After-Hours",
+        monthly_price_cents=23900, included_minutes=1500, overage_cents_per_min=18,
     ),
-    "practice": Plan(
-        key="practice", name="Practice",
-        monthly_price_cents=34900, included_minutes=1000, overage_cents_per_min=25,
+    "full_time": Plan(
+        key="full_time", name="Full-Time",
+        monthly_price_cents=37900, included_minutes=2500, overage_cents_per_min=15,
     ),
-    "group": Plan(
-        key="group", name="Group",
-        monthly_price_cents=59900, included_minutes=2000, overage_cents_per_min=20,
+    "growth": Plan(
+        key="growth", name="Growth",
+        monthly_price_cents=57900, included_minutes=4000, overage_cents_per_min=13,
+    ),
+    "multi": Plan(
+        key="multi", name="Multi-Location",
+        monthly_price_cents=84900, included_minutes=3000, overage_cents_per_min=11,
         per_location=True,
     ),
+}
+
+# Deprecated pre-ADM7 keys (starter/practice/group) mapped to the nearest current
+# tier. Keeps any existing subscription row / demo / old checkout link resolving
+# instead of crashing on get_plan() — remove once no rows reference them.
+_LEGACY_ALIASES: dict[str, str] = {
+    "starter": "after_hours",
+    "practice": "full_time",
+    "group": "multi",
 }
 
 # Subscription statuses we model. 'pilot' = concierge clinic on a manual deal
@@ -78,7 +95,9 @@ ACTIVE_PRACTICE_STATUSES = frozenset({"trial", "pilot", "active"})
 
 
 def get_plan(key: str) -> Plan | None:
-    return PLANS.get(key)
+    """Resolve a plan by key, transparently mapping deprecated legacy keys
+    (starter/practice/group) to their current tier."""
+    return PLANS.get(key) or PLANS.get(_LEGACY_ALIASES.get(key, ""))
 
 
 def compute_overage_cents(

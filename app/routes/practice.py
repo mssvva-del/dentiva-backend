@@ -13,12 +13,14 @@ from app.models.audit_log import AuditLog
 from app.models.practice import Practice
 from app.models.user import User
 from app.schemas.practice import PracticeMe, PracticeUpdate
+from app.services.call_routing import forwarding_instruction
 
 router = APIRouter(prefix="/api/practice", tags=["practice"])
 
 
 def _build_practice_me(practice: Practice) -> PracticeMe:
-    pms_connected = get_settings().pms_adapter != "mock" and bool(
+    settings = get_settings()
+    pms_connected = settings.pms_adapter != "mock" and bool(
         practice.pms_credentials_secret_key
     )
     return PracticeMe(
@@ -32,6 +34,15 @@ def _build_practice_me(practice: Practice) -> PracticeMe:
         languages_enabled=list(practice.languages_enabled),
         business_hours=practice.business_hours,
         reminders_enabled=practice.reminders_enabled,
+        answer_mode=practice.answer_mode,
+        rings_before_ai=practice.rings_before_ai,
+        # The clinic-facing instruction, computed from the mode + rings. The AI
+        # number is the Dentovox/Retell number (falls back to a placeholder).
+        forwarding_instruction=forwarding_instruction(
+            answer_mode=practice.answer_mode,
+            rings_before_ai=practice.rings_before_ai,
+            ai_number=settings.retell_from_number or None,
+        ),
     )
 
 
@@ -98,6 +109,17 @@ async def update_practice_me(
     ):
         db_practice.reminders_enabled = payload.reminders_enabled
         changed_fields.append("reminders_enabled")
+
+    if payload.answer_mode is not None and payload.answer_mode != db_practice.answer_mode:
+        db_practice.answer_mode = payload.answer_mode
+        changed_fields.append("answer_mode")
+
+    if (
+        payload.rings_before_ai is not None
+        and payload.rings_before_ai != db_practice.rings_before_ai
+    ):
+        db_practice.rings_before_ai = payload.rings_before_ai
+        changed_fields.append("rings_before_ai")
 
     if changed_fields:
         audit = AuditLog(

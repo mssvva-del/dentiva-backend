@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,3 +45,13 @@ class Subscription(UUIDPKMixin, TimestampMixin, Base):
     setup_fee_cents: Mapped[int | None] = mapped_column(Integer)
     current_period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Pending cancellation: service continues until current_period_end, then Stripe
+    # stops billing. Set by the admin cancel endpoint; kept in sync by the
+    # customer.subscription.updated webhook; cleared by resume.
+    cancel_at_period_end: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    # Epoch `created` of the newest customer.subscription.updated event we applied.
+    # Stripe redelivers failed webhooks OUT OF ORDER — a stale retry must not roll
+    # status/cancel_at_period_end back to an older state (reviewer ADM8 #2).
+    last_stripe_event_ts: Mapped[int | None] = mapped_column(BigInteger)

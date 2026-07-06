@@ -110,6 +110,12 @@ class Settings(BaseSettings):
     retell_webhook_secret: str = ""
     retell_api_key: str = ""
     retell_agent_id: str = ""
+    # Outbound voice (reactivation block 7). Empty from-number → no real calls are
+    # placed; the worker DEFERS voice touches until a real US number is attached
+    # (gated: a number on Retell, set in Railway env). Per-language agents can be
+    # added here later; default falls back to retell_agent_id.
+    retell_from_number: str = ""
+    retell_agent_id_es: str = ""  # optional Spanish-specific outbound agent
 
     # Stripe (Phase D). Test-mode keys first; Sergio provides them later. When
     # stripe_secret_key is empty, billing API calls (checkout) return a clear
@@ -121,12 +127,16 @@ class Settings(BaseSettings):
     # Where Stripe Checkout returns the user (success/cancel). The dashboard
     # origin; defaults to local dev. Set to the deployed dashboard URL in prod.
     dashboard_base_url: str = "http://localhost:3000"
-    stripe_price_starter_monthly: str = ""
-    stripe_price_starter_annual: str = ""
-    stripe_price_practice_monthly: str = ""
-    stripe_price_practice_annual: str = ""
-    stripe_price_group_monthly: str = ""
-    stripe_price_group_annual: str = ""
+    # Stripe Price IDs per tier × cycle (ADM7 grid). Created by
+    # scripts/sync_stripe_catalog.py; paste its output into these env vars.
+    stripe_price_after_hours_monthly: str = ""
+    stripe_price_after_hours_annual: str = ""
+    stripe_price_full_time_monthly: str = ""
+    stripe_price_full_time_annual: str = ""
+    stripe_price_growth_monthly: str = ""
+    stripe_price_growth_annual: str = ""
+    stripe_price_multi_monthly: str = ""
+    stripe_price_multi_annual: str = ""
 
     # Background call-sync: periodically pull recent Retell calls into the DB so
     # the dashboard stays current even when web/test calls fire no webhook.
@@ -171,6 +181,15 @@ class Settings(BaseSettings):
     # Fallback CUSTOMER key for single-clinic/dev use when not threading per-
     # practice keys yet (Step 3 wires per-practice). Empty in prod.
     open_dental_customer_key: str = ""
+
+    # NexHealth (Synchronizer aggregator — covers Dentrix/Eaglesoft/Open Dental/etc).
+    # Primary PMS path for Phase 1. Empty keys → use the in-memory mock source so
+    # the Reactivation Engine builds/tests without real access. Real keys go in
+    # _KEYS_PRIVATE.md → Railway env (NOT git). Confirm prod vs sandbox on arrival.
+    nexhealth_api_url: str = "https://nexhealth.info"
+    nexhealth_api_key: str = ""
+    nexhealth_subdomain: str = ""      # practice subdomain in NexHealth
+    nexhealth_location_id: str = ""    # NexHealth location id
 
     # LLM (Groq primary, Anthropic fallback — OpenAI unused in weekend mode)
     groq_api_key: str = ""
@@ -234,6 +253,16 @@ class Settings(BaseSettings):
     maintenance_enabled: bool = True
     maintenance_interval_seconds: int = 86_400  # once a day
     processed_event_ttl_days: int = 90
+    # PHI data-minimization: after this many days, scrub call transcripts +
+    # recording paths (keep the call row's metadata for analytics/billing). 0 = off.
+    call_transcript_retention_days: int = 365
+
+    # Reactivation Engine worker (block: queue). The targets table IS the durable
+    # job queue (next_touch_at = scheduled time); this loop just drains due touches
+    # per practice on an interval. OFF by default — turned on once the live-loop
+    # (real number + PMS) is wired, so it never auto-dials on the demo.
+    reactivation_enabled: bool = False
+    reactivation_interval_seconds: int = 300  # how often the worker drains due touches
 
     # Sentry error monitoring. Empty DSN → disabled (dev/tests). PII is sent only
     # via our scrubbed before_send (send_default_pii stays False — HIPAA).

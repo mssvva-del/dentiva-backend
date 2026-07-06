@@ -63,6 +63,7 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
         for _t in (
             "patients", "calls", "bookings", "callback_requests",
             "waitlist_entries", "invitations",
+            "reactivation_campaigns", "reactivation_targets", "reactivation_touches",
         ):
             await conn.execute(text(f"ALTER TABLE {_t} ENABLE ROW LEVEL SECURITY"))
             await conn.execute(text(f"ALTER TABLE {_t} FORCE ROW LEVEL SECURITY"))

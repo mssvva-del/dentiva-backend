@@ -23,6 +23,18 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     # Where transfer_to_human routes the live call (front-desk / on-call line).
     # E.164. Falls back to phone_number when unset.
     transfer_phone_number: Mapped[str | None] = mapped_column(Text)
+    # How the AI fronts the phone (see RING_COUNT_ASSESSMENT.md):
+    #   full_time   — AI is the main line, answers immediately.
+    #   overflow    — clinic line rings, forwards to AI when unanswered/busy.
+    #   after_hours — forwards to AI only outside business hours.
+    # The ring DELAY for overflow/after_hours is enforced by the clinic's carrier
+    # forwarding (an onboarding instruction we generate), NOT by us — unless we own
+    # the number. This field drives the tariff + the instruction + future Twilio
+    # overflow. NOT a DB enum so we can add modes without a migration.
+    answer_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="overflow")
+    # Rings the clinic line waits before forwarding to AI (overflow/after_hours).
+    # ~6s/ring; carriers often enforce a ~14s minimum. Default 3.
+    rings_before_ai: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
     pms_system: Mapped[str] = mapped_column(Text, nullable=False)
     pms_credentials_secret_key: Mapped[str | None] = mapped_column(Text)
     languages_enabled: Mapped[list[str]] = mapped_column(

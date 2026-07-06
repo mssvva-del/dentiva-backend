@@ -65,6 +65,45 @@ async def test_call_analyzed_stores_intent(client, db_session):
     assert call.hipaa_compliant is True
 
 
+async def test_call_analyzed_reads_custom_analysis_data(client, db_session):
+    """Retell returns the configured post-call questions under custom_analysis_data —
+    the handler must read them there (the real live shape), not the top level."""
+    await seed_practice(
+        db_session, name="Custom An", clerk_org_id="org_can", clerk_user_id="user_can"
+    )
+    await client.post(
+        "/webhooks/retell",
+        json={"event": "call_started", "call_id": "retell-custom-1",
+              "call": {"from_number": "+15551110000", "to_number": "+16204559562",
+                       "start_timestamp": 1748563200000}},
+    )
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "call_analyzed",
+            "call_id": "retell-custom-1",
+            "call_analysis": {
+                "call_summary": "Booked a cleaning.",
+                "user_sentiment": "Positive",          # standard top-level field
+                "custom_analysis_data": {              # our configured questions
+                    "intent": "book_appointment",
+                    "escalation_needed": False,
+                    "hipaa_compliant": True,
+                },
+            },
+        },
+    )
+    assert resp.status_code == 200
+    await db_session.commit()
+    call = (await db_session.execute(
+        select(Call).where(Call.retell_call_id == "retell-custom-1")
+    )).scalar_one()
+    assert call.call_intent == "book_appointment"       # from custom_analysis_data
+    assert call.escalation_needed is False
+    assert call.hipaa_compliant is True
+    assert call.patient_sentiment == "Positive"          # fell back to user_sentiment
+
+
 async def test_call_analyzed_missing_call(client, db_session):
     """call_analyzed for an unknown retell_call_id returns ok with a warning."""
     await seed_practice(

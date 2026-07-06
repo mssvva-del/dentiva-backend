@@ -89,7 +89,7 @@ async def set_pilot(
     if sub is None:
         # Pilots default to Starter entitlement so usage limits/UX still work.
         sub = await create_or_update_subscription(
-            session, practice, plan_key="starter", status="pilot"
+            session, practice, plan_key="after_hours", status="pilot"
         )
     sub.status = "pilot"
     sub.mrr_cents = 0
@@ -106,7 +106,9 @@ async def suspend_practice(session: AsyncSession, practice: Practice) -> None:
     """
     practice.status = "suspended"
     sub = await get_subscription(session, practice.id)
-    if sub is not None:
+    # 'cancelled' is terminal — the subscription.deleted webhook that follows an
+    # admin's immediate cancel must not relabel it as merely 'suspended'.
+    if sub is not None and sub.status != "cancelled":
         sub.status = "suspended"
 
 

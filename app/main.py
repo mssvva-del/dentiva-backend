@@ -29,10 +29,13 @@ from app.routes import (
     calls,
     dashboard,
     knowledge_base,
+    leads,
     me,
     onboarding,
     patients,
     practice,
+    pricing,
+    reactivation,
     team,
     voice,
     waitlist,
@@ -40,6 +43,7 @@ from app.routes import (
 from app.security import verify_security_config
 from app.services.call_sync import call_sync_loop
 from app.services.maintenance import maintenance_loop
+from app.services.reactivation.worker import reactivation_worker_loop
 from app.services.reminders import reminder_loop
 from app.webhooks import clerk, retell, stripe, twilio_sms
 
@@ -70,6 +74,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         tasks.append(asyncio.create_task(maintenance_loop()))
         logger.info("Maintenance background task started")
 
+    if settings.reactivation_enabled:
+        tasks.append(asyncio.create_task(reactivation_worker_loop()))
+        logger.info("Reactivation worker background task started")
+
     try:
         yield
     finally:
@@ -78,11 +86,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Close the pooled Groq client (no-op if the relay never ran).
+        from app.services.llm.groq_client import aclose_pool
+
+        await aclose_pool()
 
 
 
 
-app = FastAPI(title="Dentiva Backend", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Dentovox Backend", version="0.1.0", lifespan=lifespan)
 # WHY middleware order matters: Starlette runs middleware in REVERSE order of
 # add_middleware() — last added is outermost (runs first on the way in). So the
 # order below is deliberate: RequestContextMiddleware is added LAST so it wraps
@@ -203,6 +215,9 @@ app.include_router(calls.router)
 app.include_router(bookings.router)
 app.include_router(callbacks.router)
 app.include_router(patients.router)
+app.include_router(leads.router)
+app.include_router(pricing.router)
+app.include_router(reactivation.router)
 app.include_router(dashboard.router)
 app.include_router(waitlist.router)
 app.include_router(voice.router)
@@ -211,6 +226,14 @@ app.include_router(twilio_sms.router)
 app.include_router(clerk.router)
 app.include_router(stripe.router)
 app.include_router(knowledge_base.router)
+
+# Groq custom-LLM relay for Retell — mounted ONLY when enabled, so the demo keeps
+# using the Retell-managed model until a clinic is deliberately switched over.
+if get_settings().enable_llm_relay:
+    from app.api.llm_relay import router as llm_relay_router
+
+    app.include_router(llm_relay_router)
+    logger.info("Groq LLM relay mounted at /ws/retell-llm (ENABLE_LLM_RELAY=true)")
 # PLACEHOLDER — Recall / reactivation campaigns (see _docs/RECALL_CAMPAIGNS.md).
 # When app/routes/recall.py lands, mount it here AND rate-limit the outbound
 # trigger routes hard, e.g.:
@@ -224,7 +247,3 @@ app.include_router(knowledge_base.router)
 # bug or a compromised token dial thousands of patients before anyone notices —
 # unlike read endpoints, the blast radius is external and irreversible. Keep the
 # launch/import limit far stricter than the generic per-IP limit.
-# retell-llm). Mounted only when explicitly enabled, so an unauthenticated WS
-# isn't exposed by default (Security Sprint M7).
-if get_settings().enable_llm_relay:
-    logger.info("Groq LLM relay mounted (ENABLE_LLM_RELAY=true)")

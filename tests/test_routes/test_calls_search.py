@@ -43,7 +43,10 @@ async def _seed_call(
 
 @pytest.mark.asyncio
 async def test_calls_search_matches_from_number(client, db_session):
-    """Search by a phone number substring returns only matching calls."""
+    """Search by the caller's full number (any format) returns matching calls.
+
+    from_number is encrypted now, so search matches the deterministic hash — exact
+    on the normalized number, not a substring (see B3)."""
     org_id = _uid("org_srch1")
     user_id = _uid("user_srch1")
     practice, _ = await seed_practice(
@@ -53,7 +56,6 @@ async def test_calls_search_matches_from_number(client, db_session):
         clerk_user_id=user_id,
     )
 
-    # Seed a call that SHOULD match (+1555…)
     await _seed_call(
         db_session,
         practice,
@@ -61,7 +63,6 @@ async def test_calls_search_matches_from_number(client, db_session):
         from_number="+15551234567",
         to_number="+18005550100",
     )
-    # Seed a call that should NOT match
     await _seed_call(
         db_session,
         practice,
@@ -70,14 +71,14 @@ async def test_calls_search_matches_from_number(client, db_session):
         to_number="+18005550100",
     )
 
+    # Full number, differently formatted → matches via the normalized hash.
     resp = await client.get(
         "/api/calls",
-        params={"search": "+1555"},
+        params={"search": "(555) 123-4567"},
         headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
     )
     assert resp.status_code == 200
     data = resp.json()
-    # Only the matching call should be returned
     assert data["total"] == 1
     assert data["calls"][0]["from_number"] == "+15551234567"
 
@@ -113,8 +114,9 @@ async def test_calls_search_no_match_returns_empty(client, db_session):
 
 
 @pytest.mark.asyncio
-async def test_calls_search_matches_to_number(client, db_session):
-    """Search term can match the to_number field as well."""
+async def test_calls_search_ignores_to_number(client, db_session):
+    """Search matches the CALLER number only. to_number (our own inbound line) is
+    not indexed for search after B3 — searching it returns nothing, by design."""
     org_id = _uid("org_srch3")
     user_id = _uid("user_srch3")
     practice, _ = await seed_practice(
@@ -132,11 +134,16 @@ async def test_calls_search_matches_to_number(client, db_session):
         to_number="+15559876543",
     )
 
+    # Searching the to_number → no match (only from_number/caller is searchable).
     resp = await client.get(
-        "/api/calls?search=987",
+        "/api/calls?search=+15559876543",
         headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
     )
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["total"] == 1
-    assert data["calls"][0]["to_number"] == "+15559876543"
+    assert resp.json()["total"] == 0
+    # But searching the caller's from_number → matches.
+    resp2 = await client.get(
+        "/api/calls?search=+12125550100",
+        headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
+    )
+    assert resp2.json()["total"] == 1

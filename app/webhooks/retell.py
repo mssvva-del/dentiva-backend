@@ -42,6 +42,7 @@ from app.services.sms import (
     send_cancellation_notice,
     send_waitlist_opening,
 )
+from app.utils.crypto import phone_hmac
 
 logger = logging.getLogger("dentiva.webhooks.retell")
 
@@ -232,21 +233,21 @@ async def _upsert_patient(
     first_name: str,
     last_name: str,
     phone: str,
+    language: str | None = None,
 ) -> Patient:
-    """Return existing patient by phone or create a stub for this call."""
-    # Look up by encrypted phone — requires scanning; acceptable for weekend scale.
-    result = await session.execute(
-        select(Patient).where(Patient.practice_id == practice_id)
-    )
-    patients = result.scalars().all()
-    for p in patients:
-        try:
-            if p.phone == phone:
-                return p
-        except Exception:
-            pass
+    """Return existing patient by phone or create a stub for this call.
 
-    # Create a new stub patient.
+    ``language`` is the language this call was conducted in. For a NEW patient we
+    store it as preferred_language so downstream SMS + reactivation speak their
+    language. We do NOT overwrite an existing patient's stored preference (a
+    relative may call in a different language)."""
+    # Indexed lookup by the deterministic phone hash — no full-table scan / decrypt.
+    existing = await _find_patient_by_phone(session, practice_id, phone)
+    if existing is not None:
+        return existing
+
+    # Create a new stub patient. Only 'es'/'en' supported; default 'en'.
+    preferred_language = "es" if (language or "").lower().startswith("es") else "en"
     patient = Patient(
         id=uuid.uuid4(),
         practice_id=practice_id,
@@ -254,6 +255,7 @@ async def _upsert_patient(
         first_name=first_name,
         last_name=last_name,
         phone=phone,
+        preferred_language=preferred_language,
     )
     session.add(patient)
     await session.flush()
@@ -263,19 +265,29 @@ async def _upsert_patient(
 async def _find_patient_by_phone(
     session, practice_id: uuid.UUID, phone: str
 ) -> Patient | None:
-    """Read-only lookup of a patient by (encrypted) phone within a practice."""
-    if not phone:
+    """Read-only lookup of a patient by phone within a practice — indexed via the
+    deterministic phone hash (no scan/decrypt).
+
+    Deterministic on collision: family members can share one phone in a practice.
+    We return the OLDEST match (stable) and log when more than one exists so the
+    ambiguity is visible rather than silently picking a random row."""
+    h = phone_hmac(phone)
+    if not h:
         return None
-    result = await session.execute(
-        select(Patient).where(Patient.practice_id == practice_id)
-    )
-    for p in result.scalars().all():
-        try:
-            if p.phone == phone:
-                return p
-        except Exception:  # noqa: BLE001 — decrypt failures on stray rows are non-fatal
-            pass
-    return None
+    rows = (
+        await session.execute(
+            select(Patient)
+            .where(Patient.practice_id == practice_id, Patient.phone_hmac == h)
+            .order_by(Patient.created_at.asc())
+            .limit(2)
+        )
+    ).scalars().all()
+    if len(rows) > 1:
+        logger.warning(
+            "phone lookup: %d patients share this number in practice %s — using oldest",
+            len(rows), practice_id,
+        )
+    return rows[0] if rows else None
 
 
 async def _slot_taken(
@@ -519,12 +531,23 @@ async def _handle_call_analyzed(payload: dict) -> dict:
     """Store Retell post-call analysis results on the calls row."""
     retell_call_id = payload.get("call_id") or payload.get("retell_call_id", "")
     analysis = payload.get("call_analysis") or payload.get("analysis") or {}
+    # Retell puts our configured post-call questions (config.yaml) under
+    # ``custom_analysis_data`` — reading them off the top level (the old code) meant
+    # these columns were ALWAYS null and the dashboard rendered blanks. Prefer the
+    # custom bucket; fall back to top-level for the standard fields / older payloads.
+    custom = analysis.get("custom_analysis_data") or {}
 
-    # Extract structured fields
-    call_intent = analysis.get("intent")  # enum string
-    patient_sentiment = analysis.get("patient_sentiment")  # enum string
-    escalation_needed = analysis.get("escalation_needed")  # bool
-    hipaa_compliant = analysis.get("hipaa_compliant")  # bool
+    def _field(key: str, *alts: str):
+        for src in (custom, analysis):
+            for k in (key, *alts):
+                if k in src and src[k] is not None:
+                    return src[k]
+        return None
+
+    call_intent = _field("intent")                                   # enum string
+    patient_sentiment = _field("patient_sentiment", "user_sentiment")  # enum string
+    escalation_needed = _field("escalation_needed")                  # bool
+    hipaa_compliant = _field("hipaa_compliant")                      # bool
 
     async with _app_db.async_session_factory() as session:
         # calls is RLS-protected — resolve + bind tenant before the lookup.
@@ -657,8 +680,15 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
                 )
             ).scalar_one_or_none() or "our office"
 
-        # Upsert patient.
-        patient = await _upsert_patient(session, practice_id, first_name, last_name, phone)
+        # Language this call was conducted in — the agent passes it, falling back
+        # to Retell's mid-call detection on the call row. Drives preferred_language
+        # for the new patient and the confirmation SMS language.
+        call_language = args.get("language") or (call.language_detected if call else None)
+
+        # Upsert patient (stores preferred_language on a new patient).
+        patient = await _upsert_patient(
+            session, practice_id, first_name, last_name, phone, language=call_language
+        )
         patient_opted_out = patient.sms_opt_out
 
         # Double-book guard: pick the first offered slot not already taken.
@@ -735,6 +765,7 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         time=booked_time,
         provider=booked_provider,
         opted_out=patient_opted_out,
+        language=patient.preferred_language,
     )
     logger.info("book_appointment: sms %s", sms_result)
 
