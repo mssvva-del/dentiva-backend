@@ -1156,6 +1156,7 @@ from app.auth.permissions import ADMIN_ROLE_PERMISSIONS  # noqa: E402 — sectio
 from app.services.clerk_api import (  # noqa: E402 — grouped with its section
     ClerkError,
     create_platform_invitation,
+    find_clerk_user_by_email,
 )
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -1192,6 +1193,17 @@ async def admin_invite_staff(
                 email=email, public_metadata={"dentiva_role": payload.role},
             )
         except ClerkError as exc:
+            # Clerk refuses invitations for addresses that ALREADY have an account
+            # ("That email address is taken"). That's not a dead end — the person
+            # exists, so PROMOTE them directly: find their Clerk id, upsert our
+            # user row as internal, attach the staff role. Same net effect as an
+            # accepted invitation, minus the email round-trip.
+            if exc.status_code == 422 and "taken" in str(exc).lower():
+                promoted = await _promote_existing_to_staff(
+                    session, ctx, email=email, role=payload.role, local=existing,
+                )
+                if promoted:
+                    return {"ok": True, "invitation_id": "", "promoted": True}
             status_ = exc.status_code or 422
             raise HTTPException(
                 status_code=502 if status_ >= 500 else (503 if status_ == 503 else 422),
@@ -1202,6 +1214,46 @@ async def admin_invite_staff(
                            "invitation": invitation_id})
         await session.commit()
     return {"ok": True, "invitation_id": invitation_id}
+
+
+async def _promote_existing_to_staff(
+    session: AsyncSession, ctx: AdminContext, *, email: str, role: str,
+    local: User | None,
+) -> bool:
+    """Grant an EXISTING Clerk account the internal staff role (invite fallback).
+
+    Returns False when no Clerk user actually matches (caller re-raises the
+    original Clerk error). Upserts our users row (is_internal=True) keyed on the
+    Clerk id, then attaches the DentivaStaff role. Audited as a promotion —
+    distinct from an emailed invitation."""
+    clerk_id = await find_clerk_user_by_email(email)
+    if clerk_id is None:
+        return False
+    user = local
+    if user is None:
+        user = (await session.execute(
+            select(User).where(User.clerk_user_id == clerk_id)
+        )).scalar_one_or_none()
+    if user is None:
+        user = User(
+            id=uuid.uuid4(), clerk_user_id=clerk_id, practice_id=None,
+            email=email, role="staff", is_internal=True, status="active",
+        )
+        session.add(user)
+        await session.flush()
+    else:
+        user.is_internal = True
+    staff = (await session.execute(
+        select(DentivaStaff).where(DentivaStaff.user_id == user.id)
+    )).scalar_one_or_none()
+    if staff is None:
+        session.add(DentivaStaff(id=uuid.uuid4(), user_id=user.id, role=role))
+    else:
+        staff.role = role
+    await _audit(session, ctx, "admin_promote_staff",
+                 meta={"email": email, "role": role, "clerk_user": clerk_id[:16]})
+    await session.commit()
+    return True
 
 
 @router.delete("/staff/{user_id}")
