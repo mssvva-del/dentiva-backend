@@ -128,6 +128,10 @@ class ClinicDetail(BaseModel):
     subscription_status: str | None
     included_minutes: int | None
     mrr_cents: int
+    # Pending-cancel state (ADM8) — lets the clinic card show a "Cancels on {date}"
+    # banner + Resume without a second round-trip.
+    cancel_at_period_end: bool
+    current_period_end: datetime | None
     user_count: int
     call_count: int
     booking_count: int
@@ -172,6 +176,8 @@ async def clinic_detail(
         subscription_status=sub.status if sub else None,
         included_minutes=sub.included_minutes if sub else None,
         mrr_cents=sub.mrr_cents if sub else 0,
+        cancel_at_period_end=bool(sub.cancel_at_period_end) if sub else False,
+        current_period_end=sub.current_period_end if sub else None,
         user_count=users, call_count=calls, booking_count=bookings,
     )
 
