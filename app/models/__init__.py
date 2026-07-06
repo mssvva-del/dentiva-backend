@@ -5,6 +5,7 @@ from app.models.baa_acceptance import BaaAcceptance
 from app.models.booking import Booking
 from app.models.call import Call
 from app.models.callback_request import CallbackRequest
+from app.models.clinic_note import ClinicNote
 from app.models.dentiva_staff import DentivaStaff
 from app.models.feature_flag import FeatureFlag
 from app.models.invitation import Invitation
@@ -33,6 +34,7 @@ __all__ = [
     "AuditLog",
     "BaaAcceptance",
     "CallbackRequest",
+    "ClinicNote",
     "WaitlistEntry",
     "DentivaStaff",
     "Invitation",
