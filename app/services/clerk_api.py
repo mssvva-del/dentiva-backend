@@ -140,3 +140,35 @@ async def create_platform_invitation(
             msg = resp.text[:200]
         raise ClerkError(f"Clerk {resp.status_code}: {msg}", status_code=resp.status_code)
     return resp.json().get("id", "")
+
+
+async def find_clerk_user_by_email(
+    email: str, *, transport: httpx.AsyncBaseTransport | None = None
+) -> str | None:
+    """Clerk user id for an email, or None. Used by the staff-invite fallback:
+    when Clerk rejects an invitation because the address already has an account,
+    we look the user up and promote them directly instead of failing."""
+    settings = get_settings()
+    if not settings.clerk_secret_key:
+        raise ClerkError("CLERK_SECRET_KEY not configured", status_code=503)
+    try:
+        async with httpx.AsyncClient(timeout=10, transport=transport) as client:
+            resp = await client.get(
+                f"{_CLERK_API_BASE}/users",
+                params={"email_address": [email], "limit": 10},
+                headers={"Authorization": f"Bearer {settings.clerk_secret_key}"},
+            )
+    except httpx.HTTPError as exc:
+        raise ClerkError(
+            f"Clerk unreachable: {type(exc).__name__}", status_code=502
+        ) from exc
+    if resp.status_code >= 400:
+        raise ClerkError(f"Clerk {resp.status_code}", status_code=resp.status_code)
+    data = resp.json()
+    users = data if isinstance(data, list) else data.get("data", [])
+    target = email.lower()
+    for u in users:
+        for ea in u.get("email_addresses", []):
+            if ea.get("email_address", "").lower() == target:
+                return u["id"]
+    return users[0]["id"] if users else None

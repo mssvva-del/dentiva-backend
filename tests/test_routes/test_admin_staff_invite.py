@@ -197,3 +197,71 @@ async def test_user_created_garbage_role_stays_regular(db_session):
         select(User).where(User.clerk_user_id == "user_inv_2")
     )).scalar_one()
     assert u.is_internal is False and u.role == "viewer"
+
+
+# ── invite fallback: existing Clerk account → direct promotion ───────────────
+def _fake_invite_taken(monkeypatch):
+    """Clerk rejects the invitation because the address already has an account."""
+    from app.services.clerk_api import ClerkError
+
+    async def _create(*, email, public_metadata=None, **_kw):
+        raise ClerkError("Clerk 422: That email address is taken. Please try "
+                         "another.", status_code=422)
+    monkeypatch.setattr(admin_mod, "create_platform_invitation", _create)
+
+
+async def test_invite_existing_clerk_account_promotes(client, db_session, monkeypatch):
+    await _internal(db_session, clerk_id="sa_p1", role="super_admin")
+    _fake_invite_taken(monkeypatch)
+
+    async def _find(email, **_kw):
+        return "user_existing_123"
+    monkeypatch.setattr(admin_mod, "find_clerk_user_by_email", _find)
+
+    r = await client.post("/api/admin/staff/invite", headers=_h("sa_p1"),
+                          json={"email": "taken@dentovox.com", "role": "sales"})
+    assert r.status_code == 200 and r.json().get("promoted") is True
+
+    u = (await db_session.execute(
+        select(User).where(User.clerk_user_id == "user_existing_123")
+    )).scalar_one()
+    assert u.is_internal is True
+    staff = (await db_session.execute(
+        select(DentivaStaff).where(DentivaStaff.user_id == u.id)
+    )).scalar_one()
+    assert staff.role == "sales"
+
+
+async def test_invite_promotes_existing_clinic_user(client, db_session, monkeypatch):
+    """A CLINIC user (is_internal=False) invited as staff gets promoted in place."""
+    await _internal(db_session, clerk_id="sa_p2", role="super_admin")
+    clinic_user = User(id=uuid.uuid4(), clerk_user_id="user_clinic_9",
+                       practice_id=None, email="owner@clinic.com",
+                       role="owner", is_internal=False)
+    db_session.add(clinic_user)
+    await db_session.commit()
+    _fake_invite_taken(monkeypatch)
+
+    async def _find(email, **_kw):
+        return "user_clinic_9"
+    monkeypatch.setattr(admin_mod, "find_clerk_user_by_email", _find)
+
+    r = await client.post("/api/admin/staff/invite", headers=_h("sa_p2"),
+                          json={"email": "owner@clinic.com", "role": "support"})
+    assert r.status_code == 200 and r.json().get("promoted") is True
+    await db_session.refresh(clinic_user)
+    assert clinic_user.is_internal is True
+
+
+async def test_invite_taken_but_no_clerk_match_surfaces_error(client, db_session,
+                                                              monkeypatch):
+    await _internal(db_session, clerk_id="sa_p3", role="super_admin")
+    _fake_invite_taken(monkeypatch)
+
+    async def _find(email, **_kw):
+        return None
+    monkeypatch.setattr(admin_mod, "find_clerk_user_by_email", _find)
+
+    r = await client.post("/api/admin/staff/invite", headers=_h("sa_p3"),
+                          json={"email": "ghost@x.com", "role": "support"})
+    assert r.status_code == 422 and "taken" in r.json()["error"]["message"].lower()
