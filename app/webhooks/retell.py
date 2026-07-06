@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import logging
 import re
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -53,16 +54,23 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 # ---------------------------------------------------------------------------
 
 
-def _verify_signature(raw_body: bytes, signature: str | None) -> bool:
+# Retell's signature scheme (matches retell-sdk `verify`): the X-Retell-Signature
+# header is "v={unix_ms},d={hex}" where hex = HMAC-SHA256(secret, raw_body + str(ms)).
+# The secret is the API key that has the "webhook" badge in the Retell dashboard.
+_RETELL_SIG_RE = re.compile(r"v=(\d+),d=(.+)")
+_RETELL_TOLERANCE_MS = 5 * 60 * 1000  # reject signatures older/newer than 5 min
+
+
+def _verify_signature(
+    raw_body: bytes, signature: str | None, *, now_ms: int | None = None
+) -> bool:
     settings = get_settings()
     secret = settings.retell_webhook_secret
     if not secret:
         # No secret configured → we CANNOT verify. We still allow the request so
         # the live agent keeps working, but flag it loudly. SECURITY HOLE while
         # unset: anyone who knows the URL could POST a fake book/cancel/transfer.
-        # To CLOSE it: (1) set a signing secret in Retell, (2) set
-        # RETELL_WEBHOOK_SECRET to match, (3) confirm our HMAC matches Retell's
-        # scheme in staging BEFORE prod (mismatch would reject real webhooks).
+        # Close it by setting RETELL_WEBHOOK_SECRET to the Retell API key.
         if settings.environment == "production":
             logger.error(
                 "RETELL_WEBHOOK_SECRET NOT set — webhooks are UNVERIFIED in production."
@@ -72,8 +80,17 @@ def _verify_signature(raw_body: bytes, signature: str | None) -> bool:
         return True
     if not signature:
         return False
-    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    match = _RETELL_SIG_RE.search(signature)
+    if not match:
+        return False
+    poststamp = int(match.group(1))
+    post_digest = match.group(2)
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    if abs(now - poststamp) > _RETELL_TOLERANCE_MS:
+        return False  # replay / clock-skew guard
+    signed = raw_body + str(poststamp).encode()
+    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, post_digest)
 
 
 # ---------------------------------------------------------------------------
