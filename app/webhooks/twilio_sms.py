@@ -28,6 +28,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import re
 import uuid
 from urllib.parse import parse_qsl
 
@@ -55,6 +56,27 @@ _CONFIRM_WORDS = {"confirm", "c", "yes", "y", "ok", "okay", "confirmed"}
 _CANCEL_WORDS = {"cancel", "x", "no", "n"}
 _STOP_WORDS = {"stop", "stopall", "unsubscribe", "end", "quit", "cancelall"}
 _START_WORDS = {"start", "unstop", "yes-resume"}
+
+# FCC Revocation Rule (eff. 2025-04-11): opt-out "by any reasonable method" — not
+# just the exact keyword. These catch free-form revocations ("please stop texting
+# me", "remove me from your list", "no me escriban más"). Anchored to a
+# messaging/contact context so ordinary replies ("can we stop by tomorrow?",
+# "no problem") do NOT trigger. Over-triggering costs one lost thread; missing a
+# revocation is a TCPA violation — patterns lean inclusive.
+_FREEFORM_STOP_PATTERNS = tuple(re.compile(rx, re.IGNORECASE) for rx in (
+    r"\b(stop|quit|no\s+more|don'?t|do\s+not|never)\b[^.!?]{0,40}"
+    r"\b(text|txt|message|msg|contact|call)\w*",
+    r"\b(text|txt|message|msg)\w*[^.!?]{0,40}\bstop\b",
+    r"\bopt\s*-?\s*out\b",
+    r"\bunsubscribe\b",
+    r"\b(remove|take)\s+me\s+(from|off)\b",
+    r"\bleave\s+me\s+alone\b",
+    r"\bwrong\s+number\b",
+    # Spanish
+    r"\bno\s+(me\s+)?(escrib|mand|env[ií]|llam|contact)\w*",
+    r"\bno\s+m[aá]s\s+mensajes\b",
+    r"\bbasta\b",
+))
 
 
 def _twiml(message: str | None = None) -> Response:
@@ -92,6 +114,11 @@ def _classify(body: str) -> str:
         return "stop"
     if first in _START_WORDS:
         return "start"
+    # Free-form revocation scan (FCC: "any reasonable method") BEFORE the
+    # single-word confirm/cancel heuristics: "no more texts please" is a
+    # revocation, not an appointment-cancel, even though it starts with "no".
+    if any(rx.search(word) for rx in _FREEFORM_STOP_PATTERNS):
+        return "stop"
     if first in _CONFIRM_WORDS:
         return "confirm"
     if first in _CANCEL_WORDS:

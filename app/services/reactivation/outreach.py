@@ -30,6 +30,11 @@ from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.reactivation import ReactivationTarget, ReactivationTouch
 from app.services.reactivation.campaign import select_due_targets
+from app.services.reactivation.compliance import (
+    PromoContentBlocked,
+    assert_treatment_only,
+    frequency_block_reason,
+)
 from app.services.reactivation.messages import reactivation_sms_body
 from app.services.reactivation.scheduling import CampaignConfig, next_allowed_time
 from app.services.sms import send_sms
@@ -58,6 +63,13 @@ async def send_reactivation_sms(
         language, first_name=patient.first_name,
         practice_name=practice_name, segment=segment,
     )
+    # TCPA content gate: treatment-only copy or nothing. Built-in templates pass;
+    # this hard-stops any future custom/clinic copy carrying promo language
+    # (one promo word reclassifies the text as marketing → $500–1,500/message).
+    try:
+        assert_treatment_only(body)
+    except PromoContentBlocked:
+        return TouchResult("skipped", "content_blocked")
     res = await send_sms(patient.phone, body, opted_out=patient.sms_opt_out, client=client)
     if res.get("sent"):
         return TouchResult("sent", "delivered", res.get("sid"))
@@ -111,6 +123,18 @@ async def process_due_targets(
             summary["processed"] += 1
             continue
 
+        # TCPA frequency caps (FCC 20-186): ≤1/day, ≤3/week per patient ACROSS
+        # campaigns. Over the cap → DEFER (touch preserved, retried after the
+        # window rolls), never silently skip.
+        block = await frequency_block_reason(session, target.patient_id, now=now)
+        if block is not None:
+            target.next_touch_at = next_allowed_time(
+                now + timedelta(days=1 if block == "daily_limit" else 2),
+                practice.timezone, config.quiet_start_hour, config.quiet_end_hour,
+            )
+            summary["deferred"] += 1
+            continue
+
         if step.channel == "sms":
             result = await send_reactivation_sms(
                 patient, lang, practice_name=practice.name,
@@ -123,6 +147,11 @@ async def process_due_targets(
             session, target, step.channel, result.status, result.outcome,
             lang, result.provider_ref, now,
         )
+        # Flush NOW so the frequency-cap count sees this touch within the same
+        # tick — a patient enrolled in two campaigns (two due targets) must not
+        # receive two texts today. Autoflush would usually cover this, but the
+        # TCPA invariant must not depend on session configuration.
+        await session.flush()
         target.touches_count += 1
         summary["processed"] += 1
         summary["sent" if result.status == "sent" else "failed"] += (
