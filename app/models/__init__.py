@@ -1,6 +1,7 @@
 """ORM models. Import all here so Alembic autogenerate sees them."""
 
 from app.models.audit_log import AuditLog
+from app.models.baa_acceptance import BaaAcceptance
 from app.models.booking import Booking
 from app.models.call import Call
 from app.models.callback_request import CallbackRequest
@@ -30,6 +31,7 @@ __all__ = [
     "Call",
     "Booking",
     "AuditLog",
+    "BaaAcceptance",
     "CallbackRequest",
     "WaitlistEntry",
     "DentivaStaff",

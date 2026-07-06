@@ -89,6 +89,14 @@ async def test_full_onboarding_flow_to_live(client, db_session):
     assert r.json()["agent_settings"]["agent_name"] == "Anna"
     assert r.json()["onboarding_step"] == 6
 
+    # BAA gate: complete is blocked until Terms + BAA accepted (HIPAA)
+    blocked = await client.post("/api/onboarding/complete", headers=h)
+    assert blocked.status_code == 403
+    acc = await client.post("/api/onboarding/baa/accept", headers=h, json={
+        "signer_name": "Dr. Jane Roe", "signer_title": "Owner",
+    })
+    assert acc.status_code == 200
+
     # complete → live
     r = await client.post("/api/onboarding/complete", headers=h)
     assert r.status_code == 200
@@ -167,6 +175,9 @@ async def test_complete_blocked_when_incomplete(client, db_session):
     await db_session.commit()
 
     h = _auth("org_ob6", "user_ob6")
+    # Accept BAA first so we isolate the required-FIELD gate (not the BAA gate).
+    await client.post("/api/onboarding/baa/accept", headers=h,
+                      json={"signer_name": "X", "signer_title": "Owner"})
     r = await client.post("/api/onboarding/complete", headers=h)
     assert r.status_code in (400, 422)
 
