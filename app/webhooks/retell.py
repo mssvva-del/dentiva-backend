@@ -57,6 +57,9 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 # Retell's signature scheme (matches retell-sdk `verify`): the X-Retell-Signature
 # header is "v={unix_ms},d={hex}" where hex = HMAC-SHA256(secret, raw_body + str(ms)).
 # The secret is the API key that has the "webhook" badge in the Retell dashboard.
+# NOTE: our old code compared a plain HMAC over the body against the WHOLE header
+# string → it never matched, so a set secret produced 401 on every real webhook
+# (it only "worked" while the secret was unset and the check was skipped).
 _RETELL_SIG_RE = re.compile(r"v=(\d+),d=(.+)")
 _RETELL_TOLERANCE_MS = 5 * 60 * 1000  # reject signatures older/newer than 5 min
 
@@ -88,6 +91,8 @@ def _verify_signature(
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     if abs(now - poststamp) > _RETELL_TOLERANCE_MS:
         return False  # replay / clock-skew guard
+    # HMAC over raw_body ++ the timestamp string (byte-exact with the SDK, which
+    # signs (body_str + str(ms)).encode()).
     signed = raw_body + str(poststamp).encode()
     expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, post_digest)
