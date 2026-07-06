@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import re
 import time
@@ -1521,3 +1522,57 @@ async def retell_webhook(request: Request) -> dict:
 
     logger.info("Unhandled Retell event: %s", event)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Inbound-call webhook (V1: KB → dynamic variables).
+#
+# Configured on the Retell PHONE NUMBER (inbound_webhook_url). Retell calls it
+# BEFORE answering; whatever dynamic_variables we return are substituted into the
+# agent's prompt ({{practice_name}}, {{kb_context}}, {{today}}, …) — this is what
+# makes the generic agent THIS clinic's receptionist. Signature: same
+# X-Retell-Signature scheme as the event webhook. On ANY failure we return an
+# empty mapping rather than erroring — a broken lookup must never block the
+# phone from being answered (the prompt has safe defaults).
+# ---------------------------------------------------------------------------
+from app.services.llm.dynamic_vars import build_dynamic_variables  # noqa: E402
+
+
+async def _resolve_practice_for_inbound(agent_id: str | None,
+                                        to_number: str | None) -> Practice | None:
+    """Prefer the explicit agent binding; else the practice owning the dialed
+    number; else the single-tenant fallback in _resolve_practice."""
+    if to_number:
+        async with _app_db.async_session_factory() as session:
+            p = (await session.execute(
+                select(Practice).where(Practice.phone_number == to_number)
+            )).scalar_one_or_none()
+            if p is not None:
+                return p
+    return await _resolve_practice(agent_id)
+
+
+@router.post("/retell/inbound", status_code=status.HTTP_200_OK)
+async def retell_inbound_webhook(request: Request) -> dict:
+    raw_body = await request.body()
+    signature = request.headers.get("x-retell-signature")
+    if not _verify_signature(raw_body, signature):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Bad webhook signature.")
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return {"call_inbound": {"dynamic_variables": {}}}
+
+    inbound = payload.get("call_inbound") or {}
+    agent_id = inbound.get("agent_id")
+    to_number = inbound.get("to_number")
+    try:
+        practice = await _resolve_practice_for_inbound(agent_id, to_number)
+        variables = build_dynamic_variables(practice) if practice else {}
+    except Exception:  # noqa: BLE001 — never block call pickup on a lookup bug
+        logger.exception("retell inbound webhook: variable build failed")
+        variables = {}
+    logger.info("retell inbound: vars=%d practice=%s",
+                len(variables), "yes" if variables else "none")
+    return {"call_inbound": {"dynamic_variables": variables}}
