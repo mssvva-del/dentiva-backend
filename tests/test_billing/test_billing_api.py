@@ -38,7 +38,7 @@ async def test_plans_visible_to_manager_not_staff(client, db_session):
     ok = await client.get("/api/billing/plans", headers=_h("b_manager"))
     assert ok.status_code == 200
     keys = {p["key"] for p in ok.json()}
-    assert keys == {"starter", "practice", "group"}
+    assert keys == {"after_hours", "full_time", "growth", "multi"}
     # staff lacks VIEW_BILLING
     assert (await client.get("/api/billing/plans", headers=_h("b_staff"))).status_code == 403
 
@@ -50,7 +50,7 @@ async def test_summary_no_subscription_shows_zeros(client, db_session):
     body = r.json()
     assert body["plan"] is None
     assert body["usage"]["minutes_used"] == 0
-    assert body["usage"]["included_minutes"] == 500  # starter default fallback
+    assert body["usage"]["included_minutes"] == 1500  # after_hours default fallback
     assert body["invoices"] == []
 
 
@@ -60,21 +60,21 @@ async def test_summary_reflects_subscription_and_usage(client, db_session):
     p = (await db_session.execute(
         select(Practice).where(Practice.id == practice.id)
     )).scalar_one()
-    await create_or_update_subscription(db_session, p, plan_key="practice", status="active")
+    await create_or_update_subscription(db_session, p, plan_key="full_time", status="active")
     await record_call_usage(db_session, practice.id, 600, now=datetime.now(UTC))  # 10 min
     await db_session.commit()
 
     r = await client.get("/api/billing/summary", headers=_h("b_owner"))
     body = r.json()
-    assert body["plan"] == "practice"
-    assert body["included_minutes"] == 1000
+    assert body["plan"] == "full_time"
+    assert body["included_minutes"] == 2500
     assert body["usage"]["minutes_used"] == 10
     assert body["usage"]["calls_count"] == 1
 
 
 async def test_checkout_owner_only_and_503_without_keys(client, db_session):
     await _roles(db_session)
-    payload = {"plan": "starter", "billing_cycle": "monthly"}
+    payload = {"plan": "after_hours", "billing_cycle": "monthly"}
     # manager has VIEW but not MANAGE_BILLING → 403
     assert (await client.post("/api/billing/checkout", headers=_h("b_manager"),
                               json=payload)).status_code == 403

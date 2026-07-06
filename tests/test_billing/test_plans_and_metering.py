@@ -13,24 +13,35 @@ from app.models.usage_record import UsageRecord
 from tests.conftest import seed_practice
 
 
-# ── plan catalog ─────────────────────────────────────────────────────────────
+# ── plan catalog (ADM7 grid) ─────────────────────────────────────────────────
 def test_plan_prices_match_spec():
-    assert PLANS["starter"].monthly_price_cents == 14900
-    assert PLANS["starter"].included_minutes == 500
-    assert PLANS["starter"].overage_cents_per_min == 30
-    assert PLANS["practice"].monthly_price_cents == 34900
-    assert PLANS["practice"].included_minutes == 1000
-    assert PLANS["practice"].overage_cents_per_min == 25
-    assert PLANS["group"].monthly_price_cents == 59900
-    assert PLANS["group"].included_minutes == 2000
-    assert PLANS["group"].overage_cents_per_min == 20
-    assert PLANS["group"].per_location is True
+    assert PLANS["after_hours"].monthly_price_cents == 23900
+    assert PLANS["after_hours"].included_minutes == 1500
+    assert PLANS["after_hours"].overage_cents_per_min == 18
+    assert PLANS["full_time"].monthly_price_cents == 37900
+    assert PLANS["full_time"].included_minutes == 2500
+    assert PLANS["full_time"].overage_cents_per_min == 15
+    assert PLANS["growth"].monthly_price_cents == 57900
+    assert PLANS["growth"].included_minutes == 4000
+    assert PLANS["multi"].monthly_price_cents == 84900
+    assert PLANS["multi"].included_minutes == 3000
+    assert PLANS["multi"].overage_cents_per_min == 11
+    assert PLANS["multi"].per_location is True
+    assert set(PLANS) == {"after_hours", "full_time", "growth", "multi"}
 
 
-def test_annual_discount_17pct():
-    p = PLANS["practice"]
-    # 349*12 = 4188.00 → 17% off = 3476.04 → 347604 cents
-    assert p.annual_total_cents == round(34900 * 12 * 0.83)
+def test_annual_discount_16pct():
+    p = PLANS["full_time"]
+    # 379*12 = 4548.00 → 16% off = 3820.32 → 382032 cents
+    assert p.annual_total_cents == round(37900 * 12 * 0.84)
+
+
+def test_legacy_plan_keys_resolve_to_current_tier():
+    # Old checkout links / existing subscription rows must not crash.
+    assert get_plan("starter").key == "after_hours"
+    assert get_plan("practice").key == "full_time"
+    assert get_plan("group").key == "multi"
+    assert get_plan("nope") is None
 
 
 def test_overage_ceils_partial_minutes():

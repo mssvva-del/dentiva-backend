@@ -127,12 +127,16 @@ class Settings(BaseSettings):
     # Where Stripe Checkout returns the user (success/cancel). The dashboard
     # origin; defaults to local dev. Set to the deployed dashboard URL in prod.
     dashboard_base_url: str = "http://localhost:3000"
-    stripe_price_starter_monthly: str = ""
-    stripe_price_starter_annual: str = ""
-    stripe_price_practice_monthly: str = ""
-    stripe_price_practice_annual: str = ""
-    stripe_price_group_monthly: str = ""
-    stripe_price_group_annual: str = ""
+    # Stripe Price IDs per tier × cycle (ADM7 grid). Created by
+    # scripts/sync_stripe_catalog.py; paste its output into these env vars.
+    stripe_price_after_hours_monthly: str = ""
+    stripe_price_after_hours_annual: str = ""
+    stripe_price_full_time_monthly: str = ""
+    stripe_price_full_time_annual: str = ""
+    stripe_price_growth_monthly: str = ""
+    stripe_price_growth_annual: str = ""
+    stripe_price_multi_monthly: str = ""
+    stripe_price_multi_annual: str = ""
 
     # Background call-sync: periodically pull recent Retell calls into the DB so
     # the dashboard stays current even when web/test calls fire no webhook.
