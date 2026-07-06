@@ -1235,3 +1235,101 @@ async def admin_deactivate_staff(
                      meta={"user_id": str(user_id), "removed_role": removed_role})
         await session.commit()
     return {"ok": True, "removed_role": removed_role}
+
+
+# ===========================================================================
+# 16. Clinic notes (ADM10) — internal CRM commentary on an account.
+# Read = VIEW_CLINIC_DETAIL (anyone who can open the clinic). Write = same (any
+# viewing staffer may leave a note). Delete = the author OR a super_admin.
+# ===========================================================================
+from app.models.clinic_note import ClinicNote  # noqa: E402 — grouped with section
+
+
+class ClinicNoteRow(BaseModel):
+    id: str
+    body: str
+    author_email: str | None
+    created_at: datetime
+
+
+class ClinicNoteCreate(BaseModel):
+    body: str
+
+
+def _note_row(n: ClinicNote) -> ClinicNoteRow:
+    return ClinicNoteRow(id=str(n.id), body=n.body, author_email=n.author_email,
+                         created_at=n.created_at)
+
+
+@router.get("/clinics/{practice_id}/notes", response_model=list[ClinicNoteRow])
+async def list_clinic_notes(
+    practice_id: uuid.UUID,
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_CLINIC_DETAIL)),
+) -> list[ClinicNoteRow]:
+    """Account notes, newest first."""
+    async with _app_db.async_session_factory() as session:
+        rows = (await session.execute(
+            select(ClinicNote).where(ClinicNote.practice_id == practice_id)
+            .order_by(ClinicNote.created_at.desc()).limit(200)
+        )).scalars().all()
+    return [_note_row(n) for n in rows]
+
+
+@router.post("/clinics/{practice_id}/notes", response_model=ClinicNoteRow)
+async def add_clinic_note(
+    practice_id: uuid.UUID,
+    payload: ClinicNoteCreate,
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_CLINIC_DETAIL)),
+) -> ClinicNoteRow:
+    body = payload.body.strip()
+    if not body:
+        raise HTTPException(status_code=422, detail="Note body is empty.")
+    if len(body) > 5000:
+        raise HTTPException(status_code=422, detail="Note too long (max 5000).")
+    async with _app_db.async_session_factory() as session:
+        exists = (await session.execute(
+            select(func.count()).select_from(Practice).where(Practice.id == practice_id)
+        )).scalar_one()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Clinic not found.")
+        note = ClinicNote(
+            id=uuid.uuid4(), practice_id=practice_id,
+            author_user_id=ctx.user.id, author_email=ctx.user.email, body=body,
+        )
+        session.add(note)
+        await _audit(session, ctx, "admin_add_clinic_note", practice_id=practice_id,
+                     meta={"note_id": str(note.id)})
+        await session.commit()
+        await session.refresh(note)
+        row = _note_row(note)
+    return row
+
+
+@router.delete("/clinics/{practice_id}/notes/{note_id}")
+async def delete_clinic_note(
+    practice_id: uuid.UUID,
+    note_id: uuid.UUID,
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_CLINIC_DETAIL)),
+) -> dict:
+    """Delete a note. Allowed for the note's AUTHOR or a super_admin — a viewer
+    can't erase someone else's account history. Scoped under the clinic path
+    (reviewer): the note must belong to {practice_id}, mirroring GET/POST so a
+    note id can't be operated on outside its clinic context."""
+    async with _app_db.async_session_factory() as session:
+        note = (await session.execute(
+            select(ClinicNote).where(
+                ClinicNote.id == note_id, ClinicNote.practice_id == practice_id
+            )
+        )).scalar_one_or_none()
+        if note is None:
+            raise HTTPException(status_code=404, detail="Note not found.")
+        if note.author_user_id != ctx.user.id and ctx.staff_role != "super_admin":
+            raise HTTPException(
+                status_code=403,
+                detail="Only the note's author or a super_admin can delete it.",
+            )
+        await session.delete(note)
+        await _audit(session, ctx, "admin_delete_clinic_note", practice_id=practice_id,
+                     meta={"note_id": str(note_id)})
+        await session.commit()
+    return {"ok": True}
