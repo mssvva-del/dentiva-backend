@@ -56,6 +56,9 @@ def test_retell_signature_valid_hmac(monkeypatch):
         retell, "get_settings", lambda: _FakeSettings("production", secret)
     )
     body = b'{"x":1}'
-    good = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    assert retell._verify_signature(body, good) is True
-    assert retell._verify_signature(body, "bad") is False
+    # Retell scheme: header "v={ms},d={hex}", hex = HMAC(secret, body + str(ms)).
+    ts = 1_800_000_000_000
+    digest = hmac.new(secret.encode(), body + str(ts).encode(), hashlib.sha256).hexdigest()
+    good = f"v={ts},d={digest}"
+    assert retell._verify_signature(body, good, now_ms=ts) is True
+    assert retell._verify_signature(body, "bad", now_ms=ts) is False
