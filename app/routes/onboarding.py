@@ -23,13 +23,16 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.permissions import MANAGE_SETTINGS, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
+from app.models.baa_acceptance import BaaAcceptance
 from app.models.practice import Practice
 from app.models.user import User
 from app.schemas.onboarding import (
@@ -40,6 +43,7 @@ from app.schemas.onboarding import (
     PhoneStep,
     PmsStep,
 )
+from app.services.legal.baa import BAA_VERSION, current_baa
 
 router = APIRouter(prefix="/api/onboarding", tags=["onboarding"])
 
@@ -222,6 +226,97 @@ async def step_agent(
     return _state(p)
 
 
+# ---------------------------------------------------------------------------
+# BAA / Terms acceptance (ONB-BAA) — HIPAA requires a signed BAA before ANY PHI
+# flows. Click-through e-signature; the go-live gate below enforces it.
+# ---------------------------------------------------------------------------
+class BaaDocument(BaseModel):
+    version: str
+    text: str
+    accepted: bool          # has THIS practice accepted the current version?
+
+
+class BaaAccept(BaseModel):
+    signer_name: str = Field(min_length=1, max_length=200)
+    signer_title: str = Field(min_length=1, max_length=200)
+
+
+def _client_ip(request: Request) -> str | None:
+    """Real client IP for the e-signature record. Behind the Railway proxy the
+    direct peer (request.client.host) is the proxy, so prefer the FIRST hop in
+    X-Forwarded-For (the original client) when present."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first[:100]
+    return request.client.host if request.client else None
+
+
+async def _has_current_baa(db: AsyncSession, practice_id: uuid.UUID) -> bool:
+    return (await db.execute(
+        select(func.count()).select_from(BaaAcceptance).where(
+            BaaAcceptance.practice_id == practice_id,
+            BaaAcceptance.document_version == BAA_VERSION,
+        )
+    )).scalar_one() > 0
+
+
+@router.get("/baa", response_model=BaaDocument)
+async def get_baa(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+    user: User = Depends(require_permission(MANAGE_SETTINGS)),
+) -> BaaDocument:
+    """Current Terms + BAA text/version, and whether this practice already signed it."""
+    doc = current_baa()
+    return BaaDocument(
+        version=doc["version"], text=doc["text"],
+        accepted=await _has_current_baa(db, practice.id),
+    )
+
+
+@router.post("/baa/accept", response_model=OnboardingState)
+async def accept_baa(
+    payload: BaaAccept,
+    request: Request,
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+    user: User = Depends(require_permission(MANAGE_SETTINGS)),
+) -> OnboardingState:
+    """Record a click-through acceptance of the CURRENT Terms + BAA version.
+
+    Idempotent per version: re-accepting the same version is a no-op (no duplicate
+    row). Captures IP + user-agent server-side as ESIGN evidence — never trusts a
+    client-supplied value for those."""
+    p = await _load(db, practice.id)
+    if not await _has_current_baa(db, practice.id):
+        # Race-safe: the check above + INSERT aren't atomic, so a double-submit
+        # relies on the (practice_id, document_version) UNIQUE index + ON CONFLICT
+        # DO NOTHING to collapse into exactly one signature row.
+        stmt = (
+            pg_insert(BaaAcceptance)
+            .values(
+                id=uuid.uuid4(), practice_id=p.id, document_version=BAA_VERSION,
+                signer_name=payload.signer_name.strip(),
+                signer_title=payload.signer_title.strip(),
+                signer_ip=_client_ip(request),
+                # Full UA truncated to 500 chars — enough for evidence, bounded.
+                user_agent=(request.headers.get("user-agent") or "")[:500] or None,
+                accepted_by=user.id,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["practice_id", "document_version"]
+            )
+        )
+        await db.execute(stmt)
+        await _audit(db, p, user, "baa_accepted",
+                     {"version": BAA_VERSION, "signer": payload.signer_name.strip()})
+        await db.commit()
+        await db.refresh(p)
+    return _state(p)
+
+
 @router.post("/complete", response_model=OnboardingState)
 async def complete(
     practice: Practice = Depends(get_current_practice),
@@ -237,6 +332,14 @@ async def complete(
     p = await _load(db, practice.id)
     if p.status != "onboarding" and p.onboarding_step == 0:
         return _state(p)  # already live — idempotent
+
+    # HIPAA hard gate: no signed current-version BAA → no go-live. PHI must never
+    # flow before the Business Associate Agreement is accepted.
+    if not await _has_current_baa(db, practice.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Terms & BAA must be accepted before going live.",
+        )
 
     # Required-field gate (billing intentionally excluded — Phase D / pilot).
     problems: list[str] = []
