@@ -38,8 +38,11 @@ _DEFAULT_CADENCE = (
 @dataclass(frozen=True)
 class CampaignConfig:
     cadence: tuple[CadenceStep, ...] = field(default=_DEFAULT_CADENCE)
-    quiet_start_hour: int = 8   # earliest local hour we may contact
-    quiet_end_hour: int = 21    # first local hour we stop (exclusive)
+    # Legal-safe contact window (LEGAL_COMPLIANCE_US.md §2): federal TCPA allows
+    # 8:00–21:00 local, but Florida FTSA stops at 20:00 — 9:00–20:00 clears every
+    # state without per-state logic and is friendlier anyway.
+    quiet_start_hour: int = 9   # earliest local hour we may contact
+    quiet_end_hour: int = 20    # first local hour we stop (exclusive)
 
 
 def _resolve_tz(tz_name: str | None):
