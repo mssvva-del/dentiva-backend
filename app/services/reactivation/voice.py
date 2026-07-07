@@ -102,18 +102,45 @@ async def make_voice_touch(
     target: ReactivationTarget,
     *,
     client: RetellOutboundClient,
+    campaign=None,          # ReactivationCampaign | None — custom-campaign context
+    practice_name: str = "",
 ) -> TouchResult:
     """Place the outbound reactivation call. 'sent' on initiation; outcome stays
     None until the Retell webhook reports the result (apply_voice_outcome)."""
     lang = "es" if (language or "en").lower().startswith("es") else "en"
     reason = _REASON[lang].get(target.segment, _REASON[lang]["default"])
+    # Custom campaigns: the clinic's own direction becomes the call's reason.
+    # TCPA gate (reviewer): the SAME promo rule as SMS applies BEFORE dialing —
+    # the agent is prompted to state the reason, so unattested promo context
+    # reaching the call is a violation exactly like a promo text.
+    campaign_context = ""
+    if campaign is not None and getattr(campaign, "custom_context", None):
+        allow_promo = (
+            getattr(campaign, "category", "treatment") == "marketing"
+            and getattr(campaign, "consent_attested_by", None) is not None
+        )
+        if not allow_promo:
+            from app.services.reactivation.compliance import find_promo_violations
+            violations = find_promo_violations(campaign.custom_context)
+            if violations:
+                logger.error(
+                    "reactivation voice BLOCKED (TCPA promo gate): %s", violations
+                )
+                return TouchResult("skipped", "content_blocked")
+        campaign_context = campaign.custom_context
+        reason = campaign_context or reason
     try:
         res = await client.create_call(
             patient.phone,
             agent_id=_agent_for(lang),
-            # The agent reads these to personalize the call in the right language.
+            # The agent's OUTBOUND prompt section keys off these ({{direction}},
+            # {{patient_first_name}}, {{practice_name}}, {{campaign_context}}).
             dynamic_variables={
+                "direction": "outbound",
                 "first_name": patient.first_name or "",
+                "patient_first_name": patient.first_name or "",
+                "practice_name": practice_name or "our dental office",
+                "campaign_context": campaign_context,
                 "language": lang,
                 "reason": reason,
             },
@@ -134,8 +161,10 @@ def get_voice_sender():  # noqa: ANN201
         return None
     client = RetellOutboundClient()
 
-    async def _sender(patient: Patient, language: str, target: ReactivationTarget) -> TouchResult:
-        return await make_voice_touch(patient, language, target, client=client)
+    async def _sender(patient: Patient, language: str, target: ReactivationTarget,
+                      **context) -> TouchResult:
+        return await make_voice_touch(patient, language, target, client=client,
+                                      **context)
 
     return _sender
 

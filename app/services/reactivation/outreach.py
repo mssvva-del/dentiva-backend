@@ -28,14 +28,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import set_tenant
 from app.models.patient import Patient
 from app.models.practice import Practice
-from app.models.reactivation import ReactivationTarget, ReactivationTouch
+from app.models.reactivation import (
+    ReactivationCampaign,
+    ReactivationTarget,
+    ReactivationTouch,
+)
 from app.services.reactivation.campaign import select_due_targets
 from app.services.reactivation.compliance import (
     PromoContentBlocked,
     assert_treatment_only,
     frequency_block_reason,
 )
-from app.services.reactivation.messages import reactivation_sms_body
+from app.services.reactivation.messages import (
+    custom_sms_body,
+    reactivation_sms_body,
+)
 from app.services.reactivation.scheduling import CampaignConfig, next_allowed_time
 from app.services.sms import send_sms
 
@@ -55,21 +62,38 @@ async def send_reactivation_sms(
     *,
     practice_name: str,
     segment: str,
+    campaign: ReactivationCampaign | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> TouchResult:
     """Send one reactivation SMS; map the fail-safe send_sms result → TouchResult.
-    Respects the patient's opt-out (send_sms short-circuits on opted_out)."""
-    body = reactivation_sms_body(
-        language, first_name=patient.first_name,
-        practice_name=practice_name, segment=segment,
+    Respects the patient's opt-out (send_sms short-circuits on opted_out).
+
+    Custom campaigns (segment='custom') use the clinic's own message. The TCPA
+    promo-gate applies to EVERYTHING except marketing campaigns that carry a
+    written-consent attestation — that's the only sanctioned promo path."""
+    if campaign is not None and campaign.segment == "custom":
+        body = custom_sms_body(
+            language, first_name=patient.first_name,
+            practice_name=practice_name, context=campaign.custom_context,
+        )
+    else:
+        body = reactivation_sms_body(
+            language, first_name=patient.first_name,
+            practice_name=practice_name, segment=segment,
+        )
+    # TCPA content gate: treatment-only copy or nothing — one promo word
+    # reclassifies the text as marketing ($500–1,500/message). Attested
+    # marketing campaigns are the sole exemption (PEWC warranty recorded).
+    allow_promo = (
+        campaign is not None
+        and campaign.category == "marketing"
+        and campaign.consent_attested_by is not None
     )
-    # TCPA content gate: treatment-only copy or nothing. Built-in templates pass;
-    # this hard-stops any future custom/clinic copy carrying promo language
-    # (one promo word reclassifies the text as marketing → $500–1,500/message).
-    try:
-        assert_treatment_only(body)
-    except PromoContentBlocked:
-        return TouchResult("skipped", "content_blocked")
+    if not allow_promo:
+        try:
+            assert_treatment_only(body)
+        except PromoContentBlocked:
+            return TouchResult("skipped", "content_blocked")
     res = await send_sms(patient.phone, body, opted_out=patient.sms_opt_out, client=client)
     if res.get("sent"):
         return TouchResult("sent", "delivered", res.get("sid"))
@@ -98,6 +122,17 @@ async def process_due_targets(
         await session.execute(select(Practice).where(Practice.id == practice_id))
     ).scalar_one()
     due = await select_due_targets(session, practice_id, now=now, limit=limit)
+
+    # Preload the campaigns behind this tick's targets (custom-campaign copy,
+    # category/attestation for the promo-gate, channels).
+    campaign_ids = {t.campaign_id for t in due}
+    campaigns: dict[uuid.UUID, ReactivationCampaign] = {}
+    if campaign_ids:
+        rows = (await session.execute(
+            select(ReactivationCampaign)
+            .where(ReactivationCampaign.id.in_(campaign_ids))
+        )).scalars().all()
+        campaigns = {c.id: c for c in rows}
 
     summary = {"processed": 0, "sent": 0, "failed": 0, "deferred": 0, "opted_out": 0}
     for target in due:
@@ -135,13 +170,17 @@ async def process_due_targets(
             summary["deferred"] += 1
             continue
 
+        campaign = campaigns.get(target.campaign_id)
         if step.channel == "sms":
             result = await send_reactivation_sms(
                 patient, lang, practice_name=practice.name,
-                segment=target.segment, client=sms_client,
+                segment=target.segment, campaign=campaign, client=sms_client,
             )
         else:  # voice (block 7 sender provided)
-            result = await voice_sender(patient, lang, target)
+            result = await voice_sender(
+                patient, lang, target,
+                campaign=campaign, practice_name=practice.name,
+            )
 
         _record_touch(
             session, target, step.channel, result.status, result.outcome,
