@@ -34,7 +34,11 @@ from app.models.booking import Booking
 from app.models.practice import Practice
 from app.models.reactivation import ReactivationCampaign, ReactivationTarget
 from app.services.reactivation.patient_sync import upsert_patients
-from app.services.reactivation.scheduling import CampaignConfig, first_touch_at
+from app.services.reactivation.scheduling import (
+    CampaignConfig,
+    first_touch_at,
+    next_allowed_time,
+)
 from app.services.reactivation.scoring import ScoringConfig, prioritize_for_segment
 from app.services.reactivation.segmentation import SegmentationConfig
 
@@ -182,3 +186,82 @@ async def select_due_targets(
         .limit(limit)
     )
     return list(rows.scalars().all())
+
+
+# ---------------------------------------------------------------------------
+# Custom clinic-authored campaigns (2026-07): the clinic uploads a contact list
+# (or picks all patients) and writes its own message/direction. Unlike the
+# PMS-driven build_campaign above there is no segmentation math — the clinic
+# chose the audience; every enrolled patient just enters the cadence queue.
+# ---------------------------------------------------------------------------
+
+CUSTOM_SEGMENT = "custom"
+CAMPAIGN_CATEGORIES = ("treatment", "marketing")
+CAMPAIGN_CHANNELS = ("sms", "voice", "both")
+
+
+async def build_custom_campaign(
+    session: AsyncSession,
+    practice_id: uuid.UUID,
+    *,
+    name: str,
+    patient_ids: list[uuid.UUID],
+    category: str = "treatment",
+    custom_context: str | None = None,
+    channels: str = "sms",
+    created_by_user_id: uuid.UUID | None = None,
+    consent_attested_by: uuid.UUID | None = None,
+    now: datetime | None = None,
+    campaign_config: CampaignConfig = CampaignConfig(),
+) -> ReactivationCampaign:
+    """Create a DRAFT custom campaign enrolling exactly the given patients.
+
+    Marketing campaigns REQUIRE consent_attested_by (the clinic user affirming
+    written consent) — enforced here so no code path can create an unattested
+    promo campaign. Patients who opted out of SMS are skipped at enroll time
+    (and re-checked at send time by the worker)."""
+    if category not in CAMPAIGN_CATEGORIES:
+        raise ValueError(f"category must be one of {CAMPAIGN_CATEGORIES}")
+    if channels not in CAMPAIGN_CHANNELS:
+        raise ValueError(f"channels must be one of {CAMPAIGN_CHANNELS}")
+    if category == "marketing" and consent_attested_by is None:
+        raise ValueError("marketing campaigns require a written-consent attestation")
+
+    now = now or datetime.now(tz=UTC)
+    await set_tenant(session, practice_id)
+
+    campaign = ReactivationCampaign(
+        id=uuid.uuid4(), practice_id=practice_id, name=name,
+        segment=CUSTOM_SEGMENT, status="draft",
+        created_by_user_id=created_by_user_id,
+        category=category, custom_context=(custom_context or None),
+        channels=channels,
+        consent_attested_by=consent_attested_by,
+        consent_attested_at=now if consent_attested_by else None,
+    )
+    session.add(campaign)
+    await session.flush()
+
+    from app.models.patient import Patient
+    first_touch = next_allowed_time(
+        now, None, campaign_config.quiet_start_hour, campaign_config.quiet_end_hour
+    )
+    enrolled = 0
+    for pid in dict.fromkeys(patient_ids):  # de-dup, keep order
+        patient = (await session.execute(
+            select(Patient).where(Patient.id == pid,
+                                  Patient.practice_id == practice_id)
+        )).scalar_one_or_none()
+        if patient is None or patient.sms_opt_out:
+            continue
+        session.add(ReactivationTarget(
+            id=uuid.uuid4(), practice_id=practice_id, campaign_id=campaign.id,
+            patient_id=patient.id, segment=CUSTOM_SEGMENT,
+            value_score=Decimal("0"), status="pending",
+            next_touch_at=first_touch,
+        ))
+        enrolled += 1
+    await session.commit()
+    logger.info("custom campaign built practice=%s campaign=%s enrolled=%d",
+                practice_id, campaign.id, enrolled)
+    return campaign

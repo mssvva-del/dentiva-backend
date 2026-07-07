@@ -52,6 +52,24 @@ class ReactivationCampaign(UUIDPKMixin, TimestampMixin, Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # --- Custom campaigns (clinic-authored, 2026-07) -----------------------
+    # 'treatment' = healthcare message (TCPA exemption, ordinary consent).
+    # 'marketing' = promo content (anniversary discounts, offers) — REQUIRES the
+    # written-consent attestation below; the promo content-gate is bypassed ONLY
+    # for attested marketing campaigns.
+    category: Mapped[str] = mapped_column(Text, nullable=False,
+                                          server_default="treatment")
+    # The clinic's own message/direction ("annual checkup push", "we moved",
+    # "anniversary offer…"). Flows into the SMS body and the voice agent's
+    # {{campaign_context}} variable.
+    custom_context: Mapped[str | None] = mapped_column(Text)
+    # Channels this campaign may use: sms | voice | both.
+    channels: Mapped[str] = mapped_column(Text, nullable=False, server_default="sms")
+    # Marketing-consent attestation (PEWC warranty): who at the clinic affirmed
+    # "these patients gave prior express WRITTEN consent", and when. Required
+    # for category='marketing'; the legal risk-shift is recorded per campaign.
+    consent_attested_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    consent_attested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ReactivationTarget(UUIDPKMixin, TimestampMixin, Base):

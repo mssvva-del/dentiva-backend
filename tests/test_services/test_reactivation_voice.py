@@ -110,7 +110,7 @@ async def test_worker_places_voice_touch(db_session):
 
     calls = {"n": 0}
 
-    async def fake_voice(patient, language, target):
+    async def fake_voice(patient, language, target, **_ctx):
         calls["n"] += 1
         return TouchResult("sent", None, provider_ref=f"RC{calls['n']}")
 
@@ -133,7 +133,7 @@ async def _seed_voice_touch(db_session, practice, call_id):
     )
     await launch_campaign(db_session, practice.id, camp.id)
 
-    async def fake_voice(patient, language, target):
+    async def fake_voice(patient, language, target, **_ctx):
         return TouchResult("sent", None, provider_ref=call_id)
 
     await process_due_targets(

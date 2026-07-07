@@ -52,3 +52,30 @@ def reactivation_sms_body(
         f"Reply to this text or call us and we'll find a time that works. "
         f"Reply STOP to opt out."
     )
+
+
+def custom_sms_body(
+    language: str, *, first_name: str | None, practice_name: str,
+    context: str | None,
+) -> str:
+    """SMS for a clinic-authored campaign: the clinic's own message wrapped in
+    our compliant frame (identification up front, reply CTA, STOP footer).
+    The TCPA promo-gate decision happens in the caller (treatment campaigns are
+    still gated; attested marketing passes)."""
+    lang = "es" if (language or "en").lower().startswith("es") else "en"
+    name = first_name if first_name and first_name != "Unknown" else None
+    msg = (context or "").strip()
+
+    if lang == "es":
+        greeting = f"Hola {name}, " if name else "Hola, "
+        base = f"{greeting}le escribimos de {practice_name}."
+        if msg:
+            base += f" {msg}"
+        return (f"{base} Responda a este mensaje o llámenos para agendar. "
+                f"Responda STOP para no recibir más mensajes.")
+    greeting = f"Hi {name}, " if name else "Hi, "
+    base = f"{greeting}it's {practice_name}."
+    if msg:
+        base += f" {msg}"
+    return (f"{base} Reply to this text or call us to schedule. "
+            f"Reply STOP to opt out.")
