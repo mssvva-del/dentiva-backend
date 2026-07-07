@@ -63,13 +63,14 @@ async def test_get_voice_model(client, db_session, monkeypatch):
     practice, _ = await seed_practice(db_session, name="VMCo",
                                       clerk_org_id="o_vm1", clerk_user_id="u_vm1")
     await _bind_agent(db_session, practice.id)
-    _fake_retell(monkeypatch, model="claude-5-sonnet")
+    _fake_retell(monkeypatch, model="gpt-5.1")
 
     r = await client.get("/api/admin/voice/model", headers=_h("eng_vm1"))
     assert r.status_code == 200
     body = r.json()
-    assert body["model"] == "claude-5-sonnet"
-    assert "gpt-5.5" in body["allowed"]
+    assert body["model"] == "gpt-5.1"
+    assert "claude-4.5-haiku" in body["allowed"]
+    assert "gpt-5.5" not in body["allowed"]  # premium tier stays out (budget rule)
 
 
 async def test_set_voice_model_switch_and_publish(client, db_session, monkeypatch):
@@ -80,9 +81,9 @@ async def test_set_voice_model_switch_and_publish(client, db_session, monkeypatc
     calls = _fake_retell(monkeypatch)
 
     r = await client.put("/api/admin/voice/model", headers=_h("sa_vm2"),
-                         json={"model": "gpt-5.5"})
-    assert r.status_code == 200 and r.json()["model"] == "gpt-5.5"
-    assert calls["set"] == [("llm_vm", "gpt-5.5")]
+                         json={"model": "claude-4.5-haiku"})
+    assert r.status_code == 200 and r.json()["model"] == "claude-4.5-haiku"
+    assert calls["set"] == [("llm_vm", "claude-4.5-haiku")]
     assert calls["publish"] == ["agent_vm_2"]  # change goes live immediately
 
 
@@ -96,7 +97,15 @@ async def test_set_voice_model_validates_allowlist(client, db_session, monkeypat
     r = await client.put("/api/admin/voice/model", headers=_h("sa_vm3"),
                          json={"model": "skynet-9000"})
     assert r.status_code == 422
-    assert calls["set"] == []  # never reached Retell
+    # premium tiers are valid Retell models but OUT of our budget allowlist —
+    # they must be rejected the same way (budget rule, Sergio 2026-07-07)
+    prem = await client.put("/api/admin/voice/model", headers=_h("sa_vm3"),
+                            json={"model": "gpt-5.5"})
+    assert prem.status_code == 422
+    son = await client.put("/api/admin/voice/model", headers=_h("sa_vm3"),
+                           json={"model": "claude-5-sonnet"})
+    assert son.status_code == 422
+    assert calls["set"] == []  # nothing ever reached Retell
 
 
 async def test_voice_model_rbac(client, db_session, monkeypatch):
@@ -107,7 +116,7 @@ async def test_voice_model_rbac(client, db_session, monkeypatch):
         g = await client.get("/api/admin/voice/model", headers=_h(who))
         assert g.status_code in (401, 403), who
         p = await client.put("/api/admin/voice/model", headers=_h(who),
-                             json={"model": "gpt-5.5"})
+                             json={"model": "gpt-5.1"})
         assert p.status_code in (401, 403), who
 
 

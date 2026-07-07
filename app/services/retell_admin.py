@@ -16,24 +16,17 @@ from app.config import get_settings
 
 _RETELL_API = "https://api.retellai.com"
 
-# Retell-supported models (update-retell-llm enum, 2026-07). Order = display
-# order in the admin UI (strongest first within each family).
+# BUDGET allowlist (Sergio 2026-07-07: model cost must stay ≤ ~$0.05/min).
+# Curated from Retell's supported enum + pricing page; order = admin-UI display,
+# best budget quality first. Deliberately EXCLUDED: sonnet tier / gpt-5.5/5.4/5.2
+# (blow the per-minute budget) and the nano tier (the digit-mangling class we
+# already burned on). Retell $/min for the model component in comments.
 ALLOWED_VOICE_MODELS: tuple[str, ...] = (
-    "claude-5-sonnet",
-    "claude-4.6-sonnet",
-    "claude-4.5-sonnet",
-    "claude-4.5-haiku",
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.2",
-    "gpt-5.1",
-    "gpt-5",
-    "gpt-5-mini",
-    "gpt-4.1",
-    "gpt-4.1-mini",
-    "gemini-3.5-flash",
-    "gemini-3.0-flash",
+    "gpt-5.1",            # $0.040 — flagship-class at half sonnet price (default)
+    "gpt-4.1",            # $0.045 — proven, very instruction-obedient
+    "claude-4.5-haiku",   # $0.025 — fastest latency, solid compliance
+    "gemini-3.0-flash",   # $0.027 — cheap+fast, weaker on long rule sets
+    "gpt-5-mini",         # $0.012 — floor option, a tier above old gpt-4o-mini
 )
 
 
