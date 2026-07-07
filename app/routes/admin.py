@@ -1391,3 +1391,105 @@ async def delete_clinic_note(
                      meta={"note_id": str(note_id)})
         await session.commit()
     return {"ok": True}
+
+
+# ===========================================================================
+# 17. Voice model switch — change the LLM behind the live Retell agent from the
+# panel (Sergio: "самую сильную, но чтобы в админке переключать"). Gated by
+# MANAGE_FEATURE_FLAGS (super_admin + engineer); every switch audited + agent
+# republished so the change is live immediately.
+# ===========================================================================
+from app.services.retell_admin import (  # noqa: E402 — grouped with its section
+    ALLOWED_VOICE_MODELS,
+    RetellError,
+    RetellNotConfigured,
+    get_agent,
+    get_llm,
+    publish_agent,
+    set_llm_model,
+)
+
+
+class VoiceModelState(BaseModel):
+    model: str | None
+    allowed: list[str]
+    agent_id: str
+
+
+class VoiceModelUpdate(BaseModel):
+    model: str
+
+
+async def _live_agent_id() -> str:
+    """The live agent: env pin first, else the practice binding (single source
+    the webhooks already use)."""
+    from app.config import get_settings
+    env_id = get_settings().retell_agent_id
+    if env_id:
+        return env_id
+    async with _app_db.async_session_factory() as session:
+        agent_id = (await session.execute(
+            select(Practice.retell_agent_id)
+            .where(Practice.retell_agent_id.isnot(None)).limit(1)
+        )).scalar_one_or_none()
+    if not agent_id:
+        raise HTTPException(status_code=404,
+                            detail="No live agent configured (retell_agent_id).")
+    return agent_id
+
+
+def _retell_http(exc: Exception) -> HTTPException:
+    if isinstance(exc, RetellNotConfigured):
+        return HTTPException(status_code=503, detail="Retell is not configured.")
+    status_ = getattr(exc, "status_code", None) or 422
+    return HTTPException(status_code=502 if status_ >= 500 else 422, detail=str(exc))
+
+
+@router.get("/voice/model", response_model=VoiceModelState)
+async def get_voice_model(
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_FEATURE_FLAGS)),
+) -> VoiceModelState:
+    agent_id = await _live_agent_id()
+    try:
+        agent = await get_agent(agent_id)
+        llm_id = (agent.get("response_engine") or {}).get("llm_id")
+        model = None
+        if llm_id:
+            model = (await get_llm(llm_id)).get("model")
+    except (RetellNotConfigured, RetellError) as exc:
+        raise _retell_http(exc) from exc
+    return VoiceModelState(model=model, allowed=list(ALLOWED_VOICE_MODELS),
+                           agent_id=agent_id)
+
+
+@router.put("/voice/model", response_model=VoiceModelState)
+async def set_voice_model(
+    payload: VoiceModelUpdate,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_FEATURE_FLAGS)),
+) -> VoiceModelState:
+    """Switch the live agent's LLM model and republish. Allowlist-validated —
+    an unsupported value never reaches Retell."""
+    if payload.model not in ALLOWED_VOICE_MODELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"model must be one of {list(ALLOWED_VOICE_MODELS)}.",
+        )
+    agent_id = await _live_agent_id()
+    try:
+        agent = await get_agent(agent_id)
+        llm_id = (agent.get("response_engine") or {}).get("llm_id")
+        if not llm_id:
+            raise HTTPException(status_code=409,
+                                detail="Agent has no retell-llm engine.")
+        before = (await get_llm(llm_id)).get("model")
+        await set_llm_model(llm_id, payload.model)
+        await publish_agent(agent_id)
+    except (RetellNotConfigured, RetellError) as exc:
+        raise _retell_http(exc) from exc
+    async with _app_db.async_session_factory() as session:
+        await _audit(session, ctx, "admin_set_voice_model",
+                     meta={"before": before, "after": payload.model,
+                           "agent": agent_id[:24]})
+        await session.commit()
+    return VoiceModelState(model=payload.model,
+                           allowed=list(ALLOWED_VOICE_MODELS), agent_id=agent_id)
