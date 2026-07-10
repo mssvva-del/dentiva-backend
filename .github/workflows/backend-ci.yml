@@ -78,10 +78,14 @@ jobs:
           set -euo pipefail
           GATE_DB=dentiva_rlsgate
           psql -h localhost -U postgres -c "CREATE DATABASE ${GATE_DB} OWNER dentiva;"
-          # Run the REAL migrations on a throwaway DB. Alembic derives its sync URL
-          # from DATABASE_URL (see Settings._normalize_db_urls), so we point that at
-          # the superuser role 'dentiva' — migrations need CREATE on schema public.
+          # Run the REAL migrations on a throwaway DB. Alembic uses the SYNC URL,
+          # and the job-level DATABASE_URL_SYNC (pointing at the main 'dentiva' DB)
+          # would otherwise WIN here — migrating the wrong database and leaving the
+          # gate DB empty, so the gate then reports every required table as having
+          # lost its RLS (a false red that masked real regressions). Override BOTH
+          # URLs to the throwaway DB (superuser role — DDL needs CREATE on public).
           DATABASE_URL="postgresql+asyncpg://dentiva:dentiva@localhost:5432/${GATE_DB}" \
+          DATABASE_URL_SYNC="postgresql+psycopg2://dentiva:dentiva@localhost:5432/${GATE_DB}" \
             alembic upgrade head
           # The gate script reads DATABASE_URL_SYNC from the raw env directly.
           DATABASE_URL_SYNC="postgresql+psycopg2://dentiva:dentiva@localhost:5432/${GATE_DB}" \
