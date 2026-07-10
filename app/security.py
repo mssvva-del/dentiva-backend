@@ -11,6 +11,7 @@ Two responsibilities:
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -19,6 +20,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# Loopback hosts that must never appear in a production CORS allow-list.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _is_local_origin(origin: str) -> bool:
+    """True if the origin's HOST is a loopback address. Parses the host rather
+    than substring-matching 'localhost' so a legit domain like
+    'https://localhost.example.com' isn't wrongly rejected."""
+    host = (urlparse(origin).hostname or "").lower()
+    return host in _LOCAL_HOSTS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -39,10 +51,18 @@ def verify_security_config(settings: Settings) -> None:
     - RETELL_WEBHOOK_SECRET missing in production  → forgeable webhooks
     - CLERK_SECRET_KEY missing in production       → broken auth
     - ENCRYPTION_KEY missing in production         → PHI stored in plaintext
+    - TWILIO_VALIDATE_SIGNATURE False / no token   → forgeable inbound SMS
+    - RATE_LIMIT_ENABLED False in production        → no abuse backstop
+    - CORS_ALLOWED_ORIGINS empty/localhost in prod  → browser origin not locked
+    - STRIPE_SECRET_KEY set but no webhook secret   → forgeable billing events
 
     Soft warnings (logged, startup continues):
     - REMINDERS_ENABLED not set
     - TWILIO_VALIDATE_SIGNATURE not set or False
+
+    NOTE: the DB-role check (app role must not be SUPERUSER/BYPASSRLS, or RLS FORCE
+    is silently defeated) needs a live connection and lives in the async
+    :func:`verify_db_security` below, called right after this from the lifespan.
     """
     # Use direct attribute access (lowercase) — Settings uses pydantic_settings
     # which normalises all field names to lowercase. getattr(settings, "UPPER")
@@ -100,6 +120,41 @@ def verify_security_config(settings: Settings) -> None:
                 "inbound SMS (CONFIRM/CANCEL/STOP silently dropped). Set TWILIO_AUTH_TOKEN."
             )
 
+        # Rate limiting is the abuse backstop for the OUTBOUND-money endpoints
+        # (campaign launch fans out into TCPA-metered calls/SMS). It must not be an
+        # "oops we forgot the env var" — make it a deploy gate, not a soft default.
+        if not settings.rate_limit_enabled:
+            raise RuntimeError(
+                "SECURITY VIOLATION: RATE_LIMIT_ENABLED is False in production. "
+                "Rate limiting is a required prod gate (a bug or stolen token could "
+                "otherwise fan out into thousands of billable/TCPA calls). Set "
+                "RATE_LIMIT_ENABLED=true in Railway."
+            )
+
+        # CORS with credentials must be pinned to the real dashboard origin(s). An
+        # empty list or a leftover localhost origin in prod means the browser origin
+        # allow-list isn't actually locked to our app.
+        origins = settings.cors_origins_list
+        bad_origins = [o for o in origins if _is_local_origin(o)]
+        if not origins or bad_origins:
+            raise RuntimeError(
+                "SECURITY VIOLATION: CORS_ALLOWED_ORIGINS is empty or contains a "
+                f"localhost origin in production ({bad_origins or 'empty'}). Set it to "
+                "the exact dashboard domain(s), e.g. https://app.dentovox.com."
+            )
+
+        # If Stripe is live (secret key present), the webhook signature secret must
+        # be set — otherwise a forged webhook could flip subscription state / grant
+        # access. The /webhooks/stripe route already rejects when unset, but fail at
+        # boot so a live-billing deploy can't go out half-configured.
+        if settings.stripe_secret_key and not settings.stripe_webhook_secret:
+            raise RuntimeError(
+                "SECURITY VIOLATION: STRIPE_SECRET_KEY is set (live billing) but "
+                "STRIPE_WEBHOOK_SECRET is empty in production — billing webhooks would "
+                "be unauthenticated (forgeable subscription changes). Set "
+                "STRIPE_WEBHOOK_SECRET in Railway."
+            )
+
     # ── Soft warnings ────────────────────────────────────────────────────────
 
     if not settings.reminders_enabled:
@@ -120,6 +175,50 @@ def verify_security_config(settings: Settings) -> None:
         settings.auth_dev_bypass,
         settings.demo_open_access,
     )
+
+
+async def verify_db_security(session: AsyncSession, settings: Settings) -> None:
+    """Verify the app's DB role can't bypass Row-Level Security in production.
+
+    RLS FORCE is our DB-level tenant-isolation backstop. But a SUPERUSER or a role
+    with BYPASSRLS is EXEMPT from every policy — if the app connects as such, one
+    clinic's PHI can leak to another and the whole RLS layer is silently a no-op.
+    The app is supposed to connect as ``dentiva_app`` (NOSUPERUSER NOBYPASSRLS);
+    this asserts that at boot so a misconfigured DATABASE_URL (e.g. pointing at the
+    superuser role) fails the deploy instead of running unprotected.
+
+    No-ops outside production (tests/dev connect as the owner for convenience).
+    """
+    if settings.environment != "production":
+        return
+    # current_user = the effective role executing queries (the app never SET ROLEs,
+    # so it's the login role, dentiva_app). Checking THIS role's rolsuper/rolbypassrls
+    # is exactly right: in Postgres, SUPERUSER and BYPASSRLS are role ATTRIBUTES that
+    # are NOT inherited through role membership (only GRANTed privileges inherit), and
+    # RLS bypass is decided by the current role's own attributes. So a NOSUPERUSER
+    # NOBYPASSRLS role that merely belongs to a privileged group does NOT bypass RLS —
+    # no membership cascade to chase here.
+    row = (
+        await session.execute(
+            text(
+                "SELECT rolsuper, rolbypassrls FROM pg_roles "
+                "WHERE rolname = current_user"
+            )
+        )
+    ).first()
+    if row is None:
+        logger.warning("verify_db_security: current_user not found in pg_roles — skipping")
+        return
+    is_super, bypass_rls = bool(row[0]), bool(row[1])
+    if is_super or bypass_rls:
+        raise RuntimeError(
+            "SECURITY VIOLATION: the app's DB role is "
+            f"{'SUPERUSER' if is_super else 'BYPASSRLS'} in production — it is EXEMPT "
+            "from Row-Level Security, so tenant isolation (one clinic's PHI vs "
+            "another's) is NOT enforced. Point DATABASE_URL at the unprivileged "
+            "'dentiva_app' role (NOSUPERUSER NOBYPASSRLS), not the owner/superuser."
+        )
+    logger.info("DB security check passed (app role is non-superuser, non-bypassrls).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

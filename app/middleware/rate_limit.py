@@ -198,14 +198,19 @@ def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> Res
 
     headers = {"Retry-After": retry_after} if retry_after else {}
 
+    # Match the app-wide error envelope (app.main._error_payload): the client only
+    # knows how to read error.message, so a bespoke {"error": "<string>"} shape here
+    # would surface as a blank/garbled message to the operator. Keep it identical.
     return JSONResponse(
         status_code=429,
         content={
-            "error": "rate_limit_exceeded",
-            "message": (
-                "Too many requests. Please slow down and try again later."
-            ),
-            "detail": str(exc.detail) if hasattr(exc, "detail") else str(exc),
+            "error": {
+                "code": "RATE_LIMITED",
+                "message": "Too many requests. Please slow down and try again later.",
+                # str() — exc.limit is a slowapi Limit object, NOT JSON-serializable;
+                # embedding it raw would make json.dumps raise and 500 the handler.
+                "details": {"limit": str(limit_str)} if limit_str else {},
+            }
         },
         headers=headers,
     )
