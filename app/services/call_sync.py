@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 from datetime import UTC, datetime
 
 import httpx
@@ -27,6 +28,7 @@ from app.config import get_settings
 from app.db import set_tenant
 from app.models.call import Call
 from app.models.practice import Practice
+from app.services.worker_lock import advisory_tick_lock
 
 logger = logging.getLogger(__name__)
 
@@ -175,40 +177,70 @@ async def sync_recent_calls(
         return {"skipped": "no_api_key"}
 
     limit = limit or settings.call_sync_limit
+
+    # Resolve the practice roster up front so each call attaches to the RIGHT
+    # clinic (by its Retell agent id), never blanket-attach to the first practice
+    # — that would leak one clinic's calls (PHI) into another's dashboard.
+    async with app_db.async_session_factory() as session:
+        practices = (
+            await session.execute(select(Practice.id, Practice.retell_agent_id))
+        ).all()
+    if not practices:
+        logger.warning("call-sync: no practice in DB — nothing to attach calls to")
+        return {"error": "no_practice"}
+
+    agent_to_practice = {agent_id: pid for pid, agent_id in practices if agent_id}
+    # Single-clinic fallback: with exactly one practice, a call whose agent id we
+    # can't match still belongs to it (demo/web calls fire no agent binding). With
+    # 2+ clinics there is NO safe fallback — an unmatched call is skipped.
+    single_practice_id = practices[0][0] if len(practices) == 1 else None
+    # With 2+ clinics, filtering the fetch by one global agent id would starve the
+    # others — pull every agent's calls and route each by its agent id.
+    fetch_all = all_agents or len(practices) > 1
+
     calls = await fetch_recent_calls(
         api_key,
         settings.retell_agent_id or None,
         limit,
-        all_agents=all_agents,
+        all_agents=fetch_all,
         client=client,
     )
 
-    inserted = updated = skipped = 0
-    async with app_db.async_session_factory() as session:
-        practice = (
-            await session.execute(select(Practice).order_by(Practice.created_at).limit(1))
-        ).scalar_one_or_none()
-        if practice is None:
-            logger.warning("call-sync: no practice in DB — nothing to attach calls to")
-            return {"error": "no_practice"}
+    # Bucket each call under its resolved practice; skip anything unplaceable.
+    buckets: dict = defaultdict(list)
+    unresolved = 0
+    for call in calls:
+        agent_id = call.get("agent_id")
+        pid = agent_to_practice.get(agent_id) if agent_id else None
+        if pid is None:
+            pid = single_practice_id
+        if pid is None:
+            unresolved += 1
+            continue
+        buckets[pid].append(call)
 
-        # calls is RLS-protected — bind the tenant before upserting.
-        await set_tenant(session, practice.id)
-        for call in calls:
-            result = await _upsert_call(session, practice.id, call)
-            if result == "inserted":
-                inserted += 1
-            elif result == "updated":
-                updated += 1
-            else:
-                skipped += 1
-        await session.commit()
+    inserted = updated = skipped = 0
+    # One session per practice bucket: set_tenant is connection-scoped and RLS is
+    # FORCE'd, so mixing tenants in a single session risks a cross-tenant flush.
+    for pid, pcalls in buckets.items():
+        async with app_db.async_session_factory() as session:
+            await set_tenant(session, pid)
+            for call in pcalls:
+                result = await _upsert_call(session, pid, call)
+                if result == "inserted":
+                    inserted += 1
+                elif result == "updated":
+                    updated += 1
+                else:
+                    skipped += 1
+            await session.commit()
 
     summary = {
         "fetched": len(calls),
         "inserted": inserted,
         "updated": updated,
         "skipped": skipped,
+        "unresolved": unresolved,
     }
     return summary
 
@@ -222,8 +254,12 @@ async def call_sync_loop() -> None:
     logger.info("call-sync loop started (every %ss)", interval)
     while True:
         try:
-            result = await sync_recent_calls()
-            logger.info("call-sync: %s", result)
+            # Only the instance that wins the advisory lock runs this tick — on
+            # 2+ instances the others skip, so calls aren't fetched/upserted twice.
+            async with advisory_tick_lock("call_sync") as leader:
+                if leader:
+                    result = await sync_recent_calls()
+                    logger.info("call-sync: %s", result)
         except asyncio.CancelledError:
             logger.info("call-sync loop cancelled — stopping")
             raise

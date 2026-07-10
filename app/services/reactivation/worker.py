@@ -27,6 +27,7 @@ from app.config import get_settings
 from app.models.practice import Practice
 from app.services.reactivation.outreach import process_due_targets
 from app.services.reactivation.voice import get_voice_sender
+from app.services.worker_lock import advisory_tick_lock
 
 logger = logging.getLogger("dentiva.reactivation.worker")
 
@@ -62,9 +63,13 @@ async def reactivation_worker_loop() -> None:
     logger.info("reactivation worker loop started (every %ss)", interval)
     while True:
         try:
-            result = await run_reactivation_tick()
-            if result["processed"] or result["deferred"]:
-                logger.info("reactivation worker: %s", result)
+            # Leader-only tick: with the advisory lock plus SKIP LOCKED on the
+            # target select, no patient is touched twice across instances.
+            async with advisory_tick_lock("reactivation") as leader:
+                if leader:
+                    result = await run_reactivation_tick()
+                    if result["processed"] or result["deferred"]:
+                        logger.info("reactivation worker: %s", result)
         except asyncio.CancelledError:
             logger.info("reactivation worker loop cancelled — stopping")
             raise

@@ -28,6 +28,7 @@ from app.db import set_tenant
 from app.models.call import Call
 from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
+from app.services.worker_lock import advisory_tick_lock
 
 logger = logging.getLogger(__name__)
 
@@ -98,12 +99,15 @@ async def maintenance_loop() -> None:
     logger.info("maintenance loop started (every %ss)", interval)
     while True:
         try:
-            removed = await prune_processed_events()
-            if removed:
-                logger.info("maintenance: pruned %s processed_webhook_events", removed)
-            scrubbed = await scrub_expired_transcripts()
-            if scrubbed:
-                logger.info("maintenance: scrubbed PHI on %s expired calls", scrubbed)
+            # Idempotent deletes, but run once per tick across instances anyway.
+            async with advisory_tick_lock("maintenance") as leader:
+                if leader:
+                    removed = await prune_processed_events()
+                    if removed:
+                        logger.info("maintenance: pruned %s processed_webhook_events", removed)
+                    scrubbed = await scrub_expired_transcripts()
+                    if scrubbed:
+                        logger.info("maintenance: scrubbed PHI on %s expired calls", scrubbed)
         except asyncio.CancelledError:
             logger.info("maintenance loop cancelled — stopping")
             raise

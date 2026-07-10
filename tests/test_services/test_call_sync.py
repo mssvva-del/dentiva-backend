@@ -96,7 +96,8 @@ async def test_sync_inserts_new_calls(db_session, monkeypatch):
     _patch_fetch(monkeypatch, [_good_call("call_sync_a")])
 
     result = await call_sync.sync_recent_calls()
-    assert result == {"fetched": 1, "inserted": 1, "updated": 0, "skipped": 0}
+    assert result == {"fetched": 1, "inserted": 1, "updated": 0, "skipped": 0,
+                      "unresolved": 0}
 
     row = (
         await db_session.execute(
@@ -157,6 +158,57 @@ async def test_sync_is_idempotent(db_session, monkeypatch):
         )
     ).scalars().all()
     assert len(count) == 1  # no duplicate row
+
+
+async def test_sync_routes_calls_to_correct_practice(db_session, monkeypatch):
+    """Two clinics, each with its own Retell agent id. Every call must attach to
+    the clinic that OWNS its agent — never blanket-attach to the first practice
+    (that would leak one clinic's calls into another's dashboard = PHI leak)."""
+    a, _ = await seed_practice(db_session, name="Clinic A", clerk_org_id="org_ra",
+                               clerk_user_id="user_ra")
+    b, _ = await seed_practice(db_session, name="Clinic B", clerk_org_id="org_rb",
+                               clerk_user_id="user_rb")
+    a.retell_agent_id = "agent_A"
+    b.retell_agent_id = "agent_B"
+    await db_session.commit()
+
+    _patch_settings(monkeypatch)
+    call_a = {**_good_call("call_for_A"), "agent_id": "agent_A"}
+    call_b = {**_good_call("call_for_B"), "agent_id": "agent_B"}
+    _patch_fetch(monkeypatch, [call_a, call_b])
+
+    result = await call_sync.sync_recent_calls()
+    assert result["inserted"] == 2 and result["unresolved"] == 0
+
+    row_a = (await db_session.execute(
+        select(Call).where(Call.retell_call_id == "call_for_A")
+    )).scalar_one()
+    row_b = (await db_session.execute(
+        select(Call).where(Call.retell_call_id == "call_for_B")
+    )).scalar_one()
+    assert row_a.practice_id == a.id
+    assert row_b.practice_id == b.id
+
+
+async def test_sync_skips_unresolvable_call_when_multi_practice(db_session, monkeypatch):
+    """2+ clinics and a call whose agent id matches none → there is NO safe
+    home for it, so it is skipped (counted 'unresolved'), never misattributed."""
+    a, _ = await seed_practice(db_session, name="Clinic C", clerk_org_id="org_rc",
+                               clerk_user_id="user_rc")
+    b, _ = await seed_practice(db_session, name="Clinic D", clerk_org_id="org_rd",
+                               clerk_user_id="user_rd")
+    a.retell_agent_id = "agent_C"
+    b.retell_agent_id = "agent_D"
+    await db_session.commit()
+
+    _patch_settings(monkeypatch)
+    orphan = {**_good_call("call_orphan"), "agent_id": "agent_UNKNOWN"}
+    _patch_fetch(monkeypatch, [orphan])
+
+    result = await call_sync.sync_recent_calls()
+    assert result["unresolved"] == 1 and result["inserted"] == 0
+    rows = (await db_session.execute(select(Call.retell_call_id))).scalars().all()
+    assert "call_orphan" not in rows
 
 
 async def test_sync_skips_without_api_key(db_session, monkeypatch):
