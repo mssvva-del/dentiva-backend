@@ -160,6 +160,79 @@ async def test_reminders_quiet_hours_skip(client, db_session):
     assert summary == {"sent_24h": 0, "sent_2h": 0}
 
 
+async def test_reminders_multi_practice_each_tenant_stamped(client, db_session):
+    """Two practices with due bookings in ONE tick — each must get stamped. This
+    exercises the session-per-practice path: reusing one session across tenants
+    under RLS FORCE would flush one clinic's stamp under the other's tenant and
+    silently drop it. Both bookings stamped + counted proves the isolation."""
+    now = datetime(2099, 1, 15, 12, 0, tzinfo=UTC)
+    p1, _ = await seed_practice(
+        db_session, name="Multi A", clerk_org_id="org_ma", clerk_user_id="user_ma"
+    )
+    p2, _ = await seed_practice(
+        db_session, name="Multi B", clerk_org_id="org_mb", clerk_user_id="user_mb"
+    )
+    p1.timezone = "UTC"
+    p2.timezone = "UTC"
+    b1 = await _add_booking(db_session, p1.id, when=now + timedelta(hours=23),
+                            ext="ma-24h", phone="+15550000001")
+    b2 = await _add_booking(db_session, p2.id, when=now + timedelta(hours=23),
+                            ext="mb-24h", phone="+15550000002")
+    await db_session.commit()
+
+    summary = await reminders.send_due_reminders(now=now)
+    assert summary == {"sent_24h": 2, "sent_2h": 0}  # BOTH clinics stamped
+
+    for pid, bid in ((p1.id, b1.id), (p2.id, b2.id)):
+        await set_tenant(db_session, pid)
+        row = (
+            await db_session.execute(
+                select(Booking).where(Booking.id == bid)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        assert row.reminder_24h_sent_at is not None
+
+
+async def test_reminders_claim_first_survives_send_failure(client, db_session, monkeypatch):
+    """Claim-first invariant: the reminder is STAMPED and committed BEFORE the SMS
+    goes out. So even if every send crashes, (a) the reminder is marked done — no
+    infinite retry — and (b) a second pass sends nothing (no duplicate). This is
+    the at-most-once guarantee that replaces the old send-then-commit dup window."""
+    practice, _ = await seed_practice(
+        db_session, name="ClaimFirst Dental", clerk_org_id="org_cf",
+        clerk_user_id="user_cf",
+    )
+    practice.timezone = "UTC"
+    now = datetime(2099, 1, 15, 12, 0, tzinfo=UTC)
+    b = await _add_booking(
+        db_session, practice.id, when=now + timedelta(hours=23), ext="cf-24h"
+    )
+    await db_session.commit()
+
+    async def _boom(**_kw):
+        raise RuntimeError("sms provider down")
+
+    # send raises for every call — the batch must still complete and stay claimed.
+    monkeypatch.setattr(reminders, "send_appointment_reminder", _boom)
+
+    summary = await reminders.send_due_reminders(now=now)
+    assert summary == {"sent_24h": 1, "sent_2h": 0}  # claimed despite the crash
+
+    await set_tenant(db_session, practice.id)
+    refreshed = (
+        await db_session.execute(
+            select(Booking).where(Booking.id == b.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert refreshed.reminder_24h_sent_at is not None  # stamp is durable
+
+    # Second pass: nothing re-sent — no retry storm, no duplicate.
+    summary2 = await reminders.send_due_reminders(now=now)
+    assert summary2 == {"sent_24h": 0, "sent_2h": 0}
+
+
 async def test_reminders_send_during_open_hours(client, db_session):
     practice, _ = await seed_practice(
         db_session, name="Open Hours Dental", clerk_org_id="org_open",

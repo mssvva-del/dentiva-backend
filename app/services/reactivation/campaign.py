@@ -184,6 +184,12 @@ async def select_due_targets(
         )
         .order_by(ReactivationTarget.value_score.desc())
         .limit(limit)
+        # Atomic claim: lock ONLY the target rows (of=…) and SKIP_LOCKED so a
+        # second worker draining the same practice picks a disjoint set instead
+        # of blocking on / re-sending to the same patients. Locking the joined
+        # campaign row too would needlessly serialize whole campaigns, so it is
+        # excluded. The lock is held until the caller's tick commits.
+        .with_for_update(skip_locked=True, of=ReactivationTarget)
     )
     return list(rows.scalars().all())
 
