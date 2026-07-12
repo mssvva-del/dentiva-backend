@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.permissions import MANAGE_SETTINGS, require_permission
+from app.auth.permissions import MANAGE_SETTINGS, VIEW_DASHBOARD, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.practice import Practice
@@ -46,6 +46,7 @@ async def _load(db: AsyncSession, practice_id: uuid.UUID) -> Practice:
 @router.get("", response_model=KnowledgeBaseResponse)
 async def get_knowledge_base(
     practice: Practice = Depends(get_current_practice),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> KnowledgeBaseResponse:
     """Return the current knowledge base for this practice.
 

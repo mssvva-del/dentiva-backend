@@ -94,3 +94,38 @@ async def test_practice_update_requires_manage_settings(client, db_session):
                             json={"name": "Renamed Co"})
     assert ok.status_code == 200
     assert ok.json()["name"] == "Renamed Co"
+
+
+# ── S1 (2026-07-12): read endpoints now REQUIRE their VIEW_* permission ──────
+# Before: auth-only (any clinic user incl. future restricted roles saw all
+# patients/bookings/analytics). Now: viewer+ (has all VIEW_*) passes; a role
+# with NO permissions is blocked at the gate.
+async def _seed_restricted(db_session, practice):
+    """A user whose role grants NOTHING (models a future restricted role —
+    e.g. billing-only контрактор). Role is free-text by design."""
+    db_session.add(User(
+        id=uuid.uuid4(), clerk_user_id="u_restricted", practice_id=practice.id,
+        email="restricted@rbac.com", role="restricted",
+    ))
+    await db_session.commit()
+
+
+async def test_read_endpoints_gated_by_view_permissions(client, db_session):
+    practice = await _seed_roles(db_session)
+    await _seed_restricted(db_session, practice)
+
+    reads = [
+        "/api/patients",              # VIEW_PATIENTS
+        "/api/patients/recall",       # VIEW_PATIENTS
+        "/api/bookings",              # VIEW_APPOINTMENTS
+        "/api/bookings/export",       # VIEW_APPOINTMENTS
+        "/api/dashboard/today",       # VIEW_DASHBOARD
+        "/api/dashboard/weekly",      # VIEW_DASHBOARD
+        "/api/reactivation/roi",      # VIEW_ANALYTICS
+        "/api/knowledge-base",        # VIEW_DASHBOARD
+    ]
+    for path in reads:
+        deny = await client.get(path, headers=_h("u_restricted"))
+        assert deny.status_code == 403, f"{path} not gated"
+        ok = await client.get(path, headers=_h("u_viewer"))
+        assert ok.status_code == 200, f"{path} viewer blocked: {ok.status_code}"

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.permissions import SEND_SMS, require_permission
+from app.auth.permissions import SEND_SMS, VIEW_PATIENTS, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
@@ -66,6 +66,7 @@ async def list_patients(
     offset: int = Query(default=0, ge=0),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_PATIENTS)),
 ) -> PatientsListResponse:
     """Patient roster with per-patient visit aggregates.
 
@@ -163,6 +164,7 @@ async def get_recall_patients(
     limit: int = Query(default=20, ge=1, le=100),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_PATIENTS)),
 ) -> RecallResponse:
     """Return patients who haven't had an appointment in threshold_months months
     and have no upcoming appointment in the next 30 days."""
@@ -354,6 +356,7 @@ async def get_patient_detail(
     patient_id: str,
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_PATIENTS)),
 ) -> PatientDetailResponse:
     """Full patient card: profile + aggregates + bookings timeline + waitlist.
 

@@ -11,7 +11,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.permissions import MANAGE_APPOINTMENTS, require_permission
+from app.auth.permissions import (
+    MANAGE_APPOINTMENTS,
+    VIEW_APPOINTMENTS,
+    require_permission,
+)
 from app.db import set_tenant
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
@@ -49,6 +53,7 @@ async def list_bookings(
     offset: int = Query(default=0, ge=0),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_APPOINTMENTS)),
 ) -> BookingListResponse:
     today = datetime.now(UTC).date()
     start = from_date or today
@@ -111,6 +116,7 @@ async def export_bookings(
     status: str | None = Query(default=None),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_APPOINTMENTS)),
 ) -> StreamingResponse:
     """Export bookings as CSV. Returns all matching bookings (no pagination)."""
     today = datetime.now(UTC).date()
@@ -170,6 +176,7 @@ async def get_booking(
     booking_id: str,
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_APPOINTMENTS)),
 ) -> BookingSummary:
     """Return full booking details. 404 if not found or wrong tenant."""
     result = await db.execute(

@@ -13,8 +13,10 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import VIEW_ANALYTICS, require_permission
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.practice import Practice
+from app.models.user import User
 from app.services.reactivation.roi import campaign_roi
 
 router = APIRouter(prefix="/api/reactivation", tags=["reactivation"])
@@ -39,6 +41,7 @@ async def reactivation_roi(
     ),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_ANALYTICS)),
 ) -> ReactivationRoiResponse:
     """Reactivation ROI for the current practice (the demo/sales headline)."""
     roi = await campaign_roi(db, practice.id, campaign_id=campaign_id)
@@ -64,7 +67,6 @@ from app.models.reactivation import (  # noqa: E402
     ReactivationCampaign,
     ReactivationTarget,
 )
-from app.models.user import User  # noqa: E402
 from app.services.reactivation.campaign import (  # noqa: E402
     CAMPAIGN_CATEGORIES,
     CAMPAIGN_CHANNELS,

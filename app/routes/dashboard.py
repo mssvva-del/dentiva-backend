@@ -7,12 +7,14 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.permissions import VIEW_DASHBOARD, require_permission
 from app.config import get_settings
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.call import Call
 from app.models.practice import Practice
+from app.models.user import User
 from app.schemas.booking import (
     ActivityDay,
     ActivityResponse,
@@ -90,6 +92,7 @@ async def _generate_briefing(stats: dict, peak_hours: list[dict]) -> tuple[str, 
 async def dashboard_today(
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> DashboardToday:
     # NOTE: "today" is computed in UTC for Iter 1. Timezone-aware day boundaries
     # (using practice.timezone) are a Phase 2 refinement.
@@ -152,6 +155,7 @@ async def dashboard_today(
 async def get_dashboard_briefing(
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> BriefingResponse:
     today = datetime.now(UTC).date()
     day_start = datetime.combine(today, time.min, tzinfo=UTC)
@@ -248,6 +252,7 @@ async def get_dashboard_briefing(
 async def get_weekly_stats(
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> WeeklyStatsResponse:
     """Return per-day call and booking stats for the last 7 calendar days (today inclusive).
 
@@ -359,6 +364,7 @@ async def get_weekly_stats(
 async def get_calls_by_hour(
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> CallsByHourResponse:
     """Return call volume by hour-of-day (0–23) aggregated over the last 30 days.
 
@@ -405,6 +411,7 @@ async def get_calls_by_hour(
 async def get_conversion(
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> ConversionResponse:
     """Return booking conversion funnel stats for the last 30 days."""
     period_days = 30
@@ -497,6 +504,7 @@ async def get_conversion(
 async def dashboard_roi(
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> ROIResponse:
     """Return ROI metrics for the last 30 days."""
     period_days = 30
@@ -603,6 +611,7 @@ async def get_appointment_activity(
     days: int = Query(default=30),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> ActivityResponse:
     """Return appointment lifecycle activity for the selected window (7/30/90 days).
 
@@ -679,6 +688,7 @@ async def get_engagement(
     days: int = Query(default=30),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
 ) -> EngagementResponse:
     """SMS-engagement + waitlist funnel over the selected window (7/30/90 days).
 
