@@ -33,7 +33,20 @@ def build_dynamic_variables(practice: Practice) -> dict[str, str]:
     hours = _render_hours(practice.business_hours or {}) if practice.business_hours else ""
     langs = ", ".join(practice.languages_enabled or []) or "en"
 
+    # Per-practice agent persona (onboarding step 5 / doctor panel). The prompt's
+    # canonical opening (incl. the MANDATORY AI-disclosure + recording line) stays
+    # hard-coded in the prompt — the clinic only customizes the assistant's NAME
+    # and an OPTIONAL extra welcome line, so no custom text can strip the legal
+    # disclosure. Keys must always be present (Retell substitutes only provided
+    # vars — a missing key would leave a literal "{{agent_name}}" spoken aloud).
+    agent = practice.agent_settings or {}
+    agent_name = (str(agent.get("agent_name") or "").strip() or "Alex")[:60]
+    custom_greeting = str(agent.get("greeting") or "").strip()[:300]
+
     return {
+        "agent_name": agent_name,
+        # Empty string when unset — the prompt treats it as "skip the extra line".
+        "custom_greeting": custom_greeting,
         "practice_name": (practice.name or "our office")[:120],
         "practice_address": (practice.address or "")[:200],
         "practice_hours": hours[:300],

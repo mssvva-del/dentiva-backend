@@ -46,6 +46,34 @@ async def test_build_dynamic_variables_shape(db_session):
     assert ("AM" in v["current_time"]) or ("PM" in v["current_time"])
 
 
+async def test_build_dynamic_variables_agent_persona(db_session):
+    """D1: onboarding step-5 persona reaches the live call. Custom name/greeting
+    flow through; unset falls back to 'Alex' + EMPTY greeting (keys must always
+    exist — a missing key would leave literal '{{agent_name}}' spoken aloud)."""
+    practice, _ = await seed_practice(db_session, name="Persona Co",
+                                      clerk_org_id="o_dv6", clerk_user_id="u_dv6")
+    p = (await db_session.execute(
+        select(Practice).where(Practice.id == practice.id)
+    )).scalar_one()
+
+    # Unset agent_settings → defaults.
+    v = build_dynamic_variables(p)
+    assert v["agent_name"] == "Alex"
+    assert v["custom_greeting"] == ""
+
+    # Clinic customized name + greeting (step 5 shape).
+    p.agent_settings = {"agent_name": "Sofia", "voice": "cartesia-Hailey",
+                        "greeting": "We're excited to see your smile!"}
+    await db_session.commit()
+    v2 = build_dynamic_variables(p)
+    assert v2["agent_name"] == "Sofia"
+    assert v2["custom_greeting"] == "We're excited to see your smile!"
+    # Bounded (Retell prompt hygiene).
+    p.agent_settings = {"agent_name": "X" * 200, "greeting": "Y" * 900}
+    v3 = build_dynamic_variables(p)
+    assert len(v3["agent_name"]) <= 60 and len(v3["custom_greeting"]) <= 300
+
+
 async def test_build_dynamic_variables_empty_kb(db_session):
     practice, _ = await seed_practice(db_session, name="Empty KB Co",
                                       clerk_org_id="o_dv2", clerk_user_id="u_dv2")
