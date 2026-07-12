@@ -40,7 +40,7 @@ from app.routes import (
     voice,
     waitlist,
 )
-from app.security import verify_security_config
+from app.security import verify_db_security, verify_security_config
 from app.services.call_sync import call_sync_loop
 from app.services.maintenance import maintenance_loop
 from app.services.reactivation.worker import reactivation_worker_loop
@@ -59,6 +59,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Start/stop background workers alongside the app."""
     settings = get_settings()
     verify_security_config(settings)
+    # DB-role check needs a live connection (verify the app role can't bypass RLS).
+    # No-ops outside production; hard-fails the deploy if the app connects as a
+    # superuser/BYPASSRLS role (which would defeat tenant isolation).
+    import app.db as _app_db
+
+    async with _app_db.async_session_factory() as _sec_session:
+        # Bound the check so a hung/unreachable DB fails the deploy fast (fail-closed
+        # in prod) instead of blocking startup forever. async-with still closes the
+        # connection on timeout/error.
+        await asyncio.wait_for(verify_db_security(_sec_session, settings), timeout=15)
     tasks: list[asyncio.Task] = []
     if settings.call_sync_enabled and settings.retell_api_key:
         tasks.append(asyncio.create_task(call_sync_loop()))
