@@ -143,3 +143,67 @@ async def test_patch_practice_me_toggle_reminders(client, db_session):
     )
     assert resp.status_code == 200
     assert resp.json()["reminders_enabled"] is False
+
+
+async def test_practice_me_exposes_agent_persona_and_forwarding(client, db_session):
+    """TRUST-FIX: the Settings card must show the REAL persona the live agent
+    uses (same defaults as build_dynamic_variables) plus the forward-to number —
+    never hardcoded UI values."""
+    from sqlalchemy import select
+
+    from app.models.practice import Practice as P
+
+    practice, _ = await seed_practice(
+        db_session, name="Persona Me Co", clerk_org_id="org_pm", clerk_user_id="user_pm"
+    )
+    h = {"X-Dev-Clerk-User-Id": "user_pm", "X-Dev-Clerk-Org-Id": "org_pm"}
+
+    # Defaults (no agent_settings yet) → "Alex", no greeting.
+    body = (await client.get("/api/practice/me", headers=h)).json()
+    assert body["agent_name"] == "Alex"
+    assert body["agent_greeting"] is None
+    assert "forwarding_instruction" in body and "ai_phone_number" in body
+
+    # Onboarding step-5 shape flows through.
+    row = (await db_session.execute(select(P).where(P.id == practice.id))).scalar_one()
+    row.agent_settings = {"agent_name": "Sofia", "voice": "x", "greeting": "Welcome!"}
+    await db_session.commit()
+    body2 = (await client.get("/api/practice/me", headers=h)).json()
+    assert body2["agent_name"] == "Sofia"
+    assert body2["agent_greeting"] == "Welcome!"
+
+
+async def test_patch_practice_me_updates_agent_persona(client, db_session):
+    """PATCH agent_name/agent_greeting persists into agent_settings (the same
+    JSONB the live-call dynamic variables read) and is audited."""
+    practice, user = await seed_practice(
+        db_session, name="Persona Patch Co", clerk_org_id="org_pp", clerk_user_id="user_pp"
+    )
+    h = {"X-Dev-Clerk-User-Id": "user_pp", "X-Dev-Clerk-Org-Id": "org_pp"}
+
+    resp = await client.patch(
+        "/api/practice/me", headers=h,
+        json={"agent_name": "Maya", "agent_greeting": "We can't wait to see you!"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["agent_name"] == "Maya"
+    assert body["agent_greeting"] == "We can't wait to see you!"
+
+    # Clearing the greeting with an empty string works (optional line removed).
+    resp2 = await client.patch("/api/practice/me", headers=h, json={"agent_greeting": ""})
+    assert resp2.status_code == 200
+    assert resp2.json()["agent_greeting"] is None
+    assert resp2.json()["agent_name"] == "Maya"  # untouched
+
+    # And the live-call variables see the same values (single source of truth).
+    from sqlalchemy import select
+
+    from app.models.practice import Practice as P
+    from app.services.llm.dynamic_vars import build_dynamic_variables
+    row = (await db_session.execute(select(P).where(P.id == practice.id))
+           ).scalar_one()
+    await db_session.refresh(row)
+    v = build_dynamic_variables(row)
+    assert v["agent_name"] == "Maya"
+    assert v["custom_greeting"] == ""
