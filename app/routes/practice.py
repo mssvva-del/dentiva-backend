@@ -133,14 +133,20 @@ async def update_practice_me(
     # not persist.
     if payload.agent_name is not None or payload.agent_greeting is not None:
         agent = dict(db_practice.agent_settings or {})
+        persona_changed = False
         if payload.agent_name is not None and payload.agent_name.strip():
             agent["agent_name"] = payload.agent_name.strip()
             changed_fields.append("agent_name")
+            persona_changed = True
         if payload.agent_greeting is not None:
             # Empty string = clinic cleared the extra greeting line.
             agent["greeting"] = payload.agent_greeting.strip()
             changed_fields.append("agent_greeting")
-        db_practice.agent_settings = agent
+            persona_changed = True
+        # Only reassign when something actually changed — a whitespace-only
+        # agent_name would otherwise mutate the JSONB without an audit entry.
+        if persona_changed:
+            db_practice.agent_settings = agent
 
     if changed_fields:
         audit = AuditLog(
