@@ -21,6 +21,12 @@ class PracticeMe(BaseModel):
     rings_before_ai: int = 3
     # Generated clinic-facing forwarding instruction (read-only; from the above).
     forwarding_instruction: str = ""
+    # The Dentovox number the clinic forwards its line to (read-only, env-config).
+    ai_phone_number: str | None = None
+    # Agent persona (onboarding step 5 / Settings → AI Agent): assistant name +
+    # optional extra greeting line. Reaches every call via dynamic variables.
+    agent_name: str | None = None
+    agent_greeting: str | None = None
 
 
 class PracticeUpdate(BaseModel):
@@ -34,6 +40,9 @@ class PracticeUpdate(BaseModel):
     answer_mode: str | None = None
     # Rings the clinic line waits before forwarding to AI (1–10).
     rings_before_ai: int | None = Field(default=None, ge=1, le=10)
+    # Agent persona edits (Settings → AI Agent card).
+    agent_name: str | None = Field(default=None, min_length=1, max_length=60)
+    agent_greeting: str | None = Field(default=None, max_length=300)
 
     @field_validator("answer_mode")
     @classmethod

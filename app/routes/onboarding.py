@@ -85,6 +85,10 @@ async def _audit(db: AsyncSession, practice: Practice, user: User, action: str,
 
 
 def _state(practice: Practice) -> OnboardingState:
+    from app.config import get_settings
+    from app.services.call_routing import forwarding_instruction
+
+    settings = get_settings()
     return OnboardingState(
         practice_id=str(practice.id),
         status=practice.status,
@@ -99,6 +103,12 @@ def _state(practice: Practice) -> OnboardingState:
         pms_system=practice.pms_system,
         languages_enabled=list(practice.languages_enabled),
         agent_settings=practice.agent_settings,
+        ai_phone_number=settings.retell_from_number or None,
+        forwarding_instruction=forwarding_instruction(
+            answer_mode=practice.answer_mode,
+            rings_before_ai=practice.rings_before_ai,
+            ai_number=settings.retell_from_number or None,
+        ),
     )
 
 

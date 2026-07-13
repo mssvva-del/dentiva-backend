@@ -23,6 +23,7 @@ def _build_practice_me(practice: Practice) -> PracticeMe:
     pms_connected = settings.pms_adapter != "mock" and bool(
         practice.pms_credentials_secret_key
     )
+    agent = practice.agent_settings or {}
     return PracticeMe(
         id=str(practice.id),
         name=practice.name,
@@ -43,6 +44,11 @@ def _build_practice_me(practice: Practice) -> PracticeMe:
             rings_before_ai=practice.rings_before_ai,
             ai_number=settings.retell_from_number or None,
         ),
+        ai_phone_number=settings.retell_from_number or None,
+        # Mirrors what build_dynamic_variables sends into every live call, so the
+        # Settings card can never show a persona the agent doesn't actually use.
+        agent_name=(str(agent.get("agent_name") or "").strip() or "Alex"),
+        agent_greeting=(str(agent.get("greeting") or "").strip() or None),
     )
 
 
@@ -120,6 +126,21 @@ async def update_practice_me(
     ):
         db_practice.rings_before_ai = payload.rings_before_ai
         changed_fields.append("rings_before_ai")
+
+    # Agent persona: stored in the agent_settings JSONB (same shape onboarding
+    # step 5 writes). Reassign the whole dict — in-place mutation of a JSONB
+    # column is invisible to SQLAlchemy's change tracking and would silently
+    # not persist.
+    if payload.agent_name is not None or payload.agent_greeting is not None:
+        agent = dict(db_practice.agent_settings or {})
+        if payload.agent_name is not None and payload.agent_name.strip():
+            agent["agent_name"] = payload.agent_name.strip()
+            changed_fields.append("agent_name")
+        if payload.agent_greeting is not None:
+            # Empty string = clinic cleared the extra greeting line.
+            agent["greeting"] = payload.agent_greeting.strip()
+            changed_fields.append("agent_greeting")
+        db_practice.agent_settings = agent
 
     if changed_fields:
         audit = AuditLog(

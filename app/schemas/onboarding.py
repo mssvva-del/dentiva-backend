@@ -131,6 +131,11 @@ class OnboardingState(BaseModel):
     pms_system: str
     languages_enabled: list[str]
     agent_settings: dict | None
+    # The Dentovox number the clinic forwards its line to + the exact carrier
+    # instruction — THE deliverable of the phone step (a promise the UI must
+    # fulfill, not just collect the clinic's own number).
+    ai_phone_number: str | None = None
+    forwarding_instruction: str = ""
     # Step 6 (billing) is handled in Phase D / by super_admin (pilot). Surfaced
     # so the frontend can show "billing set up separately" rather than a dead step.
     billing_deferred: bool = True
