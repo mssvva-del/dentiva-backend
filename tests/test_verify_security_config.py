@@ -142,3 +142,17 @@ async def test_db_security_noop_in_development(db_session):
     # Even connected as the superuser owner, dev/test never fails this check.
     s = Settings(environment="development", auth_dev_bypass=False)
     await verify_db_security(db_session, s)  # must not raise
+
+
+async def test_db_security_superuser_allowed_with_pilot_flag(db_session):
+    # Pilot escape: superuser role is tolerated in prod ONLY when explicitly
+    # acknowledged via ALLOW_SUPERUSER_DB (no live clinics yet). db_session is the
+    # superuser owner, so without the flag it raises; with it, it passes.
+    strict = Settings(environment="production", auth_dev_bypass=False)
+    with pytest.raises(RuntimeError, match="SUPERUSER|BYPASSRLS"):
+        await verify_db_security(db_session, strict)
+
+    pilot = Settings(
+        environment="production", auth_dev_bypass=False, allow_superuser_db=True
+    )
+    await verify_db_security(db_session, pilot)  # must not raise

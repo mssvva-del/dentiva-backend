@@ -233,6 +233,15 @@ class Settings(BaseSettings):
     # Off by default so production behavior is unchanged unless explicitly enabled.
     lazy_provisioning: bool = False
 
+    # PILOT ESCAPE HATCH (temporary). Railway's managed Postgres only exposes a
+    # SUPERUSER role, which bypasses RLS FORCE — so the prod DB-security gate
+    # (verify_db_security) would block startup. Creating a restricted app role is
+    # deferred to the AWS RDS migration. With ZERO live clinics (no real patient
+    # PHI yet), allow prod to boot on the superuser role WHEN explicitly set here.
+    # MUST be false before any real clinic goes live — RLS is not DB-enforced while
+    # this is true. Startup logs a loud warning so it can't be forgotten silently.
+    allow_superuser_db: bool = False
+
     # Security / ops hardening (Security Sprint — Block 0)
     enable_llm_relay: bool = False  # mount the Groq /ws/retell-llm relay only if true
     rate_limit_enabled: bool = False  # in-process per-IP rate limiting (enable for real traffic)
