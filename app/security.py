@@ -211,12 +211,25 @@ async def verify_db_security(session: AsyncSession, settings: Settings) -> None:
         return
     is_super, bypass_rls = bool(row[0]), bool(row[1])
     if is_super or bypass_rls:
+        flag = "SUPERUSER" if is_super else "BYPASSRLS"
+        if settings.allow_superuser_db:
+            # Pilot escape: acknowledged + no live clinics yet. Loud warning so it
+            # is never forgotten — RLS FORCE is bypassed while this is set.
+            logger.warning(
+                "⚠️  DB role is %s and ALLOW_SUPERUSER_DB is set — RLS FORCE is "
+                "BYPASSED. Acceptable ONLY pre-launch (no real patient PHI). Create "
+                "the unprivileged 'dentiva_app' role and unset this before any live "
+                "clinic (done as part of the AWS RDS migration).",
+                flag,
+            )
+            return
         raise RuntimeError(
-            "SECURITY VIOLATION: the app's DB role is "
-            f"{'SUPERUSER' if is_super else 'BYPASSRLS'} in production — it is EXEMPT "
-            "from Row-Level Security, so tenant isolation (one clinic's PHI vs "
-            "another's) is NOT enforced. Point DATABASE_URL at the unprivileged "
-            "'dentiva_app' role (NOSUPERUSER NOBYPASSRLS), not the owner/superuser."
+            f"SECURITY VIOLATION: the app's DB role is {flag} in production — it is "
+            "EXEMPT from Row-Level Security, so tenant isolation (one clinic's PHI "
+            "vs another's) is NOT enforced. Point DATABASE_URL at the unprivileged "
+            "'dentiva_app' role (NOSUPERUSER NOBYPASSRLS). For a pre-launch pilot "
+            "with no live clinics, set ALLOW_SUPERUSER_DB=true to boot anyway "
+            "(RLS bypassed — must be undone before real patients)."
         )
     logger.info("DB security check passed (app role is non-superuser, non-bypassrls).")
 
