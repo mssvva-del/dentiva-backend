@@ -1,12 +1,12 @@
 """Dentiva plan catalog (billing/metering).
 
-SINGLE SOURCE OF TRUTH for the BILLED catalog. Sergio's approved grid (ADM7,
-2026-07-05 — see dentiva-docs PRICING_DECISION):
-  After-Hours    $239/mo · 1500 min · overage $0.18/min
-  Full-Time      $379/mo · 2500 min · overage $0.15/min   (most popular)
-  Growth         $579/mo · 4000 min · overage $0.13/min
-  Multi-Location $849/mo · 3000 min · overage $0.11/min   (per location)
-  Annual billing: 16% discount on the yearly total.
+SINGLE SOURCE OF TRUTH for the BILLED catalog. Sergio's approved grid (updated
+2026-07-13 to match the public site — site is canonical for the displayed price):
+  After-Hours    $249/mo · 1500 min · overage $0.18/min
+  Full-Time      $399/mo · 2500 min · overage $0.15/min   (most popular)
+  Growth         $599/mo · 4000 min · overage $0.13/min
+  Multi-Location $899/mo · 3000 min · overage $0.11/min   (per location)
+  Annual billing: 15% discount on the yearly total.
 
 This catalog drives metering (included minutes, overage) and the Stripe checkout
 price mapping. It mirrors the ADM6 marketing grid (pricing_plans table) key-for-
@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Annual discount: 16% off the 12-month total (matches the ADM6 grid / site).
-ANNUAL_DISCOUNT = 0.16
+# Annual discount: 15% off the 12-month total (matches the public site).
+ANNUAL_DISCOUNT = 0.15
 
 # Rough per-minute cost of a call (Retell + LLM + Cartesia TTS), in cents. Used by
 # the admin margin view only — a planning estimate, NOT an invoice input. Tune as
@@ -58,19 +58,19 @@ class Plan:
 PLANS: dict[str, Plan] = {
     "after_hours": Plan(
         key="after_hours", name="After-Hours",
-        monthly_price_cents=23900, included_minutes=1500, overage_cents_per_min=18,
+        monthly_price_cents=24900, included_minutes=1500, overage_cents_per_min=18,
     ),
     "full_time": Plan(
         key="full_time", name="Full-Time",
-        monthly_price_cents=37900, included_minutes=2500, overage_cents_per_min=15,
+        monthly_price_cents=39900, included_minutes=2500, overage_cents_per_min=15,
     ),
     "growth": Plan(
         key="growth", name="Growth",
-        monthly_price_cents=57900, included_minutes=4000, overage_cents_per_min=13,
+        monthly_price_cents=59900, included_minutes=4000, overage_cents_per_min=13,
     ),
     "multi": Plan(
         key="multi", name="Multi-Location",
-        monthly_price_cents=84900, included_minutes=3000, overage_cents_per_min=11,
+        monthly_price_cents=89900, included_minutes=3000, overage_cents_per_min=11,
         per_location=True,
     ),
 }

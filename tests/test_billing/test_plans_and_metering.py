@@ -15,25 +15,26 @@ from tests.conftest import seed_practice
 
 # ── plan catalog (ADM7 grid) ─────────────────────────────────────────────────
 def test_plan_prices_match_spec():
-    assert PLANS["after_hours"].monthly_price_cents == 23900
+    # Prices match the public site (canonical): $249/399/599/899.
+    assert PLANS["after_hours"].monthly_price_cents == 24900
     assert PLANS["after_hours"].included_minutes == 1500
     assert PLANS["after_hours"].overage_cents_per_min == 18
-    assert PLANS["full_time"].monthly_price_cents == 37900
+    assert PLANS["full_time"].monthly_price_cents == 39900
     assert PLANS["full_time"].included_minutes == 2500
     assert PLANS["full_time"].overage_cents_per_min == 15
-    assert PLANS["growth"].monthly_price_cents == 57900
+    assert PLANS["growth"].monthly_price_cents == 59900
     assert PLANS["growth"].included_minutes == 4000
-    assert PLANS["multi"].monthly_price_cents == 84900
+    assert PLANS["multi"].monthly_price_cents == 89900
     assert PLANS["multi"].included_minutes == 3000
     assert PLANS["multi"].overage_cents_per_min == 11
     assert PLANS["multi"].per_location is True
     assert set(PLANS) == {"after_hours", "full_time", "growth", "multi"}
 
 
-def test_annual_discount_16pct():
+def test_annual_discount_15pct():
     p = PLANS["full_time"]
-    # 379*12 = 4548.00 → 16% off = 3820.32 → 382032 cents
-    assert p.annual_total_cents == round(37900 * 12 * 0.84)
+    # 399*12 = 4788.00 → 15% off → 407us... round(399_00*12*0.85) cents.
+    assert p.annual_total_cents == round(39900 * 12 * 0.85)
 
 
 def test_legacy_plan_keys_resolve_to_current_tier():
