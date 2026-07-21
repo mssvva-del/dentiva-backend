@@ -234,6 +234,13 @@ async def test_book_appointment_creates_booking_and_audit(client, db_session):
         },
     )
 
+    # Native availability only offers REAL future openings within business hours —
+    # use a weekday a few days out (seed_practice sets Mon–Fri 09:00–18:00).
+    from datetime import date, timedelta
+    future = date.today() + timedelta(days=3)
+    while future.weekday() >= 5:  # skip Sat/Sun
+        future += timedelta(days=1)
+
     resp = await client.post(
         "/webhooks/retell",
         json={
@@ -245,20 +252,17 @@ async def test_book_appointment_creates_booking_and_audit(client, db_session):
                 "patient_last_name": "Garcia",
                 "patient_phone": "+15551234567",
                 "procedure": "cleaning",
-                "preferred_date": "2026-06-05",
+                "preferred_date": future.isoformat(),
                 "preferred_time_window": "morning",
             },
         },
     )
     assert resp.status_code == 200
     body = resp.json()
-    # New contract: a flat confirmation the voice LLM can speak back, plus the
-    # candidate slots at top level (no "result" wrapper).
+    # Flat confirmation the voice LLM can speak back.
     assert body["booked"] is True
     assert "appointment" in body and body["appointment"]["procedure"] == "cleaning"
-    slots = body["available_slots"]
-    assert len(slots) >= 1
-    assert "date" in slots[0] and "time" in slots[0] and "provider" in slots[0]
+    assert body["appointment"]["date"] == future.isoformat()
 
     # Verify booking row persisted.
     await db_session.commit()

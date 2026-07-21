@@ -37,7 +37,7 @@ from app.models.callback_request import CallbackRequest
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.waitlist_entry import WaitlistEntry
-from app.services.booking import find_available_slots
+from app.services.availability import compute_native_slots, slot_to_utc
 from app.services.sms import (
     send_booking_confirmation,
     send_cancellation_notice,
@@ -289,25 +289,6 @@ async def _find_patient_by_phone(
             len(rows), practice_id,
         )
     return rows[0] if rows else None
-
-
-async def _slot_taken(
-    session, practice_id: uuid.UUID, provider_name: str | None, appointment_at: datetime
-) -> bool:
-    """True if a confirmed booking already holds this provider+time (double-book guard)."""
-    existing = (
-        await session.execute(
-            select(Booking.id)
-            .where(
-                Booking.practice_id == practice_id,
-                Booking.provider_name == provider_name,
-                Booking.appointment_at == appointment_at,
-                Booking.status == "confirmed",
-            )
-            .limit(1)
-        )
-    ).first()
-    return existing is not None
 
 
 async def _find_upcoming_booking(
@@ -588,13 +569,36 @@ async def _handle_call_analyzed(payload: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
-    slots = await find_available_slots(
-        procedure=args.get("procedure", "cleaning"),
-        preferred_date=args.get("preferred_date", ""),
-        preferred_time_window=args.get("preferred_time_window"),
-    )
+async def _handle_check_availability(retell_call_id: str, args: dict) -> dict:
+    """Offer REAL openings from the clinic's own hours minus its booked slots.
 
+    No live PMS is required — this reads business_hours + our bookings table, so
+    the agent never invents times. (When a clinic connects a real PMS later, that
+    adapter path can be branched in here.)"""
+    async with _app_db.async_session_factory() as session:
+        pid = await _resolve_practice_id_for_call(session, retell_call_id)
+        if pid is None:
+            return {"available_slots": []}
+        await set_tenant(session, pid)
+        practice = (
+            await session.execute(select(Practice).where(Practice.id == pid))
+        ).scalar_one_or_none()
+        if practice is None:
+            return {"available_slots": []}
+        slots = await compute_native_slots(
+            session, practice,
+            procedure=args.get("procedure", "cleaning"),
+            preferred_date=args.get("preferred_date", ""),
+            preferred_window=args.get("preferred_time_window"),
+        )
+    return {
+        "available_slots": [
+            {"date": s.date, "time": s.time, "provider": s.provider} for s in slots
+        ]
+    }
+
+
+async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     # Phase 2: persist a real booking row + audit log.
     first_name = args.get("patient_first_name", "Unknown")
     last_name = args.get("patient_last_name", "")
@@ -629,18 +633,11 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         else:
             resolved_practice = await _resolve_practice(None)
             if resolved_practice is None:
-                # No practice in DB — return slots without persistence (dev/test edge case).
+                # No practice in DB — can't persist (dev/test edge case).
                 logger.warning(
-                    "book_appointment: no practice found; returning slots without persistence."
+                    "book_appointment: no practice found; cannot persist."
                 )
-                return {
-                    "result": {
-                        "available_slots": [
-                            {"date": s.date, "time": s.time, "provider": s.provider}
-                            for s in slots
-                        ]
-                    }
-                }
+                return {"result": {"available_slots": []}}
             practice_id = resolved_practice.id
 
         # Set tenant context so RLS allows patient inserts.
@@ -671,15 +668,11 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
                     "available_slots": [],
                 }
 
-        # Practice name for the confirmation SMS (sent after commit).
-        if resolved_practice is not None:
-            practice_name = resolved_practice.name
-        else:
-            practice_name = (
-                await session.execute(
-                    select(Practice.name).where(Practice.id == practice_id)
-                )
-            ).scalar_one_or_none() or "our office"
+        # Full practice for name + timezone + native availability.
+        practice_obj = resolved_practice or (
+            await session.execute(select(Practice).where(Practice.id == practice_id))
+        ).scalar_one_or_none()
+        practice_name = (practice_obj.name if practice_obj else None) or "our office"
 
         # Language this call was conducted in — the agent passes it, falling back
         # to Retell's mid-call detection on the call row. Drives preferred_language
@@ -692,27 +685,38 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         )
         patient_opted_out = patient.sms_opt_out
 
-        # Double-book guard: pick the first offered slot not already taken.
-        for s in slots:
-            cand = datetime.fromisoformat(f"{preferred_date}T{s.time}:00+00:00")
-            if not await _slot_taken(session, practice_id, s.provider, cand):
-                chosen_slot = s
-                break
-        if slots and chosen_slot is None:
-            # Every offered time was just booked by someone else.
+        # REAL openings from the clinic's own hours minus booked slots (same source
+        # check_availability offered). Honor an exact time if the agent passed one,
+        # else take the first free slot in the requested window.
+        wanted_time = (args.get("preferred_time") or "").strip()
+        slots = []
+        if practice_obj is not None:
+            slots = await compute_native_slots(
+                session, practice_obj,
+                procedure=procedure,
+                preferred_date=preferred_date,
+                preferred_window=args.get("preferred_time_window"),
+            )
+        if wanted_time:
+            chosen_slot = next((s for s in slots if s.time == wanted_time), None)
+        if chosen_slot is None:
+            chosen_slot = slots[0] if slots else None
+        if chosen_slot is None:
+            # Nothing real is open for that request — never invent a time.
             return {
                 "booked": False,
                 "message": (
-                    "I'm sorry — those times were just taken. "
-                    "Want me to check another day?"
+                    "I'm sorry — I don't see an opening that fits. "
+                    "Want me to check another day, or have the team call you?"
                 ),
                 "available_slots": [],
             }
 
-        # Create booking row.
-        slot_time = chosen_slot.time if chosen_slot else "09:00"
-        appointment_at_str = f"{preferred_date}T{slot_time}:00+00:00"
-        appointment_at = datetime.fromisoformat(appointment_at_str)
+        # Create booking row — store the LOCAL slot converted to UTC.
+        appointment_at = slot_to_utc(
+            chosen_slot.date, chosen_slot.time,
+            practice_obj.timezone if practice_obj else None,
+        )
         booking = Booking(
             id=uuid.uuid4(),
             practice_id=practice_id,
@@ -756,13 +760,15 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     )
 
     # Fire the confirmation SMS — fail-safe, never blocks/raises into the booking.
-    booked_time = chosen_slot.time if chosen_slot else "09:00"
-    booked_provider = chosen_slot.provider if chosen_slot else "Dr. Smith"
+    # Use the ACTUAL booked slot (date + time), not the raw request.
+    booked_date = chosen_slot.date
+    booked_time = chosen_slot.time
+    booked_provider = chosen_slot.provider
     sms_result = await send_booking_confirmation(
         to=phone,
         practice_name=practice_name,
         first_name=first_name,
-        date=preferred_date,
+        date=booked_date,
         time=booked_time,
         provider=booked_provider,
         opted_out=patient_opted_out,
@@ -773,19 +779,16 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     return {
         "booked": True,
         "appointment": {
-            "date": preferred_date,
-            "time": chosen_slot.time if chosen_slot else "09:00",
-            "provider": chosen_slot.provider if chosen_slot else "Dr. Smith",
+            "date": booked_date,
+            "time": booked_time,
+            "provider": booked_provider,
             "procedure": procedure,
         },
         "message": (
-            f"Appointment confirmed for {first_name} on {preferred_date} "
-            f"at {chosen_slot.time if chosen_slot else '09:00'} "
-            f"with {chosen_slot.provider if chosen_slot else 'Dr. Smith'}."
+            f"Appointment confirmed for {first_name} on {booked_date} "
+            f"at {booked_time} with {booked_provider}."
         ),
-        "available_slots": [
-            {"date": s.date, "time": s.time, "provider": s.provider} for s in slots
-        ],
+        "available_slots": [],
     }
 
 
@@ -837,49 +840,41 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
             }
 
         procedure = booking.procedure_type or "cleaning"
-        slots = await find_available_slots(
-            procedure=procedure,
-            preferred_date=new_date,
-            preferred_time_window=new_window,
-        )
-        if not slots:
-            return {
-                "rescheduled": False,
-                "message": (
-                    f"I don't have any openings on {new_date}. "
-                    "Want me to check another day?"
-                ),
-                "available_slots": [],
-            }
-
-        # Double-book guard: pick the first offered slot not already taken.
+        practice_obj = (
+            await session.execute(select(Practice).where(Practice.id == practice_id))
+        ).scalar_one_or_none()
+        slots = []
+        if practice_obj is not None:
+            slots = await compute_native_slots(
+                session, practice_obj,
+                procedure=procedure,
+                preferred_date=new_date,
+                preferred_window=new_window,
+            )
+        wanted_time = (args.get("preferred_time") or "").strip()
         chosen = None
-        new_at = None
-        for s in slots:
-            cand = datetime.fromisoformat(f"{new_date}T{s.time}:00+00:00")
-            if not await _slot_taken(session, practice_id, s.provider, cand):
-                chosen = s
-                new_at = cand
-                break
+        if wanted_time:
+            chosen = next((s for s in slots if s.time == wanted_time), None)
+        if chosen is None:
+            chosen = slots[0] if slots else None
         if chosen is None:
             return {
                 "rescheduled": False,
                 "message": (
-                    f"Those {new_date} times were just taken. "
+                    f"I don't see an opening on {new_date}. "
                     "Want me to check another day?"
                 ),
                 "available_slots": [],
             }
+        new_at = slot_to_utc(
+            chosen.date, chosen.time, practice_obj.timezone if practice_obj else None
+        )
 
         old_at = booking.appointment_at
         booking.appointment_at = new_at
         booking.provider_name = chosen.provider
 
-        practice_name = (
-            await session.execute(
-                select(Practice.name).where(Practice.id == practice_id)
-            )
-        ).scalar_one_or_none() or "our office"
+        practice_name = (practice_obj.name if practice_obj else None) or "our office"
         first_name = patient.first_name
         patient_opted_out = patient.sms_opt_out
 
@@ -1440,16 +1435,7 @@ async def _dispatch_function(
         return await _handle_book_appointment(retell_call_id, args)
 
     if fn == "check_availability":
-        slots = await find_available_slots(
-            procedure=args.get("procedure", "cleaning"),
-            preferred_date=args.get("preferred_date", ""),
-            preferred_time_window=args.get("preferred_time_window"),
-        )
-        return {
-            "available_slots": [
-                {"date": s.date, "time": s.time, "provider": s.provider} for s in slots
-            ]
-        }
+        return await _handle_check_availability(retell_call_id, args)
 
     if fn == "lookup_patient":
         return await _handle_lookup_patient(retell_call_id, args)

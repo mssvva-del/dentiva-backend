@@ -8,7 +8,8 @@ from tests.conftest import seed_practice
 
 
 async def test_book_appointment_function_call(client, db_session):
-    # No practice seeded — webhook gracefully returns slots without persistence.
+    # No practice seeded — nothing to compute availability against, so the webhook
+    # returns an empty slot list (never invents times) and does not persist.
     payload = {
         "event": "function_call",
         "call_id": "retell_call_xyz",
@@ -24,10 +25,7 @@ async def test_book_appointment_function_call(client, db_session):
     }
     resp = await client.post("/webhooks/retell", json=payload)
     assert resp.status_code == 200
-    slots = resp.json()["result"]["available_slots"]
-    assert len(slots) == 3
-    assert slots[0]["date"] == "2026-06-05"
-    assert {"date", "time", "provider"} <= set(slots[0].keys())
+    assert resp.json()["result"]["available_slots"] == []
 
 
 async def test_call_started_ack(client, db_session):

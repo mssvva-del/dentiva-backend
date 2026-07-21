@@ -14,10 +14,10 @@ from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from tests.conftest import seed_practice
 
-# A clearly-future date so the booking counts as "upcoming" regardless of when
-# the suite runs.
+# Clearly-future WEEKDAYS (native availability only offers open business days —
+# 2099-12-15 is a Tuesday, 2099-12-18 a Friday; both within Mon–Fri hours).
 _FUTURE = "2099-12-15"
-_FUTURE_2 = "2099-12-20"
+_FUTURE_2 = "2099-12-18"
 _PHONE = "+15557770000"
 
 
