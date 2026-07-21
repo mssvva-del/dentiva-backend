@@ -177,9 +177,12 @@ async def process_due_targets(
                 segment=target.segment, campaign=campaign, client=sms_client,
             )
         else:  # voice (block 7 sender provided)
+            agent = practice.agent_settings or {}
             result = await voice_sender(
                 patient, lang, target,
                 campaign=campaign, practice_name=practice.name,
+                agent_name=(str(agent.get("agent_name") or "").strip() or "Alex"),
+                custom_greeting=str(agent.get("greeting") or "").strip()[:300],
             )
 
         _record_touch(

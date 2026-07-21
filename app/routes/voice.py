@@ -68,11 +68,19 @@ async def create_web_call(
         )
 
     try:
+        # Same per-clinic variables the phone inbound webhook serves — without
+        # them the browser demo would SPEAK literal "{{agent_name}}"/KB refs.
+        from app.services.llm.dynamic_vars import build_dynamic_variables
+
+        dyn = build_dynamic_variables(_practice)
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(
                 f"{RETELL_BASE}/v2/create-web-call",
                 headers={"Authorization": f"Bearer {settings.retell_api_key}"},
-                json={"agent_id": settings.retell_agent_id},
+                json={
+                    "agent_id": settings.retell_agent_id,
+                    "retell_llm_dynamic_variables": dyn,
+                },
             )
         if resp.status_code >= 400:
             logger.warning("create-web-call failed: %s %s", resp.status_code, resp.text[:200])
