@@ -104,6 +104,8 @@ async def make_voice_touch(
     client: RetellOutboundClient,
     campaign=None,          # ReactivationCampaign | None — custom-campaign context
     practice_name: str = "",
+    agent_name: str = "Alex",
+    custom_greeting: str = "",
 ) -> TouchResult:
     """Place the outbound reactivation call. 'sent' on initiation; outcome stays
     None until the Retell webhook reports the result (apply_voice_outcome)."""
@@ -143,6 +145,10 @@ async def make_voice_touch(
                 "campaign_context": campaign_context,
                 "language": lang,
                 "reason": reason,
+                # Persona vars — the begin_message/prompt reference {{agent_name}}
+                # and {{custom_greeting}}; a missing key would be SPOKEN literally.
+                "agent_name": agent_name or "Alex",
+                "custom_greeting": custom_greeting or "",
             },
             # Correlate the eventual webhook back to THIS target/touch.
             metadata={"kind": "reactivation", "reactivation_target_id": str(target.id)},
