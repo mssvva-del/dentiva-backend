@@ -125,33 +125,46 @@ async def fetch_website_text(url: str) -> str:
     return " \n".join(chunks)[:_MAX_TOTAL_CHARS]
 
 
+async def _anthropic_json(prompt: str, key: str) -> str:
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+            json={"model": "claude-haiku-4-5", "max_tokens": 3000,
+                  "messages": [{"role": "user", "content": prompt}]},
+        )
+        r.raise_for_status()
+        return r.json()["content"][0]["text"]
+
+
+async def _groq_json(prompt: str, settings) -> str:  # noqa: ANN001
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(
+            f"{settings.groq_base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+            json={"model": settings.llm_model, "max_tokens": 3000,
+                  "response_format": {"type": "json_object"},
+                  "messages": [{"role": "user", "content": prompt}]},
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+
 async def _llm_json(prompt: str) -> dict:
-    """One-shot JSON extraction via Anthropic (primary) or Groq (fallback)."""
+    """One-shot JSON extraction. Anthropic Haiku is primary (cheapest, best JSON);
+    if it's absent OR errors (e.g. no credit), fall back to Groq — the feature
+    must not break just because one provider is down/unfunded."""
     settings = get_settings()
+    text: str | None = None
     if settings.anthropic_api_key:
-        async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": settings.anthropic_api_key,
-                         "anthropic-version": "2023-06-01"},
-                json={"model": "claude-haiku-4-5", "max_tokens": 3000,
-                      "messages": [{"role": "user", "content": prompt}]},
-            )
-            r.raise_for_status()
-            text = r.json()["content"][0]["text"]
-    elif settings.groq_api_key:
-        async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.post(
-                f"{settings.groq_base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.groq_api_key}"},
-                json={"model": settings.llm_model, "max_tokens": 3000,
-                      "response_format": {"type": "json_object"},
-                      "messages": [{"role": "user", "content": prompt}]},
-            )
-            r.raise_for_status()
-            text = r.json()["choices"][0]["message"]["content"]
-    else:
-        raise RuntimeError("no_llm_configured")
+        try:
+            text = await _anthropic_json(prompt, settings.anthropic_api_key)
+        except Exception as exc:  # noqa: BLE001 — fall through to Groq
+            logger.warning("onboarding_ai: Anthropic failed (%s), trying Groq", exc)
+    if text is None:
+        if not settings.groq_api_key:
+            raise RuntimeError("no_llm_configured")
+        text = await _groq_json(prompt, settings)
 
     # Tolerate a fenced/prefixed JSON body.
     match = re.search(r"\{.*\}", text, re.S)
