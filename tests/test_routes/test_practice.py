@@ -31,12 +31,15 @@ async def test_practice_me_happy_path(client, db_session):
     assert "business_hours" in body
 
 
-async def test_practice_me_unknown_user(client):
+async def test_practice_me_provisions_new_user(client):
+    # A brand-new signed-in user with no practice is auto-provisioned into an
+    # onboarding practice (the signup flow), not rejected.
     resp = await client.get(
         "/api/practice/me",
-        headers={"X-Dev-Clerk-User-Id": "ghost", "X-Dev-Clerk-Org-Id": "org_x"},
+        headers={"X-Dev-Clerk-User-Id": "ghost", "X-Dev-Clerk-Org-Id": "org_ghost"},
     )
-    assert resp.status_code == 401
+    assert resp.status_code == 200
+    assert resp.json()["name"]  # a fresh practice now exists for them
 
 
 # ---------------------------------------------------------------------------

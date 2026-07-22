@@ -108,16 +108,32 @@ async def test_join_existing_as_admin_role_becomes_owner(client, db_session, laz
     assert r.json()["role"] == "owner"
 
 
-async def test_no_org_claim_is_unauthorized(client, db_session, lazy_on):
-    # No org → can't place the user in a clinic → 401 (frontend creates org first).
-    r = await client.get("/api/me", headers={"X-Dev-Clerk-User-Id": "user_no_org"})
-    assert r.status_code == 401
+async def test_solo_signup_no_org_gets_own_onboarding_practice(client, db_session, lazy_on):
+    # A solo doctor signs up with just an email (no Clerk org) → their OWN practice
+    # is created in onboarding, so they land in the wizard (not a broken dashboard).
+    r = await client.get("/api/me", headers={"X-Dev-Clerk-User-Id": "user_solo1",
+                                             "X-Dev-Clerk-Email": "solo@doc.com"})
+    assert r.status_code == 200
+    assert r.json()["role"] == "owner"
+    practice = (
+        await db_session.execute(
+            select(Practice).where(Practice.clerk_org_id == "solo_user_solo1")
+        )
+    ).scalar_one()
+    assert practice.status == "onboarding" and practice.onboarding_step == 1
 
 
-async def test_lazy_off_by_default_still_401(client, db_session):
-    # Without the flag, an unknown user is NOT provisioned (prod-safe default).
-    r = await client.get("/api/me", headers=_auth("org_off", "user_off"))
-    assert r.status_code == 401
+async def test_lazy_off_explicitly_still_401(client, db_session, monkeypatch):
+    # Provisioning is ON by default now; when explicitly disabled, an unknown user
+    # is still rejected (the escape hatch stays available).
+    monkeypatch.setenv("LAZY_PROVISIONING", "false")
+    get_settings.cache_clear()
+    try:
+        r = await client.get("/api/me", headers=_auth("org_off", "user_off"))
+        assert r.status_code == 401
+    finally:
+        monkeypatch.delenv("LAZY_PROVISIONING", raising=False)
+        get_settings.cache_clear()
 
 
 async def test_multitenant_not_attached_to_demo(client, db_session, lazy_on):
