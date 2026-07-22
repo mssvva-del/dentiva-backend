@@ -79,11 +79,19 @@ class PhoneStep(BaseModel):
     @field_validator("forward_number", "transfer_number")
     @classmethod
     def _valid_number(cls, v: str | None) -> str | None:
-        if v is None or v == "":
+        if v is None or not v.strip():
             return None
-        if not _E164_RE.match(v):
-            raise ValueError("number must be E.164, e.g. +13105551234")
-        return v
+        # Accept how a person actually types a US number — "435-529-1000",
+        # "(800) 517-5251", "+1 800 517 5251" — and normalize to E.164, instead
+        # of rejecting anything that isn't already +1XXXXXXXXXX.
+        digits = re.sub(r"\D", "", v)
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        if len(digits) != 10:
+            raise ValueError(
+                "Enter a 10-digit US phone number, e.g. 435-529-1000."
+            )
+        return f"+1{digits}"
 
 
 # ── Step 4: PMS ──────────────────────────────────────────────────────────────
