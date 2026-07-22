@@ -15,6 +15,9 @@ async def test_unknown_user_401_when_demo_off(client, db_session, monkeypatch):
         db_session, name="Demo Off", clerk_org_id="org_do1", clerk_user_id="user_do1"
     )
     monkeypatch.setenv("DEMO_OPEN_ACCESS", "false")
+    # Also disable lazy provisioning so we test the demo path in isolation (with
+    # both off, an unknown user is rejected).
+    monkeypatch.setenv("LAZY_PROVISIONING", "false")
     get_settings.cache_clear()
     try:
         # A brand-new clerk user id that was never provisioned.

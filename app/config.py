@@ -230,8 +230,10 @@ class Settings(BaseSettings):
     # the system robust to delayed/failed Clerk webhooks (the webhook stays the
     # primary, idempotent provisioning path). Unlike demo_open_access it is fully
     # multi-tenant (keys off the caller's OWN org, never the first/demo practice).
-    # Off by default so production behavior is unchanged unless explicitly enabled.
-    lazy_provisioning: bool = False
+    # ON by default: a signed-up Clerk user with no practice yet is the PRODUCT'S
+    # normal signup — they must land in onboarding, not a broken empty dashboard.
+    # Handles both org signups and solo doctors (no org → their own practice).
+    lazy_provisioning: bool = True
 
     # PILOT ESCAPE HATCH (temporary). Railway's managed Postgres only exposes a
     # SUPERUSER role, which bypasses RLS FORCE — so the prod DB-security gate

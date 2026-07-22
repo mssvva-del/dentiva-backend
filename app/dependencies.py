@@ -67,12 +67,14 @@ async def _lazy_provision_user(session, claims: AuthClaims) -> User | None:
 
     In-spec "first login without a clinic → onboarding" path, and a safety net for
     delayed/failed Clerk webhooks. Fully multi-tenant: keys off the caller's OWN
-    org id (never the demo practice). Requires an org claim — without one the user
-    hasn't created/joined a clinic yet, so we can't place them.
+    org id (never the demo practice).
+
+    Solo signup (no Clerk org — a single doctor who just signed up with an email):
+    give them their OWN fresh practice keyed on their user id, so they land in the
+    onboarding wizard instead of a broken empty dashboard. A real Clerk org can be
+    linked to this practice later without data loss.
     """
-    org_id = claims.clerk_org_id
-    if not org_id:
-        return None  # no org → frontend should route them to create one
+    org_id = claims.clerk_org_id or f"solo_{claims.clerk_user_id}"
 
     practice = (
         await session.execute(
