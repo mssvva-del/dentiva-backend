@@ -124,6 +124,70 @@ async def get_state(
 
 
 # ---------------------------------------------------------------------------
+# Smart setup (ONB-2.0): paste the clinic's website → we learn everything we can
+# and APPLY it (clinic fields, hours, knowledge base), returning the extraction
+# + gap questions + an "how your agent will sound" preview. The wizard then opens
+# prefilled and the doctor just confirms.
+# ---------------------------------------------------------------------------
+class AnalyzeWebsite(BaseModel):
+    url: str = Field(min_length=4, max_length=300)
+
+
+@router.post("/analyze-website")
+async def analyze_website(
+    payload: AnalyzeWebsite,
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+    user: User = Depends(require_permission(MANAGE_SETTINGS)),
+) -> dict:
+    from app.services.onboarding_ai import analyze_clinic_website
+
+    try:
+        profile = await analyze_clinic_website(payload.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — LLM/network failure → wizard stays manual
+        raise HTTPException(
+            status_code=502,
+            detail="We couldn't analyze the site right now — you can fill things "
+                   "in manually and try again later.",
+        ) from exc
+
+    # APPLY what we learned (only non-empty facts — never blank out user input).
+    p = await _load(db, practice.id)
+    clinic = profile["clinic"]
+    if clinic.get("name"):
+        p.name = clinic["name"]
+    if clinic.get("address"):
+        p.address = clinic["address"]
+    if clinic.get("timezone"):
+        p.timezone = clinic["timezone"]
+    if clinic.get("phone"):
+        p.phone_number = p.phone_number or clinic["phone"]
+    if clinic.get("languages"):
+        p.languages_enabled = clinic["languages"]
+    if any(v for v in profile["business_hours"].values()):
+        p.business_hours = profile["business_hours"]
+    kb = profile["knowledge_base"]
+    if any([kb.get("providers"), kb.get("insurances"),
+            kb.get("appointment_types"), any((kb.get("policies") or {}).values())]):
+        # Merge over any existing KB, keeping prior sections the site didn't cover.
+        merged = dict(p.knowledge_base or {})
+        for key in ("providers", "appointment_types", "insurances", "self_pay", "policies"):
+            if kb.get(key) not in (None, [], {}):
+                merged[key] = kb[key]
+        p.knowledge_base = merged
+    await _audit(db, p, user, "onboarding_analyze_website",
+                 {"url": payload.url[:200],
+                  "providers": len(kb.get("providers") or []),
+                  "insurances": len(kb.get("insurances") or []),
+                  "gaps": len(profile.get("gaps") or [])})
+    await db.commit()
+    await db.refresh(p)
+    return {"profile": profile, "state": _state(p).model_dump()}
+
+
+# ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
 @router.put("/clinic", response_model=OnboardingState)
