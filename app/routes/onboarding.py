@@ -21,6 +21,7 @@ billing is reconciled separately.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -46,6 +47,7 @@ from app.schemas.onboarding import (
 from app.services.legal.baa import BAA_VERSION, current_baa
 
 router = APIRouter(prefix="/api/onboarding", tags=["onboarding"])
+logger = logging.getLogger("dentiva.routes.onboarding")
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +412,9 @@ async def complete(
     # HIPAA hard gate: no signed current-version BAA → no go-live. PHI must never
     # flow before the Business Associate Agreement is accepted.
     if not await _has_current_baa(db, practice.id):
+        logger.warning(
+            "go-live BLOCKED (no BAA) practice=%s version=%s", practice.id, BAA_VERSION
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Terms & BAA must be accepted before going live.",
