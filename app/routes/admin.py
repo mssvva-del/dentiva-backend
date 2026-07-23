@@ -32,6 +32,7 @@ from app.auth.admin import AdminContext, require_admin_permission
 from app.auth.permissions import (
     IMPERSONATE_CLINIC,
     MANAGE_BILLING_ALL,
+    MANAGE_CLINIC_STATUS,
     MANAGE_DENTIVA_STAFF,
     MANAGE_FEATURE_FLAGS,
     MANAGE_LEADS,
@@ -135,6 +136,43 @@ class ClinicDetail(BaseModel):
     user_count: int
     call_count: int
     booking_count: int
+    # ADM-CLIENT-360: the full clinic profile in one card.
+    address: str | None = None
+    phone_number: str | None = None
+    transfer_phone_number: str | None = None
+    ai_phone_number: str | None = None
+    forwarding_instruction: str = ""
+    business_hours: dict = {}
+    agent_name: str | None = None
+    agent_greeting: str | None = None
+    onboarding_step: int = 0
+    created_at: datetime | None = None
+    owner_email: str | None = None
+    # Knowledge-base coverage (counts only — no PHI): shows how "trained" the agent is.
+    kb_providers: int = 0
+    kb_insurances: int = 0
+    kb_has_policies: bool = False
+    kb_has_emergency: bool = False
+
+
+class BaaHistoryRow(BaseModel):
+    document_version: str
+    signer_name: str
+    signer_title: str
+    signed_at: datetime | None
+    signer_ip: str | None
+
+
+class ClinicEdit(BaseModel):
+    """Admin-side edits to a clinic profile (super-admin support ops)."""
+    name: str | None = None
+    timezone: str | None = None
+    phone_number: str | None = None
+    transfer_phone_number: str | None = None
+    business_hours: dict | None = None
+    languages_enabled: list[str] | None = None
+    agent_name: str | None = None
+    agent_greeting: str | None = None
 
 
 @router.get("/clinics/{practice_id}", response_model=ClinicDetail)
@@ -156,6 +194,10 @@ async def clinic_detail(
         users = (await session.execute(
             select(func.count()).select_from(User).where(User.practice_id == practice_id)
         )).scalar_one()
+        owner_email = (await session.execute(
+            select(User.email).where(User.practice_id == practice_id, User.role == "owner")
+            .limit(1)
+        )).scalar_one_or_none()
         # PHI tables (calls) are RLS-protected; bind the tenant just for these
         # COUNTs (no PHI columns selected). This read is audited below.
         from app.db import set_tenant
@@ -169,6 +211,11 @@ async def clinic_detail(
         await _audit(session, ctx, "admin_view_clinic", practice_id=practice_id)
         await session.commit()
 
+    from app.config import get_settings as _gs
+    from app.services.call_routing import forwarding_instruction
+    _s = _gs()
+    agent = p.agent_settings or {}
+    kb = p.knowledge_base or {}
     return ClinicDetail(
         id=str(p.id), name=p.name, status=p.status, timezone=p.timezone,
         pms_system=p.pms_system, languages_enabled=list(p.languages_enabled),
@@ -179,7 +226,82 @@ async def clinic_detail(
         cancel_at_period_end=bool(sub.cancel_at_period_end) if sub else False,
         current_period_end=sub.current_period_end if sub else None,
         user_count=users, call_count=calls, booking_count=bookings,
+        address=p.address, phone_number=p.phone_number,
+        transfer_phone_number=p.transfer_phone_number,
+        ai_phone_number=_s.retell_from_number or None,
+        forwarding_instruction=forwarding_instruction(
+            answer_mode=p.answer_mode, rings_before_ai=p.rings_before_ai,
+            ai_number=_s.retell_from_number or None),
+        business_hours=p.business_hours or {},
+        agent_name=(str(agent.get("agent_name") or "").strip() or "Alex"),
+        agent_greeting=(str(agent.get("greeting") or "").strip() or None),
+        onboarding_step=p.onboarding_step, created_at=p.created_at,
+        owner_email=owner_email,
+        kb_providers=len(kb.get("providers") or []),
+        kb_insurances=len(kb.get("insurances") or []),
+        kb_has_policies=bool(any((kb.get("policies") or {}).values())),
+        kb_has_emergency=bool(kb.get("emergency")),
     )
+
+
+@router.get("/clinics/{practice_id}/baa-history", response_model=list[BaaHistoryRow])
+async def clinic_baa_history(
+    practice_id: uuid.UUID,
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_CLINIC_DETAIL)),
+) -> list[BaaHistoryRow]:
+    """Signed-BAA history for a clinic — the compliance record (who signed which
+    version, when, from what IP). Read-only, audited."""
+    from app.models.baa_acceptance import BaaAcceptance
+    async with _app_db.async_session_factory() as session:
+        rows = (await session.execute(
+            select(BaaAcceptance).where(BaaAcceptance.practice_id == practice_id)
+            .order_by(BaaAcceptance.created_at.desc())
+        )).scalars().all()
+        await _audit(session, ctx, "admin_view_baa_history", practice_id=practice_id)
+        await session.commit()
+    return [
+        BaaHistoryRow(
+            document_version=r.document_version, signer_name=r.signer_name,
+            signer_title=r.signer_title, signed_at=r.created_at, signer_ip=r.signer_ip,
+        ) for r in rows
+    ]
+
+
+@router.patch("/clinics/{practice_id}", response_model=ClinicDetail)
+async def edit_clinic(
+    practice_id: uuid.UUID,
+    payload: ClinicEdit,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_CLINIC_STATUS)),
+) -> ClinicDetail:
+    """Admin edit of a clinic profile (support ops). Only provided fields change;
+    agent persona is merged into agent_settings. Audited with the changed keys."""
+    async with _app_db.async_session_factory() as session:
+        p = (await session.execute(
+            select(Practice).where(Practice.id == practice_id)
+        )).scalar_one_or_none()
+        if p is None:
+            raise HTTPException(status_code=404, detail="Clinic not found.")
+        changed: list[str] = []
+        for field in ("name", "timezone", "phone_number", "transfer_phone_number",
+                      "business_hours", "languages_enabled"):
+            val = getattr(payload, field)
+            if val is not None and val != getattr(p, field):
+                setattr(p, field, val)
+                changed.append(field)
+        if payload.agent_name is not None or payload.agent_greeting is not None:
+            agent = dict(p.agent_settings or {})
+            if payload.agent_name is not None and payload.agent_name.strip():
+                agent["agent_name"] = payload.agent_name.strip()
+                changed.append("agent_name")
+            if payload.agent_greeting is not None:
+                agent["greeting"] = payload.agent_greeting.strip()
+                changed.append("agent_greeting")
+            p.agent_settings = agent
+        await _audit(session, ctx, "admin_edit_clinic", practice_id=practice_id,
+                     meta={"changed": changed})
+        await session.commit()
+    # Return the fresh detail (reuse the reader).
+    return await clinic_detail(practice_id, ctx)  # type: ignore[arg-type]
 
 
 # ===========================================================================
