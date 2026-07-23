@@ -84,6 +84,8 @@ async def create_web_call(
             )
         if resp.status_code >= 400:
             logger.warning("create-web-call failed: %s %s", resp.status_code, resp.text[:300])
+            from app.observability.alerts import record_alert
+            record_alert("web_call_failed", f"retell_status={resp.status_code}")
             # Surface Retell's status so a misconfig (401 wrong key / 404 wrong
             # agent id — e.g. env still points at the OLD Retell account) is visible
             # instead of a vague "try again". The body is never echoed (may leak).

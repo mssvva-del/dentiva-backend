@@ -21,6 +21,7 @@ import re
 import httpx
 
 from app.config import get_settings
+from app.observability.alerts import record_alert
 
 logger = logging.getLogger("dentiva.services.sms")
 
@@ -224,12 +225,14 @@ async def send_sms(
                 _last4(dest),
                 resp.text[:300],
             )
+            record_alert("twilio_send_failed", f"status={resp.status_code}")
             return {"error": "twilio_rejected", "status": resp.status_code}
         payload = resp.json()
         logger.info("sms: sent to …%s sid=%s", _last4(dest), payload.get("sid"))
         return {"sent": True, "sid": payload.get("sid")}
     except Exception as exc:  # noqa: BLE001 — fail-safe: SMS must never break booking
         logger.warning("sms: send failed to …%s: %s", _last4(dest), exc)
+        record_alert("twilio_send_failed", f"exc={type(exc).__name__}")
         return {"error": "send_failed", "detail": str(exc)}
     finally:
         if owns_client:

@@ -197,6 +197,38 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/health/detailed")
+async def health_detailed() -> JSONResponse:
+    """At-a-glance operational health (NO PHI) — for an external uptime monitor
+    and the ops dashboard. Reports DB reachability, whether the voice/SMS
+    dependencies are configured, and how many critical alerts fired this hour.
+    Returns 503 if the DB is down OR alerts are firing, so UptimeRobot pages."""
+    from sqlalchemy import text as _text
+
+    import app.db as app_db
+    from app.observability.alerts import recent_alerts
+
+    settings = get_settings()
+    db_ok = True
+    try:
+        async with app_db.async_session_factory() as session:
+            await session.execute(_text("SELECT 1"))
+    except Exception:  # noqa: BLE001
+        db_ok = False
+
+    alerts = recent_alerts()
+    body = {
+        "status": "ok" if (db_ok and alerts["count_last_hour"] == 0) else "degraded",
+        "db": "ok" if db_ok else "down",
+        "voice_configured": bool(settings.retell_api_key and settings.retell_agent_id),
+        "sms_enabled": bool(settings.sms_enabled and settings.twilio_auth_token),
+        "webhook_verified": bool(settings.retell_webhook_secret),
+        "alerts": alerts,
+    }
+    code = 200 if body["status"] == "ok" else 503
+    return JSONResponse(status_code=code, content=body)
+
+
 @app.get("/health/ready")
 async def health_ready() -> JSONResponse:
     """Readiness — verifies the DB is reachable (SELECT 1)."""
