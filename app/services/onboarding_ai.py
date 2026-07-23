@@ -29,7 +29,10 @@ logger = logging.getLogger("dentiva.onboarding_ai")
 
 _MAX_PAGE_BYTES = 400_000
 _MAX_TOTAL_CHARS = 24_000
-_SUBPAGES = ("about", "services", "contact", "team", "our-team", "insurance")
+_SUBPAGES = (
+    "about", "about-us", "services", "contact", "contact-us", "team",
+    "our-team", "insurance", "location", "locations", "hours", "appointments",
+)
 
 _EXTRACT_PROMPT = """You are configuring an AI phone receptionist for a US dental practice.
 From the website text below, extract ONLY facts that are actually present.
@@ -50,6 +53,7 @@ Respond with a SINGLE JSON object, no prose, exactly this shape:
     "appointment_types": [{"name": str, "minutes": int|null, "new_patient": bool}],
     "insurances": [str],
     "self_pay": bool|null,
+    "current_offer": str|null,
     "policies": {"cancellation": str|null, "late": str|null,
                  "new_patient": str|null, "parking": str|null}
   },
@@ -58,6 +62,13 @@ Respond with a SINGLE JSON object, no prose, exactly this shape:
 }
 
 Rules:
+- If a line starting with "CONTACT:" appears, it holds the practice's real phone
+  and address pulled straight from the page markup — treat it as authoritative
+  for the "phone" and "address" fields.
+- phone: return US digits, formatted "+1XXXXXXXXXX" when you can.
+- current_offer: the practice's OWN promotion/special if the site advertises one
+  (e.g. "New patient exam + X-rays $99", "Free whitening with new-patient visit").
+  This is the clinic's marketing offer, NOT insurance. null if none is shown.
 - NEVER invent facts. Anything not on the site → null/[] and add a gap.
 - gaps: the 3-5 MOST important missing pieces for a receptionist (e.g. insurances
   not listed, no emergency/after-hours number, hours missing, cancellation policy
@@ -84,8 +95,32 @@ def _is_public_host(host: str) -> bool:
     return bool(infos)
 
 
+def _harvest_contact(html: str) -> str:
+    """Pull the name/address/phone that live in markup, not visible prose.
+
+    A dental site's phone and address almost always sit in the footer as a
+    ``tel:`` link and an ``<address>`` block. We surface them as an explicit
+    CONTACT line so the LLM can't miss them even if the surrounding layout is
+    noisy — this is exactly what used to be lost when the footer was stripped.
+    """
+    tels = re.findall(r'href=["\']tel:([^"\']+)["\']', html, re.I)
+    addrs = re.findall(r"(?is)<address[^>]*>(.*?)</address>", html)
+    bits: list[str] = []
+    for t in dict.fromkeys(tels):  # dedupe, keep order
+        bits.append(f"phone: {t.strip()}")
+    for a in addrs:
+        clean = re.sub(r"(?s)<[^>]+>", " ", a)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        if clean:
+            bits.append(f"address: {clean}")
+    return ("CONTACT: " + " | ".join(bits) + "\n") if bits else ""
+
+
 def _strip_html(html: str) -> str:
-    html = re.sub(r"(?is)<(script|style|noscript|svg|nav|footer)[^>]*>.*?</\1>", " ", html)
+    # Strip only noise. KEEP <footer>/<nav>/<header> — the name, address and
+    # phone (NAP) usually live in the footer; removing it was why address/phone
+    # went missing while body-widget hours came through.
+    html = re.sub(r"(?is)<(script|style|noscript|svg|template)[^>]*>.*?</\1>", " ", html)
     html = re.sub(r"(?s)<[^>]+>", " ", html)
     html = re.sub(r"&[a-z#0-9]+;", " ", html)
     return re.sub(r"\s+", " ", html).strip()
@@ -112,7 +147,8 @@ async def fetch_website_text(url: str) -> str:
             try:
                 r = await client.get(u)
                 if r.status_code == 200 and "text/html" in r.headers.get("content-type", "html"):
-                    chunks.append(_strip_html(r.text[:_MAX_PAGE_BYTES]))
+                    raw = r.text[:_MAX_PAGE_BYTES]
+                    chunks.append(_harvest_contact(raw) + _strip_html(raw))
             except httpx.HTTPError:
                 pass  # a missing subpage is normal
 
@@ -212,6 +248,8 @@ def _sane(profile: dict) -> dict:
         ][:12],
         "insurances": [str(i)[:60] for i in (kb.get("insurances") or [])][:15],
         "self_pay": kb.get("self_pay") if isinstance(kb.get("self_pay"), bool) else None,
+        "current_offer": (str(kb.get("current_offer"))[:300]
+                          if kb.get("current_offer") else None),
         "policies": {
             k: (str(v)[:300] if v else None)
             for k, v in (kb.get("policies") or {}).items()

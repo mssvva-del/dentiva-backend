@@ -27,6 +27,7 @@ def _build_practice_me(practice: Practice) -> PracticeMe:
     return PracticeMe(
         id=str(practice.id),
         name=practice.name,
+        address=practice.address,
         timezone=practice.timezone,
         phone_number=practice.phone_number,
         transfer_phone_number=practice.transfer_phone_number,
@@ -79,6 +80,10 @@ async def update_practice_me(
     if payload.name is not None and payload.name != db_practice.name:
         db_practice.name = payload.name
         changed_fields.append("name")
+
+    if payload.address is not None and payload.address != db_practice.address:
+        db_practice.address = payload.address
+        changed_fields.append("address")
 
     if payload.phone_number is not None and payload.phone_number != db_practice.phone_number:
         db_practice.phone_number = payload.phone_number

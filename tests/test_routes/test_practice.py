@@ -99,6 +99,28 @@ async def test_patch_practice_me_update_multiple_fields(client, db_session):
     assert body["languages_enabled"] == ["en", "es"]
 
 
+async def test_patch_practice_me_update_address(client, db_session):
+    # Doctor edits the clinic address post-onboarding (Settings → Practice Identity).
+    org_id = _uid("org_addr1")
+    user_id = _uid("user_addr1")
+    await seed_practice(
+        db_session, name="Addr Practice", clerk_org_id=org_id, clerk_user_id=user_id
+    )
+    resp = await client.patch(
+        "/api/practice/me",
+        json={"address": "500 Elm St, Suite 4, Denver, CO 80202"},
+        headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["address"] == "500 Elm St, Suite 4, Denver, CO 80202"
+    # persisted + surfaced on the next GET
+    getr = await client.get(
+        "/api/practice/me",
+        headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
+    )
+    assert getr.json()["address"] == "500 Elm St, Suite 4, Denver, CO 80202"
+
+
 async def test_patch_practice_me_empty_body_returns_200_unchanged(client, db_session):
     org_id = _uid("org_patch3")
     user_id = _uid("user_patch3")

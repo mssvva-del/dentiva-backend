@@ -171,11 +171,12 @@ async def analyze_website(
     if any(v for v in profile["business_hours"].values()):
         p.business_hours = profile["business_hours"]
     kb = profile["knowledge_base"]
-    if any([kb.get("providers"), kb.get("insurances"),
-            kb.get("appointment_types"), any((kb.get("policies") or {}).values())]):
+    if any([kb.get("providers"), kb.get("insurances"), kb.get("appointment_types"),
+            kb.get("current_offer"), any((kb.get("policies") or {}).values())]):
         # Merge over any existing KB, keeping prior sections the site didn't cover.
         merged = dict(p.knowledge_base or {})
-        for key in ("providers", "appointment_types", "insurances", "self_pay", "policies"):
+        for key in ("providers", "appointment_types", "insurances", "self_pay",
+                    "current_offer", "policies"):
             if kb.get(key) not in (None, [], {}):
                 merged[key] = kb[key]
         p.knowledge_base = merged
