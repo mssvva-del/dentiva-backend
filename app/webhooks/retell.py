@@ -38,6 +38,7 @@ from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.waitlist_entry import WaitlistEntry
 from app.services.availability import compute_native_slots, slot_to_utc
+from app.services.call_outcome import BOOKED, classify_outcome
 from app.services.sms import (
     send_booking_confirmation,
     send_cancellation_notice,
@@ -474,12 +475,21 @@ async def _handle_call_ended(payload: dict) -> dict:
         if language:
             call.language_detected = language
 
-        # Determine outcome: booked if a booking exists for this call.
+        # Classify the outcome from every signal we have at hang-up. intent /
+        # escalation may already be present if call_analyzed arrived first (event
+        # order isn't guaranteed); call_analyzed re-runs this once they're known.
         booking_result = await session.execute(
             select(Booking.id).where(Booking.source_call_id == call.id)
         )
         booking_exists = booking_result.scalar_one_or_none() is not None
-        call.outcome = "booked" if booking_exists else "info_only"
+        call.outcome = classify_outcome(
+            booking_exists=booking_exists,
+            call_status=call_status,
+            disconnection_reason=disconnection_reason,
+            duration_seconds=call.duration_seconds,
+            escalation_needed=call.escalation_needed,
+            call_intent=call.call_intent,
+        )
         call.status = call_status
 
         # Billing metering (Phase D): a completed call adds its minutes to the
@@ -552,6 +562,21 @@ async def _handle_call_analyzed(payload: dict) -> dict:
             call.escalation_needed = escalation_needed
         if hipaa_compliant is not None:
             call.hipaa_compliant = hipaa_compliant
+
+        # Refine the outcome now that intent/escalation are known — this is what
+        # separates a lost booking (no_booking) or emergency from a plain
+        # info_only that call_ended could only guess at. Never downgrade a booking.
+        if call.outcome != BOOKED:
+            booking_exists = (await session.execute(
+                select(Booking.id).where(Booking.source_call_id == call.id)
+            )).scalar_one_or_none() is not None
+            call.outcome = classify_outcome(
+                booking_exists=booking_exists,
+                call_status=call.status,
+                duration_seconds=call.duration_seconds,
+                escalation_needed=call.escalation_needed,
+                call_intent=call.call_intent,
+            )
 
         await session.commit()
 

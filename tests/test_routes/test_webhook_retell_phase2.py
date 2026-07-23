@@ -144,6 +144,69 @@ async def test_call_ended_updates_call_row(client, db_session):
     assert call.duration_seconds == 142
     assert call.transcript_jsonb is not None
     assert isinstance(call.transcript_jsonb, list)
+    # No intent known yet + real conversation + no booking → info_only.
+    assert call.outcome == "info_only"
+
+
+async def test_call_ended_short_call_is_abandoned(client, db_session):
+    """A call that connects but drops in seconds classifies as abandoned, not info_only."""
+    await seed_practice(
+        db_session, name="Abandon DC", clerk_org_id="org_ab1", clerk_user_id="user_ab1"
+    )
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "retell-ab-001",
+        "call": {"from_number": "+15550001111", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    await client.post("/webhooks/retell", json={
+        "event": "call_ended", "call_id": "retell-ab-001",
+        "call": {"start_timestamp": 1748563200000,
+                 "end_timestamp": 1748563204000,  # 4 seconds
+                 "disconnection_reason": "user_hangup",
+                 "transcript": [{"role": "agent", "content": "Thanks for calling…"}]},
+    })
+    await db_session.commit()
+    call = (await db_session.execute(
+        select(Call).where(Call.retell_call_id == "retell-ab-001")
+    )).scalar_one()
+    assert call.outcome == "abandoned"
+
+
+async def test_call_analyzed_upgrades_info_only_to_no_booking(client, db_session):
+    """call_ended can only guess info_only; call_analyzed learns the caller wanted an
+    appointment (intent) and refines the outcome to the lost-booking signal."""
+    await seed_practice(
+        db_session, name="Lost Booking DC", clerk_org_id="org_lb1", clerk_user_id="user_lb1"
+    )
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "retell-lb-001",
+        "call": {"from_number": "+15552223333", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    await client.post("/webhooks/retell", json={
+        "event": "call_ended", "call_id": "retell-lb-001",
+        "call": {"start_timestamp": 1748563200000,
+                 "end_timestamp": 1748563290000,  # 90s real conversation
+                 "disconnection_reason": "user_hangup",
+                 "transcript": [{"role": "user", "content": "I wanted to book a cleaning."}]},
+    })
+    await db_session.commit()
+    call = (await db_session.execute(
+        select(Call).where(Call.retell_call_id == "retell-lb-001")
+    )).scalar_one()
+    assert call.outcome == "info_only"  # intent unknown at hang-up
+
+    # Now the analysis arrives: the caller was trying to book.
+    await client.post("/webhooks/retell", json={
+        "event": "call_analyzed", "call_id": "retell-lb-001",
+        "call_analysis": {"custom_analysis_data": {"intent": "book_appointment"}},
+    })
+    await db_session.commit()
+    db_session.expire_all()  # drop the identity-map cache so we read the fresh row
+    call = (await db_session.execute(
+        select(Call).where(Call.retell_call_id == "retell-lb-001")
+    )).scalar_one()
+    assert call.outcome == "no_booking"  # refined → lost-booking signal for QA
 
 
 async def test_call_ended_saves_recording_url(client, db_session):

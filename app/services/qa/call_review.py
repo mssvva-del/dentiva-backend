@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models.call import Call
+from app.services.call_outcome import FAILURE_OUTCOMES
 from app.services.onboarding_ai import _anthropic_json
 
 logger = logging.getLogger("dentiva.qa")
@@ -51,9 +52,8 @@ async def _llm_json(prompt: str) -> dict:
         raise ValueError("qa_review_unparseable")
     return json.loads(match.group(0))
 
-# Outcomes that mean "the call didn't reach its goal" — what we learn from.
-FAILURE_OUTCOMES = frozenset({"missed", "no_answer", "abandoned", "failed",
-                              "info_only", "no_booking", "escalated"})
+# FAILURE_OUTCOMES is the single source of truth in app.services.call_outcome —
+# the same taxonomy the webhook writes, so QA and classification never drift.
 
 _REVIEW_PROMPT = """You are a call-QA analyst improving an AI dental receptionist.
 Given ONE call transcript and its outcome, judge the AGENT's performance only.
