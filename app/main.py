@@ -269,9 +269,11 @@ app.include_router(clerk.router)
 app.include_router(stripe.router)
 app.include_router(knowledge_base.router)
 
-# Groq custom-LLM relay for Retell — mounted ONLY when enabled, so the demo keeps
-# using the Retell-managed model until a clinic is deliberately switched over.
-if get_settings().enable_llm_relay:
+# Groq custom-LLM relay for Retell — mounted ONLY in NON-production and only when
+# enabled. In production it processes live-call PHI without a BAA, so the startup
+# guard (verify_security_config) hard-fails if the flag is on; this mount is a
+# second line of defense (never mount it in prod even if the guard is bypassed).
+if get_settings().enable_llm_relay and get_settings().environment != "production":
     from app.api.llm_relay import router as llm_relay_router
 
     app.include_router(llm_relay_router)

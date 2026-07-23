@@ -30,6 +30,9 @@ def _prod_settings(**overrides) -> Settings:
         # STRIPE_* leaking in from .env; the Stripe tests set these deliberately.
         stripe_secret_key="",
         stripe_webhook_secret="",
+        # conftest sets ENABLE_LLM_RELAY=true globally; the base must be false so
+        # the Groq-in-prod guard doesn't fire on the happy-path tests.
+        enable_llm_relay=False,
     )
     base.update(overrides)
     return Settings(**base)
@@ -65,6 +68,12 @@ def test_raises_when_twilio_token_missing_with_validation_on():
 def test_raises_when_rate_limit_disabled_in_production():
     with pytest.raises(RuntimeError, match="RATE_LIMIT_ENABLED"):
         verify_security_config(_prod_settings(rate_limit_enabled=False))
+
+
+def test_raises_when_groq_relay_enabled_in_production():
+    # Groq processes live-call PHI without a BAA → must never be on in prod.
+    with pytest.raises(RuntimeError, match="ENABLE_LLM_RELAY"):
+        verify_security_config(_prod_settings(enable_llm_relay=True))
 
 
 def test_raises_when_cors_is_localhost_in_production():

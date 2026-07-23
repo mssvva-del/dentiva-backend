@@ -143,6 +143,17 @@ def verify_security_config(settings: Settings) -> None:
                 "the exact dashboard domain(s), e.g. https://app.dentovox.com."
             )
 
+        # Groq processes the LIVE CALL conversation (PHI) and has no signed BAA
+        # (VENDOR_BAA_DECISION: "Groq out of the PHI path"). The custom-LLM relay
+        # must never carry patient calls in production — hard-fail if it's enabled.
+        # (Groq as a website-text extractor in onboarding is fine — no PHI there.)
+        if settings.enable_llm_relay:
+            raise RuntimeError(
+                "SECURITY VIOLATION: ENABLE_LLM_RELAY=true in production routes live "
+                "patient calls (PHI) through Groq, which has no BAA. Disable it "
+                "(ENABLE_LLM_RELAY=false) — the call LLM runs Retell-native."
+            )
+
         # If Stripe is live (secret key present), the webhook signature secret must
         # be set — otherwise a forged webhook could flip subscription state / grant
         # access. The /webhooks/stripe route already rejects when unset, but fail at
