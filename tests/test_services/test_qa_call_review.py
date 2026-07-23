@@ -86,7 +86,7 @@ async def test_review_rolls_up_patterns(monkeypatch, db_session):
             transcript=[{"role": "agent", "content": f"tokenAlpha {i}"}], minutes_ago=i,
         ))
     db_session.add(_mk_call(
-        practice.id, outcome="escalated",
+        practice.id, outcome="abandoned",
         transcript=[{"role": "agent", "content": "tokenBravo"}], minutes_ago=10,
     ))
     db_session.add(_mk_call(
