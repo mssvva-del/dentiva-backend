@@ -90,6 +90,16 @@ def _render_kb(kb: dict) -> str:
         if rendered:
             lines.append("VISIT TYPES: " + "; ".join(rendered) + ".")
 
+    # The clinic's own current promotion/special (e.g. "New patient exam + X-rays
+    # $99"). Surfaced early so it survives the block cap. The agent mentions it
+    # when a caller asks about price / being a new patient / is on the fence.
+    offer = kb.get("current_offer")
+    if isinstance(offer, str) and offer.strip():
+        lines.append(
+            "CURRENT OFFER (mention when a caller asks about price, is a new "
+            f"patient, or is deciding): {offer.strip()}"
+        )
+
     ins = kb.get("insurances")
     ins_part = ""
     if isinstance(ins, list) and ins:

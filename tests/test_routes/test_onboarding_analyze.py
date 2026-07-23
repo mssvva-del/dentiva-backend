@@ -112,6 +112,38 @@ async def test_fetch_rejects_bad_schemes(bad):
         await ai.fetch_website_text(bad)
 
 
+def test_strip_html_keeps_footer_and_nav():
+    # regression: footer/nav hold the NAP (name/address/phone). Stripping them
+    # was why address/phone went missing while body hours came through.
+    html = (
+        "<body><main>Welcome</main>"
+        "<footer>Smile Dental · 123 Main St, Orange, CA 92866 · (714) 555-0100</footer>"
+        "</body>"
+    )
+    text = ai._strip_html(html)
+    assert "123 Main St" in text
+    assert "(714) 555-0100" in text
+    # noise is still removed
+    assert "alert" not in ai._strip_html("<script>alert(1)</script>hi")
+
+
+def test_harvest_contact_pulls_tel_and_address():
+    html = (
+        '<a href="tel:+17145550100">Call us</a>'
+        '<a href="tel:+17145550100">again</a>'  # dupe collapses
+        "<address>123 Main St, Orange, CA 92866</address>"
+    )
+    out = ai._harvest_contact(html)
+    assert out.startswith("CONTACT:")
+    assert "phone: +17145550100" in out
+    assert out.count("phone:") == 1  # deduped
+    assert "address: 123 Main St, Orange, CA 92866" in out
+
+
+def test_harvest_contact_empty_when_no_markup():
+    assert ai._harvest_contact("<p>just prose, no contact markup</p>") == ""
+
+
 def test_sane_bounds_garbage():
     junk = {
         "clinic": {"name": "X" * 999, "languages": ["en", "fr", "es"]},

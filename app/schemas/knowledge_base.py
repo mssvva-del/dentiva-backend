@@ -92,6 +92,10 @@ class KnowledgeBase(BaseModel):
     insurances: list[str] | None = None
     # Whether the practice accepts patients without insurance.
     self_pay: bool | None = None
+    # The clinic's OWN current promotion/special (e.g. "New patient exam + X-rays
+    # $99"). The agent mentions it to callers who ask about price / are new / are
+    # on the fence. Not insurance, not our platform discount.
+    current_offer: str | None = Field(default=None, max_length=300)
     policies: Policies | None = None
     emergency: Emergency | None = None
 

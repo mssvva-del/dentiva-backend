@@ -8,6 +8,7 @@ from app.services.call_routing import ANSWER_MODES
 class PracticeMe(BaseModel):
     id: str
     name: str
+    address: str | None = None
     timezone: str
     phone_number: str | None
     transfer_phone_number: str | None = None
@@ -31,6 +32,7 @@ class PracticeMe(BaseModel):
 
 class PracticeUpdate(BaseModel):
     name: str | None = None
+    address: str | None = Field(default=None, max_length=300)
     timezone: str | None = None
     phone_number: str | None = None
     transfer_phone_number: str | None = None

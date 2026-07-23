@@ -41,6 +41,16 @@ def test_prompt_renders_structured_knowledge_base():
     assert "Never promise coverage" in prompt
 
 
+def test_prompt_renders_current_offer():
+    # The clinic's own promotion must reach the agent so it can mention it.
+    p = _practice(current_offer="New patient exam + X-rays $99")
+    prompt = build_system_prompt(p)
+    assert "CURRENT OFFER" in prompt
+    assert "New patient exam + X-rays $99" in prompt
+    # blank/absent offer → no CURRENT OFFER line
+    assert "CURRENT OFFER" not in build_system_prompt(_practice())
+
+
 def test_prompt_tolerates_empty_and_partial_kb():
     # No KB → still a valid prompt, no crash.
     assert "Riverside Dental" in build_system_prompt(_practice())
