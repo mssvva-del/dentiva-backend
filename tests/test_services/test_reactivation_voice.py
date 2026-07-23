@@ -193,3 +193,25 @@ async def test_apply_outcome_no_answer_and_unknown(db_session):
     assert refreshed.outcome == "no_answer"
     # unknown call id → not our touch
     assert await apply_voice_outcome(db_session, practice.id, "nope", booked=True) is False
+
+
+# ── outbound agent selection ─────────────────────────────────────────────────
+def test_agent_for_prefers_dedicated_outbound(monkeypatch):
+    """Outbound calls use the dedicated outbound agent (waits for 'hello'); the
+    inbound agent is only a fallback. Spanish-specific wins for Spanish."""
+    from app.config import get_settings
+    from app.services.reactivation.voice import _agent_for
+
+    monkeypatch.setenv("RETELL_AGENT_ID", "agent_inbound")
+    monkeypatch.setenv("RETELL_OUTBOUND_AGENT_ID", "agent_outbound")
+    monkeypatch.setenv("RETELL_AGENT_ID_ES", "agent_es")
+    get_settings.cache_clear()
+    try:
+        assert _agent_for("en") == "agent_outbound"
+        assert _agent_for("es") == "agent_es"
+        # No outbound configured → fall back to the inbound agent.
+        monkeypatch.delenv("RETELL_OUTBOUND_AGENT_ID", raising=False)
+        get_settings.cache_clear()
+        assert _agent_for("en") == "agent_inbound"
+    finally:
+        get_settings.cache_clear()

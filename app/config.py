@@ -116,6 +116,10 @@ class Settings(BaseSettings):
     # added here later; default falls back to retell_agent_id.
     retell_from_number: str = ""
     retell_agent_id_es: str = ""  # optional Spanish-specific outbound agent
+    # Dedicated OUTBOUND agent (empty begin_message + delay → waits for "hello";
+    # start_speaker doesn't exist in Retell, so a separate agent is how outbound
+    # avoids talking over the person). Falls back to retell_agent_id when unset.
+    retell_outbound_agent_id: str = ""
 
     # Stripe (Phase D). Test-mode keys first; Sergio provides them later. When
     # stripe_secret_key is empty, billing API calls (checkout) return a clear

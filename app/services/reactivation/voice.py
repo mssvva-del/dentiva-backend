@@ -89,11 +89,15 @@ class RetellOutboundClient:
 
 
 def _agent_for(language: str) -> str | None:
-    """Pick the outbound agent for the language (Spanish-specific if configured)."""
+    """Pick the OUTBOUND agent. Prefer the dedicated outbound agent (empty
+    begin_message + delay so it WAITS for the person to say 'hello' — talking over
+    them causes an instant hangup, per the B&H campaign data). Spanish-specific
+    agent wins if configured; falls back to the inbound agent only if no outbound
+    agent is set."""
     s = get_settings()
     if (language or "").lower().startswith("es") and s.retell_agent_id_es:
         return s.retell_agent_id_es
-    return s.retell_agent_id or None
+    return s.retell_outbound_agent_id or s.retell_agent_id or None
 
 
 async def make_voice_touch(
