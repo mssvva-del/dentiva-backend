@@ -123,3 +123,47 @@ async def test_audit_viewer_returns_rows(client, db_session):
     r = await client.get("/api/admin/audit-logs", headers=_h("sup1"))
     assert r.status_code == 200
     assert len(r.json()) >= 1
+
+
+# ── QA-LOOP-1: self-learning call review ─────────────────────────────────────
+async def test_qa_call_review_gated_and_shaped(client, db_session, monkeypatch):
+    # sales lacks VIEW_SYSTEM_HEALTH → 403
+    await _internal(db_session, clerk_id="qsal", role="sales")
+    assert (await client.get(
+        "/api/admin/qa/call-review", headers=_h("qsal"))).status_code == 403
+
+    # super_admin → 200, service mocked so no real LLM/DB scan needed
+    await _internal(db_session, clerk_id="qsa", role="super_admin")
+
+    async def _fake_review(_session, *, limit):
+        assert limit == 15
+        return {
+            "reviewed": 2, "lost_callers": 1,
+            "patterns": [{"category": "misheard-digits", "count": 1,
+                          "actionable": False, "fixes": ["confirm digits back"]}],
+            "findings": [{"call_id": "c1", "outcome": "no_booking", "lost_caller": True,
+                          "break_point": "digits", "why": "misheard",
+                          "prompt_fix": "confirm digits back", "category": "misheard-digits"}],
+        }
+
+    import app.services.qa.call_review as qa_mod
+    monkeypatch.setattr(qa_mod, "review_recent_failures", _fake_review)
+    r = await client.get("/api/admin/qa/call-review", headers=_h("qsa"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["reviewed"] == 2
+    assert body["patterns"][0]["category"] == "misheard-digits"
+
+
+async def test_qa_call_review_clamps_limit(client, db_session, monkeypatch):
+    await _internal(db_session, clerk_id="qsa2", role="super_admin")
+    seen = {}
+
+    async def _fake_review(_session, *, limit):
+        seen["limit"] = limit
+        return {"reviewed": 0, "lost_callers": 0, "patterns": [], "findings": []}
+
+    import app.services.qa.call_review as qa_mod
+    monkeypatch.setattr(qa_mod, "review_recent_failures", _fake_review)
+    await client.get("/api/admin/qa/call-review?limit=999", headers=_h("qsa2"))
+    assert seen["limit"] == 50  # clamped to max
