@@ -83,10 +83,13 @@ async def create_web_call(
                 },
             )
         if resp.status_code >= 400:
-            logger.warning("create-web-call failed: %s %s", resp.status_code, resp.text[:200])
+            logger.warning("create-web-call failed: %s %s", resp.status_code, resp.text[:300])
+            # Surface Retell's status so a misconfig (401 wrong key / 404 wrong
+            # agent id — e.g. env still points at the OLD Retell account) is visible
+            # instead of a vague "try again". The body is never echoed (may leak).
             raise HTTPException(
                 status_code=http_status.HTTP_502_BAD_GATEWAY,
-                detail="Could not start the voice demo. Try again.",
+                detail=f"Voice demo unavailable (provider returned {resp.status_code}).",
             )
         data = resp.json()
     except HTTPException:
