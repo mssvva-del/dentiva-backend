@@ -580,6 +580,49 @@ async def system_health(
 
 
 # ===========================================================================
+# 9b. Self-learning loop — QA review of failed calls (QA-LOOP-1)
+# ===========================================================================
+class QaFinding(BaseModel):
+    call_id: str
+    outcome: str | None
+    lost_caller: bool
+    break_point: str
+    why: str
+    prompt_fix: str
+    category: str
+
+
+class QaPattern(BaseModel):
+    category: str
+    count: int
+    actionable: bool  # seen 3+ times → worth a prompt change (B&H rule)
+    fixes: list[str]
+
+
+class QaReview(BaseModel):
+    reviewed: int
+    lost_callers: int
+    patterns: list[QaPattern]
+    findings: list[QaFinding]
+
+
+@router.get("/qa/call-review", response_model=QaReview)
+async def qa_call_review(
+    limit: int = 15,
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_SYSTEM_HEALTH)),
+) -> QaReview:
+    """Analyze recent FAILED calls → surface repeating failure patterns + prompt
+    fixes. Read-only; never auto-edits the prompt (a human applies). Cross-clinic
+    coordinator view of the shared agent's weak spots.
+    """
+    from app.services.qa.call_review import review_recent_failures
+    limit = max(1, min(limit, 50))
+    async with _app_db.async_session_factory() as session:
+        result = await review_recent_failures(session, limit=limit)
+    return QaReview(**result)
+
+
+# ===========================================================================
 # 10. Feature flags
 # ===========================================================================
 class FlagRow(BaseModel):
