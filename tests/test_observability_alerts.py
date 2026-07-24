@@ -16,6 +16,7 @@ def test_record_and_summarize_alerts(monkeypatch):
     assert s["count_last_hour"] == 3
     assert s["by_kind"] == {"twilio_send_failed": 2, "web_call_failed": 1}
     assert s["last_kind"] == "web_call_failed"
+    assert s["last_detail"] == "retell_status=404"  # code surfaced for diagnosis
 
 
 def test_alerts_age_out_after_an_hour():
