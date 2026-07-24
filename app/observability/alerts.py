@@ -53,4 +53,7 @@ def recent_alerts(*, now: float | None = None) -> dict:
         "count_last_hour": len(recent),
         "by_kind": by_kind,
         "last_kind": last[1] if last else None,
+        # detail is codes/counts/ids only (never PHI, by contract above) — safe to
+        # expose so remote diagnosis sees e.g. "retell_status=404" without logs.
+        "last_detail": last[2] if last else None,
     }
