@@ -55,14 +55,15 @@ async def test_call_search_by_number_uses_hmac(client, db_session):
 
     hdr = {"X-Dev-Clerk-User-Id": user, "X-Dev-Clerk-Org-Id": org}
     # Search by the full number (any format) → exact hmac match, one result.
-    r = await client.get("/api/calls", params={"search": "(305) 111-2222"}, headers=hdr)
+    # Phone search goes in the POST body (not the URL) — PHI out of logs.
+    r = await client.post("/api/calls/search", json={"search": "(305) 111-2222"}, headers=hdr)
     assert r.status_code == 200
     body = r.json()
     assert body["total"] == 1
     assert body["calls"][0]["from_number"] == "+13051112222"
 
     # A number not present → zero.
-    r0 = await client.get("/api/calls", params={"search": "3050000000"}, headers=hdr)
+    r0 = await client.post("/api/calls/search", json={"search": "3050000000"}, headers=hdr)
     assert r0.json()["total"] == 0
     # No search → both calls returned.
     rall = await client.get("/api/calls", headers=hdr)

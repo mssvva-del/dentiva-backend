@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import false as sa_false
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,19 +69,9 @@ def _parse_transcript(
     return turns
 
 
-@router.get("", response_model=CallListResponse)
-async def list_calls(
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-    direction: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-    search: str | None = Query(default=None),
-    practice: Practice = Depends(get_current_practice),
-    db: AsyncSession = Depends(get_tenant_db),
-    # WHY both a permission gate AND a practice_id filter: defense in depth.
-    # require_permission stops a wrong-role user; the practice_id WHERE (backed by
-    # RLS in get_tenant_db) stops cross-tenant reads. Neither alone is enough.
-    _user: User = Depends(require_permission(VIEW_CALLS)),
+async def _query_calls(
+    practice: Practice, db: AsyncSession, *,
+    limit: int, offset: int, direction: str | None, status: str | None, search: str | None,
 ) -> CallListResponse:
     base = select(Call).where(Call.practice_id == practice.id)
     if direction:
@@ -147,6 +138,48 @@ async def list_calls(
     return CallListResponse(
         calls=summaries, total=total, has_more=(offset + len(rows)) < total
     )
+
+
+# WHY both a permission gate AND a practice_id filter (in _query_calls): defense in
+# depth. require_permission stops a wrong-role user; the practice_id WHERE (RLS via
+# get_tenant_db) stops cross-tenant reads. Neither alone is enough.
+@router.get("", response_model=CallListResponse)
+async def list_calls(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    direction: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_CALLS)),
+) -> CallListResponse:
+    """List calls. Phone search is intentionally NOT a query param here — a raw
+    number in the URL would land in access logs / browser history (PHI). Search by
+    phone via POST /search instead."""
+    return await _query_calls(practice, db, limit=limit, offset=offset,
+                              direction=direction, status=status, search=None)
+
+
+class CallSearch(BaseModel):
+    search: str | None = None
+    direction: str | None = None
+    status: str | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+@router.post("/search", response_model=CallListResponse)
+async def search_calls(
+    body: CallSearch,
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+    _user: User = Depends(require_permission(VIEW_CALLS)),
+) -> CallListResponse:
+    """Filtered call list. The phone search travels in the request BODY (never the
+    URL) so PHI stays out of access logs and browser history."""
+    return await _query_calls(practice, db, limit=body.limit, offset=body.offset,
+                              direction=body.direction, status=body.status,
+                              search=body.search)
 
 
 @router.get("/active", response_model=ActiveCallsResponse)

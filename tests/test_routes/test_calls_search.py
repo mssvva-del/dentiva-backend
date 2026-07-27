@@ -72,9 +72,10 @@ async def test_calls_search_matches_from_number(client, db_session):
     )
 
     # Full number, differently formatted → matches via the normalized hash.
-    resp = await client.get(
-        "/api/calls",
-        params={"search": "(555) 123-4567"},
+    # Search travels in the POST body (never the URL) so PHI stays out of logs.
+    resp = await client.post(
+        "/api/calls/search",
+        json={"search": "(555) 123-4567"},
         headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
     )
     assert resp.status_code == 200
@@ -103,8 +104,9 @@ async def test_calls_search_no_match_returns_empty(client, db_session):
         to_number="+18005550100",
     )
 
-    resp = await client.get(
-        "/api/calls?search=nonexistent99999",
+    resp = await client.post(
+        "/api/calls/search",
+        json={"search": "nonexistent99999"},
         headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
     )
     assert resp.status_code == 200
@@ -135,15 +137,17 @@ async def test_calls_search_ignores_to_number(client, db_session):
     )
 
     # Searching the to_number → no match (only from_number/caller is searchable).
-    resp = await client.get(
-        "/api/calls?search=+15559876543",
+    resp = await client.post(
+        "/api/calls/search",
+        json={"search": "+15559876543"},
         headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
     )
     assert resp.status_code == 200
     assert resp.json()["total"] == 0
     # But searching the caller's from_number → matches.
-    resp2 = await client.get(
-        "/api/calls?search=+12125550100",
+    resp2 = await client.post(
+        "/api/calls/search",
+        json={"search": "+12125550100"},
         headers={"X-Dev-Clerk-User-Id": user_id, "X-Dev-Clerk-Org-Id": org_id},
     )
     assert resp2.json()["total"] == 1
