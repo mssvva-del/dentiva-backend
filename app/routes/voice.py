@@ -80,6 +80,11 @@ async def create_web_call(
                 json={
                     "agent_id": settings.retell_agent_id,
                     "retell_llm_dynamic_variables": dyn,
+                    # Web calls all use the shared demo agent, so the call_ended
+                    # webhook can't resolve the clinic from agent_id (it refuses to
+                    # guess with 2+ practices). Carry the practice explicitly so the
+                    # call logs under THIS clinic instead of an orphan row.
+                    "metadata": {"practice_id": str(_practice.id)},
                 },
             )
         if resp.status_code >= 400:
