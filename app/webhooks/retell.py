@@ -73,16 +73,14 @@ def _verify_signature(
     settings = get_settings()
     secret = settings.retell_webhook_secret
     if not secret:
-        # No secret configured → we CANNOT verify. We still allow the request so
-        # the live agent keeps working, but flag it loudly. SECURITY HOLE while
-        # unset: anyone who knows the URL could POST a fake book/cancel/transfer.
-        # Close it by setting RETELL_WEBHOOK_SECRET to the Retell API key.
+        # No secret → we cannot verify. In prod, FAIL CLOSED: reject rather than
+        # process a forgeable book/cancel/transfer. (verify_security_config already
+        # refuses to boot prod without this secret; this is the second guard so the
+        # two can never drift into an open hole.) Dev keeps working for local tests.
         if settings.environment == "production":
-            logger.error(
-                "RETELL_WEBHOOK_SECRET NOT set — webhooks are UNVERIFIED in production."
-            )
-        else:
-            logger.warning("RETELL_WEBHOOK_SECRET empty — skipping signature check (dev).")
+            logger.error("RETELL_WEBHOOK_SECRET NOT set in production — rejecting webhook.")
+            return False
+        logger.warning("RETELL_WEBHOOK_SECRET empty — skipping signature check (dev).")
         return True
     if not signature:
         return False

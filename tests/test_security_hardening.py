@@ -36,12 +36,15 @@ def test_retell_signature_strict_when_secret_set(monkeypatch):
     assert retell._verify_signature(b"body", "wrong") is False
 
 
-def test_retell_signature_allows_when_no_secret(monkeypatch):
-    # No secret → cannot verify; we allow (so the live agent keeps working) but
-    # log loudly. Closing the hole = set the secret on both sides (see report).
+def test_retell_signature_fails_closed_in_prod_when_no_secret(monkeypatch):
+    # No secret in prod → cannot verify → REJECT (audit #2). verify_security_config
+    # also refuses to boot prod without the secret; this is the second guard.
     import app.webhooks.retell as retell
 
     monkeypatch.setattr(retell, "get_settings", lambda: _FakeSettings("production", ""))
+    assert retell._verify_signature(b"body", None) is False
+    # dev still skips so local tests work
+    monkeypatch.setattr(retell, "get_settings", lambda: _FakeSettings("development", ""))
     assert retell._verify_signature(b"body", None) is True
 
 
