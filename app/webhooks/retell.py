@@ -367,6 +367,45 @@ async def _resolve_practice_meta(call_data: dict, agent_id: str | None) -> Pract
     return await _resolve_practice(agent_id)
 
 
+async def _ensure_call_row(retell_call_id: str, call_obj: dict) -> None:
+    """Make sure a calls row exists BEFORE a tool call is handled.
+
+    A web call can invoke book_appointment before call_started's row is committed
+    (or call_started may not fire at all), and every tool routes the tenant via
+    the call row — no row + 2 practices → routing refuses and the booking is
+    silently DROPPED. Create a minimal row from the tool payload's
+    metadata.practice_id so the booking/patient attach to the right clinic. If
+    call_started races us, the retell_call_id UNIQUE conflict is harmless.
+    """
+    if not retell_call_id:
+        return
+    pid = (call_obj.get("metadata") or {}).get("practice_id")
+    if not pid:
+        return
+    try:
+        practice_uuid = uuid.UUID(str(pid))
+    except ValueError:
+        return
+    async with _app_db.async_session_factory() as session:
+        await set_tenant(session, practice_uuid)
+        exists = (await session.execute(
+            select(Call.id).where(Call.retell_call_id == retell_call_id)
+        )).scalar_one_or_none()
+        if exists:
+            return
+        session.add(Call(
+            id=uuid.uuid4(), practice_id=practice_uuid, retell_call_id=retell_call_id,
+            direction=call_obj.get("direction") or "inbound",
+            from_number=call_obj.get("from_number") or "web",
+            to_number=call_obj.get("to_number") or "web",
+            started_at=datetime.now(tz=UTC), status="in_progress",
+        ))
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()  # call_started inserted first — fine
+
+
 async def _handle_call_started(payload: dict) -> dict:
     retell_call_id = payload.get("call_id") or payload.get("retell_call_id", "")
     call_data = payload.get("call", {}) or {}
@@ -1591,6 +1630,7 @@ async def retell_webhook(request: Request) -> dict:
         call_obj = payload.get("call", {}) or {}
         retell_call_id = call_obj.get("call_id") or payload.get("call_id", "")
         agent_id = call_obj.get("agent_id") or payload.get("agent_id")
+        await _ensure_call_row(retell_call_id, call_obj)
         return await _dispatch_function(
             payload["name"], retell_call_id, payload.get("args", {}) or {}, agent_id
         )
@@ -1607,6 +1647,7 @@ async def retell_webhook(request: Request) -> dict:
     if event == "function_call":
         call_obj = payload.get("call", {}) or {}
         agent_id = call_obj.get("agent_id") or payload.get("agent_id")
+        await _ensure_call_row(payload.get("call_id", ""), call_obj)
         return await _dispatch_function(
             payload.get("function_name"),
             payload.get("call_id", ""),
