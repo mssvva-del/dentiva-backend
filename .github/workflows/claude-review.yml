@@ -13,6 +13,8 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Advisory: never block a merge — even on a missing key or action error.
+    continue-on-error: true
     # Skip when the key isn't configured yet, so PRs aren't blocked by a red job.
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
