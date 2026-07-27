@@ -68,3 +68,12 @@ def test_unset_secret_skips_in_dev(monkeypatch):
         environment = "development"
     monkeypatch.setattr(retell_mod, "get_settings", lambda: _Dev())
     assert retell_mod._verify_signature(b"{}", None) is True  # dev skip (logged)
+
+
+def test_unset_secret_fails_closed_in_prod(monkeypatch):
+    class _Prod:
+        retell_webhook_secret = ""
+        environment = "production"
+    monkeypatch.setattr(retell_mod, "get_settings", lambda: _Prod())
+    # No secret in prod → reject, never process a forgeable webhook (audit #2).
+    assert retell_mod._verify_signature(b"{}", "v=1,d=abc") is False
