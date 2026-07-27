@@ -810,7 +810,8 @@ async def test_web_call_metadata_attributes_to_right_practice(client, db_session
     from app.db import set_tenant
     # Two clinics → _resolve_practice would refuse (None) without metadata.
     await seed_practice(db_session, name="MetaA", clerk_org_id="org_ma", clerk_user_id="u_ma")
-    p2, _ = await seed_practice(db_session, name="MetaB", clerk_org_id="org_mb", clerk_user_id="u_mb")
+    p2, _ = await seed_practice(
+        db_session, name="MetaB", clerk_org_id="org_mb", clerk_user_id="u_mb")
     p2_id = p2.id  # capture before commit expires the instance
     await db_session.commit()  # webhook uses a separate session — must see both
 
