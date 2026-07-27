@@ -104,20 +104,26 @@ async def list_calls(
         )
     ).scalars().all()
 
+    # Batch-load names + bookings for the whole page (was an N+1: 2 queries per row).
+    patient_ids = {c.patient_id for c in rows if c.patient_id}
+    call_ids = [c.id for c in rows]
+    names: dict = {}
+    if patient_ids:
+        for p in (await db.execute(
+            select(Patient).where(Patient.id.in_(patient_ids))
+        )).scalars():
+            names[p.id] = redact_name(p.first_name, p.last_name)
+    booking_ids: dict = {}
+    if call_ids:
+        for bid, scid in (await db.execute(
+            select(Booking.id, Booking.source_call_id).where(Booking.source_call_id.in_(call_ids))
+        )).all():
+            booking_ids.setdefault(scid, bid)  # one booking per call is enough for the badge
+
     summaries: list[CallSummary] = []
     for call in rows:
-        patient_name = None
-        if call.patient_id:
-            patient = (
-                await db.execute(select(Patient).where(Patient.id == call.patient_id))
-            ).scalar_one_or_none()
-            if patient:
-                patient_name = redact_name(patient.first_name, patient.last_name)
-        booking = (
-            await db.execute(
-                select(Booking.id).where(Booking.source_call_id == call.id)
-            )
-        ).scalar_one_or_none()
+        patient_name = names.get(call.patient_id) if call.patient_id else None
+        booking = booking_ids.get(call.id)
         summaries.append(
             CallSummary(
                 id=str(call.id),
