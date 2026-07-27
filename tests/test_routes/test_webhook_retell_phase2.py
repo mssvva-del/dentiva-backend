@@ -386,6 +386,41 @@ async def test_custom_tool_shape_books_appointment(client, db_session):
     assert bookings[0].source == "ai_call"
 
 
+async def test_webcall_tool_books_under_metadata_practice_with_two_clinics(client, db_session):
+    """Two clinics + a web-call tool that arrives before call_started: the booking
+    must attach to the clinic in metadata.practice_id, not be dropped. Reproduces
+    the 'booked on the call but nothing in the dashboard' bug."""
+    from app.db import set_tenant
+    from app.models.patient import Patient
+    await seed_practice(db_session, name="TwoA", clerk_org_id="org_2a", clerk_user_id="u_2a")
+    p2, _ = await seed_practice(
+        db_session, name="TwoB", clerk_org_id="org_2b", clerk_user_id="u_2b")
+    p2_id = p2.id
+    await db_session.commit()
+
+    resp = await client.post("/webhooks/retell", json={
+        "call": {"call_id": "web-2clinic-1", "agent_id": "shared_demo_agent",
+                 "metadata": {"practice_id": str(p2_id)}},
+        "name": "book_appointment",
+        "args": {"patient_first_name": "Serge", "patient_last_name": "T",
+                 "patient_phone": "+15551239999", "procedure": "cleaning",
+                 "preferred_date": "2099-12-15", "preferred_time_window": "morning"},
+    })
+    assert resp.status_code == 200 and resp.json()["booked"] is True
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, p2_id)
+    bookings = (await db_session.execute(
+        select(Booking).where(Booking.practice_id == p2_id)
+    )).scalars().all()
+    assert len(bookings) == 1, "booking must land under the metadata clinic"
+    patients = (await db_session.execute(
+        select(Patient).where(Patient.practice_id == p2_id)
+    )).scalars().all()
+    assert len(patients) == 1  # patient created + attributed too
+
+
 # ---------------------------------------------------------------------------
 # PROGRAMMATIC EMERGENCY LOCK
 #
