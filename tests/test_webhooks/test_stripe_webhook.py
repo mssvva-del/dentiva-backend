@@ -176,3 +176,26 @@ async def test_bad_signature_rejected_when_secret_set(client, db_session, monkey
     finally:
         monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
         get_settings.cache_clear()
+
+
+async def _event_id(t: str, obj: dict, eid: str) -> bytes:
+    # Like _event but with a Stripe event id, so the dispatcher's dedup engages.
+    return json.dumps({"id": eid, "type": t, "data": {"object": obj}}).encode()
+
+
+async def test_duplicate_event_id_is_ignored(client, db_session):
+    # A redelivered checkout.session.completed must NOT re-run — a stale one
+    # arriving after a suspension would otherwise reactivate service (audit #4).
+    practice, _ = await seed_practice(
+        db_session, name="StripeDup", clerk_org_id="org_dup", clerk_user_id="u_dup"
+    )
+    obj = {"customer": "cus_d", "subscription": "sub_d",
+           "metadata": {"practice_id": str(practice.id), "plan": "practice",
+                        "billing_cycle": "monthly"}}
+    r1 = await client.post("/webhooks/stripe", content=await _event_id(
+        "checkout.session.completed", obj, "evt_dup_1"))
+    assert r1.json()["result"] == "subscription_active"
+
+    r2 = await client.post("/webhooks/stripe", content=await _event_id(
+        "checkout.session.completed", obj, "evt_dup_1"))  # same event id
+    assert r2.json()["status"] == "duplicate"
