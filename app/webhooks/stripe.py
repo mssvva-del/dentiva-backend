@@ -32,6 +32,7 @@ from app.config import get_settings
 from app.db import set_tenant
 from app.models.invoice import Invoice
 from app.models.practice import Practice
+from app.models.processed_webhook_event import ProcessedWebhookEvent
 from app.models.subscription import Subscription
 from app.services.billing_service import (
     create_or_update_subscription,
@@ -302,6 +303,21 @@ async def stripe_webhook(
 
     async with _app_db.async_session_factory() as session:
         try:
+            # Dedup EVERY event type by Stripe's event id, claimed in the SAME
+            # transaction as the handler: a redelivered checkout/invoice/etc. is a
+            # no-op (so a stale checkout.session.completed can't reactivate a
+            # suspended practice), yet a handler that errors rolls back the claim
+            # too, so a genuine retry still runs.
+            event_id = event.get("id")
+            if event_id:
+                claim = await session.execute(
+                    pg_insert(ProcessedWebhookEvent)
+                    .values(id=uuid.uuid4(), source="stripe", event_id=event_id)
+                    .on_conflict_do_nothing(index_elements=["source", "event_id"])
+                )
+                if claim.rowcount == 0:
+                    logger.info("stripe webhook: duplicate event %s ignored", event_id)
+                    return {"status": "duplicate", "type": event_type}
             result = await handler(session, obj)
             await session.commit()
         except Exception:

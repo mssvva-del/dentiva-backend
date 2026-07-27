@@ -432,8 +432,11 @@ async def _handle_call_ended(payload: dict) -> dict:
     async with _app_db.async_session_factory() as session:
         if resolved_practice is not None:
             await set_tenant(session, resolved_practice.id)
+        # FOR UPDATE serializes concurrent call_ended redeliveries on this row, so
+        # the meter-once guard below (usage_metered_at IS NULL) can't be read as
+        # None by two handlers at once and double-count the minutes.
         result = await session.execute(
-            select(Call).where(Call.retell_call_id == retell_call_id)
+            select(Call).where(Call.retell_call_id == retell_call_id).with_for_update()
         )
         call = result.scalar_one_or_none()
         if call is None:
