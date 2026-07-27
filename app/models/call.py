@@ -3,13 +3,25 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Text, event
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    event,
+)
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.models.enums import sql_in
 from app.models.mixins import TimestampMixin, UUIDPKMixin
 from app.models.types import EncryptedJSON, EncryptedString
+from app.services.call_outcome import ALL_OUTCOMES
 from app.utils.crypto import phone_hmac as _compute_phone_hmac
 
 
@@ -20,6 +32,12 @@ class Call(UUIDPKMixin, TimestampMixin, Base):
         # Searchable index for the caller number (from_number is encrypted, so it
         # can't be queried directly — the dashboard call search matches this hash).
         Index("ix_calls_practice_caller_hmac", "practice_id", "caller_number_hmac"),
+        # outcome is set only by us (classify_outcome / call_sync) → constrain to
+        # the taxonomy so a typo can't slip past the QA loop. NULL = not yet closed.
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN " + sql_in(ALL_OUTCOMES),
+            name="ck_calls_outcome",
+        ),
     )
 
     practice_id: Mapped[uuid.UUID] = mapped_column(

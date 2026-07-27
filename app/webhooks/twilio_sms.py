@@ -39,6 +39,7 @@ import app.db as _app_db
 from app.config import get_settings
 from app.db import set_tenant
 from app.models.audit_log import AuditLog
+from app.models.enums import CANCELLED
 from app.models.processed_webhook_event import ProcessedWebhookEvent
 from app.services.sms import send_cancellation_notice, send_waitlist_opening
 from app.webhooks.retell import (
@@ -266,7 +267,7 @@ async def _handle_sms(from_number: str, intent: str) -> Response:
                 )
             cancelled_date = booking.appointment_at.date().isoformat()
             cancelled_time = booking.appointment_at.strftime("%H:%M")
-            booking.status = "cancelled"
+            booking.status = CANCELLED
             session.add(
                 _audit(
                     practice_id,

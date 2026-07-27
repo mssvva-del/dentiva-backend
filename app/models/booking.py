@@ -3,11 +3,12 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.models.enums import BOOKING_STATUSES, sql_in
 from app.models.mixins import TimestampMixin, UUIDPKMixin
 
 
@@ -22,6 +23,7 @@ class Booking(UUIDPKMixin, TimestampMixin, Base):
               unique=True, postgresql_where=text("status = 'confirmed'")),
         Index("uq_bookings_source_call_confirmed", "source_call_id", unique=True,
               postgresql_where=text("status = 'confirmed' AND source_call_id IS NOT NULL")),
+        CheckConstraint("status IN " + sql_in(BOOKING_STATUSES), name="ck_bookings_status"),
     )
 
     practice_id: Mapped[uuid.UUID] = mapped_column(

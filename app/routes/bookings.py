@@ -20,6 +20,7 @@ from app.db import set_tenant
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
+from app.models.enums import BOOKING_STATUSES
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.user import User
@@ -32,9 +33,9 @@ from app.utils.redact import redact_name
 
 router = APIRouter(prefix="/api/bookings", tags=["bookings"])
 
-# Statuses staff can set from the dashboard. "no_show" powers no-show tracking;
-# the rest let staff correct a booking's lifecycle state.
-_ALLOWED_STATUSES = {"confirmed", "completed", "cancelled", "no_show"}
+# Statuses staff can set from the dashboard — the same canonical set the DB CHECK
+# enforces (no_show powers no-show tracking).
+_ALLOWED_STATUSES = BOOKING_STATUSES
 
 # Audit action written when a status change is meaningful for analytics.
 _STATUS_AUDIT_ACTION = {
