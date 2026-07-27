@@ -13,6 +13,7 @@ skipped with a warning.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -52,6 +53,18 @@ from app.utils.crypto import phone_hmac
 logger = logging.getLogger("dentiva.webhooks.retell")
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+# Fire confirmation/cancellation SMS WITHOUT blocking the live agent's tool
+# response — Twilio can take up to 15s, which is dead air on the call. The send
+# functions are self-contained (no request session) and fail-safe, so a detached
+# task is safe. Keep a reference so the task isn't garbage-collected mid-flight.
+_bg_sms_tasks: set = set()
+
+
+def _fire_sms(coro) -> None:
+    task = asyncio.create_task(coro)
+    _bg_sms_tasks.add(task)
+    task.add_done_callback(_bg_sms_tasks.discard)
 
 
 # ---------------------------------------------------------------------------
@@ -847,7 +860,7 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     booked_date = chosen_slot.date
     booked_time = chosen_slot.time
     booked_provider = chosen_slot.provider
-    sms_result = await send_booking_confirmation(
+    _fire_sms(send_booking_confirmation(
         to=phone,
         practice_name=practice_name,
         first_name=first_name,
@@ -856,8 +869,7 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         provider=booked_provider,
         opted_out=patient_opted_out,
         language=patient.preferred_language,
-    )
-    logger.info("book_appointment: sms %s", sms_result)
+    ))
 
     return {
         "booked": True,
@@ -999,7 +1011,7 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
     logger.info(
         "reschedule_appointment: call=%s moved to %s %s", retell_call_id, new_date, new_time
     )
-    sms_result = await send_booking_confirmation(
+    _fire_sms(send_booking_confirmation(
         to=phone,
         practice_name=practice_name,
         first_name=first_name,
@@ -1007,8 +1019,7 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
         time=new_time,
         provider=new_provider,
         opted_out=patient_opted_out,
-    )
-    logger.info("reschedule_appointment: sms %s", sms_result)
+    ))
 
     return {
         "rescheduled": True,
@@ -1106,28 +1117,26 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
         cancelled_date,
         cancelled_time,
     )
-    sms_result = await send_cancellation_notice(
+    _fire_sms(send_cancellation_notice(
         to=phone,
         practice_name=practice_name,
         first_name=first_name,
         date=cancelled_date,
         time=cancelled_time,
         opted_out=patient_opted_out,
-    )
-    logger.info("cancel_appointment: sms %s", sms_result)
+    ))
 
     # Notify the waitlisted patient that a slot opened (after commit, fail-safe).
     if notify_target is not None:
         wl_first_name, wl_phone, wl_opted_out = notify_target
-        wl_sms = await send_waitlist_opening(
+        _fire_sms(send_waitlist_opening(
             to=wl_phone,
             practice_name=practice_name,
             first_name=wl_first_name,
             date=cancelled_date,
             time=cancelled_time,
             opted_out=wl_opted_out,
-        )
-        logger.info("cancel_appointment: waitlist backfill sms %s", wl_sms)
+        ))
 
     return {
         "cancelled": True,
