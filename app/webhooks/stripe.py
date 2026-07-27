@@ -34,6 +34,7 @@ from app.models.invoice import Invoice
 from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
 from app.models.subscription import Subscription
+from app.observability.alerts import record_alert
 from app.services.billing_service import (
     create_or_update_subscription,
     mark_past_due,
@@ -323,6 +324,8 @@ async def stripe_webhook(
         except Exception:
             await session.rollback()
             logger.exception("stripe webhook handler failed for '%s'", event_type)
+            # Repeated Stripe 500s = money events silently not applied — page us.
+            record_alert("stripe_handler_failed", f"type={event_type}")
             raise HTTPException(status_code=500, detail="Webhook processing failed.") from None
 
     logger.info("stripe webhook '%s' → %s", event_type, result)
