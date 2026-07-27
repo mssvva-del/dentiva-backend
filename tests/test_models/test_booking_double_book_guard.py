@@ -77,3 +77,22 @@ async def test_one_call_one_confirmed_booking(db_session):
     db_session.add(_booking(practice, pat, at=other, call_id=call.id))
     with pytest.raises(IntegrityError):
         await db_session.flush()
+
+
+async def test_bad_booking_status_rejected(db_session):
+    practice = await _prac(db_session, "dbk4")
+    pat = await _patient(db_session, practice)
+    db_session.add(_booking(practice, pat, status="garbage"))  # not in BOOKING_STATUSES
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+async def test_bad_call_outcome_rejected(db_session):
+    practice = await _prac(db_session, "dbk5")
+    await set_tenant(db_session, practice.id)
+    call = Call(id=uuid.uuid4(), practice_id=practice.id, retell_call_id="rc-oc",
+                direction="inbound", from_number="+15550000000", to_number="+15559999999",
+                started_at=datetime.now(tz=UTC), status="completed", outcome="not_a_taxonomy")
+    db_session.add(call)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()

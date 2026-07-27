@@ -28,6 +28,7 @@ from app.config import get_settings
 from app.db import set_tenant
 from app.models.call import Call
 from app.models.practice import Practice
+from app.services.call_outcome import INFO_ONLY
 from app.services.worker_lock import advisory_tick_lock
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,7 @@ async def _upsert_call(session, practice_id, call: dict) -> str | None:
             ended_at=ended,
             duration_seconds=duration,
             status=status,
-            outcome="info_only",
+            outcome=INFO_ONLY,
             recording_path=recording,
             transcript_jsonb=transcript,
             patient_sentiment=sentiment,

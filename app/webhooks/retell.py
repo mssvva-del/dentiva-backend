@@ -35,6 +35,7 @@ from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.call import Call
 from app.models.callback_request import CallbackRequest
+from app.models.enums import AI_CALL, CANCELLED, CONFIRMED
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.waitlist_entry import WaitlistEntry
@@ -750,8 +751,8 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
             duration_minutes=60,
             procedure_type=procedure,
             provider_name=chosen_slot.provider if chosen_slot else "Dr. Smith",
-            status="confirmed",
-            source="ai_call",
+            status=CONFIRMED,
+            source=AI_CALL,
         )
         try:
             # Savepoint so a collision keeps the patient upsert; the partial-unique
@@ -792,7 +793,7 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
 
         # Update call outcome if we have the call row.
         if call:
-            call.outcome = "booked"
+            call.outcome = BOOKED
 
         # Write audit log.
         audit = AuditLog(
@@ -1037,7 +1038,7 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
 
         cancelled_date = booking.appointment_at.date().isoformat()
         cancelled_time = booking.appointment_at.strftime("%H:%M")
-        booking.status = "cancelled"
+        booking.status = CANCELLED
 
         practice_name = (
             await session.execute(
