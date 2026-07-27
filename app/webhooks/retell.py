@@ -39,6 +39,7 @@ from app.models.enums import AI_CALL, CANCELLED, CONFIRMED
 from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.waitlist_entry import WaitlistEntry
+from app.observability.alerts import record_alert
 from app.services.availability import compute_native_slots, slot_to_utc
 from app.services.call_outcome import BOOKED, classify_outcome
 from app.services.sms import (
@@ -510,6 +511,8 @@ async def _handle_call_ended(payload: dict) -> dict:
                     "metering failed for call %s (practice %s)",
                     retell_call_id, call.practice_id,
                 )
+                # Silent under-billing otherwise — page us (ids only, no PHI).
+                record_alert("metering_failed", f"practice={call.practice_id}")
 
         await session.commit()
 
