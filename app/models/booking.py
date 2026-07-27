@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +15,13 @@ class Booking(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "bookings"
     __table_args__ = (
         Index("ix_bookings_practice_appt", "practice_id", "appointment_at"),
+        # Double-book guards (partial, confirmed-only). Practice is a single
+        # resource (one chair; provider is a label), so one confirmed booking per
+        # (practice, slot); and one call → one confirmed booking.
+        Index("uq_bookings_practice_slot_confirmed", "practice_id", "appointment_at",
+              unique=True, postgresql_where=text("status = 'confirmed'")),
+        Index("uq_bookings_source_call_confirmed", "source_call_id", unique=True,
+              postgresql_where=text("status = 'confirmed' AND source_call_id IS NOT NULL")),
     )
 
     practice_id: Mapped[uuid.UUID] = mapped_column(

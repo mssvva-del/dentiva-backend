@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 import app.db as _app_db
 from app.billing.metering import record_call_usage
@@ -754,8 +755,42 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
             status="confirmed",
             source="ai_call",
         )
-        session.add(booking)
-        await session.flush()
+        try:
+            # Savepoint so a collision keeps the patient upsert; the partial-unique
+            # indexes (uq_bookings_practice_slot_confirmed / _source_call_confirmed)
+            # are the real double-book guard — this just turns a race into a clean
+            # answer instead of a 500 (dead air on a live call).
+            async with session.begin_nested():
+                session.add(booking)
+        except IntegrityError:
+            # Another caller (or a redelivery of THIS call) booked first.
+            dup = None
+            if call_internal_id is not None:
+                dup = (await session.execute(select(Booking).where(
+                    Booking.source_call_id == call_internal_id,
+                    Booking.status == "confirmed",
+                ))).scalars().first()
+            if dup is not None:  # this call already has a booking → idempotent success
+                ts = dup.appointment_at
+                return {
+                    "booked": True,
+                    "appointment": {
+                        "date": ts.date().isoformat(), "time": ts.strftime("%H:%M"),
+                        "provider": dup.provider_name or "Dr. Smith",
+                        "procedure": dup.procedure_type or procedure,
+                    },
+                    "message": "That appointment is already booked.",
+                    "available_slots": [],
+                }
+            others = [s for s in slots
+                      if not (s.date == chosen_slot.date and s.time == chosen_slot.time)]
+            return {
+                "booked": False,
+                "message": "I'm sorry — that time was just taken. Want one of these instead?",
+                "available_slots": [
+                    {"date": s.date, "time": s.time, "provider": s.provider} for s in others
+                ],
+            }
 
         # Update call outcome if we have the call row.
         if call:
@@ -898,6 +933,22 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
         old_at = booking.appointment_at
         booking.appointment_at = new_at
         booking.provider_name = chosen.provider
+        try:
+            # Same double-book guard as booking: surface a slot collision here as a
+            # clean answer, not a 500 at commit.
+            async with session.begin_nested():
+                await session.flush()
+        except IntegrityError:
+            booking.appointment_at = old_at  # undo the move; keep the original slot
+            others = [s for s in slots
+                      if not (s.date == chosen.date and s.time == chosen.time)]
+            return {
+                "rescheduled": False,
+                "message": "I'm sorry — that time was just taken. Want one of these instead?",
+                "available_slots": [
+                    {"date": s.date, "time": s.time, "provider": s.provider} for s in others
+                ],
+            }
 
         practice_name = (practice_obj.name if practice_obj else None) or "our office"
         first_name = patient.first_name
