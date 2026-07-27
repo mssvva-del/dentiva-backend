@@ -38,8 +38,14 @@ def _booking(practice, patient, *, at=_AT, status="confirmed", call_id=None):
     )
 
 
+async def _prac(db_session, slug):
+    practice, _ = await seed_practice(
+        db_session, name=slug, clerk_org_id=f"o_{slug}", clerk_user_id=f"u_{slug}")
+    return practice
+
+
 async def test_same_slot_confirmed_is_rejected(db_session):
-    practice, _ = await seed_practice(db_session, name="DBK", clerk_org_id="o_dbk", clerk_user_id="u_dbk")
+    practice = await _prac(db_session, "dbk")
     pat = await _patient(db_session, practice)
     db_session.add(_booking(practice, pat))
     await db_session.flush()
@@ -49,25 +55,25 @@ async def test_same_slot_confirmed_is_rejected(db_session):
 
 
 async def test_cancelled_does_not_collide(db_session):
-    practice, _ = await seed_practice(db_session, name="DBK2", clerk_org_id="o_dbk2", clerk_user_id="u_dbk2")
+    practice = await _prac(db_session, "dbk2")
     pat = await _patient(db_session, practice)
     db_session.add(_booking(practice, pat, status="cancelled"))
-    db_session.add(_booking(practice, pat, status="confirmed"))  # partial index: only confirmed collide
+    db_session.add(_booking(practice, pat, status="confirmed"))  # only confirmed collide
     await db_session.flush()  # must NOT raise
 
 
 async def test_one_call_one_confirmed_booking(db_session):
-    practice, _ = await seed_practice(db_session, name="DBK3", clerk_org_id="o_dbk3", clerk_user_id="u_dbk3")
+    practice = await _prac(db_session, "dbk3")
     pat = await _patient(db_session, practice)
     call = Call(id=uuid.uuid4(), practice_id=practice.id, retell_call_id="rc-dbk",
                 direction="inbound", from_number="+15550000000", to_number="+15559999999",
                 started_at=datetime.now(tz=UTC), status="completed")
     db_session.add(call)
     await db_session.flush()
-    cid = call.id
-    db_session.add(_booking(practice, pat, at=_AT, call_id=cid))
+    db_session.add(_booking(practice, pat, at=_AT, call_id=call.id))
     await db_session.flush()
     # different slot, SAME source call → still rejected (one call → one booking)
-    db_session.add(_booking(practice, pat, at=datetime(2099, 12, 16, 9, 0, tzinfo=UTC), call_id=cid))
+    other = datetime(2099, 12, 16, 9, 0, tzinfo=UTC)
+    db_session.add(_booking(practice, pat, at=other, call_id=call.id))
     with pytest.raises(IntegrityError):
         await db_session.flush()
