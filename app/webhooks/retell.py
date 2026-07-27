@@ -336,6 +336,24 @@ async def _resolve_practice_id_for_call(session, retell_call_id: str) -> uuid.UU
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_practice_meta(call_data: dict, agent_id: str | None) -> Practice | None:
+    """Prefer an explicit ``metadata.practice_id`` (the web-call demo carries it,
+    since every web call shares the demo agent and agent_id can't disambiguate),
+    else fall back to agent-id routing."""
+    pid = (call_data.get("metadata") or {}).get("practice_id")
+    if pid:
+        try:
+            async with _app_db.async_session_factory() as session:
+                p = (await session.execute(
+                    select(Practice).where(Practice.id == uuid.UUID(str(pid)))
+                )).scalar_one_or_none()
+                if p:
+                    return p
+        except ValueError:
+            pass
+    return await _resolve_practice(agent_id)
+
+
 async def _handle_call_started(payload: dict) -> dict:
     retell_call_id = payload.get("call_id") or payload.get("retell_call_id", "")
     call_data = payload.get("call", {}) or {}
@@ -352,7 +370,7 @@ async def _handle_call_started(payload: dict) -> dict:
     else:
         started_at = datetime.now(tz=UTC)
 
-    practice = await _resolve_practice(agent_id)
+    practice = await _resolve_practice_meta(call_data, agent_id)
     if practice is None:
         logger.warning("call_started: no practice found, ignoring. call_id=%s", retell_call_id)
         return {"ok": True, "warning": "no_practice"}
@@ -428,7 +446,7 @@ async def _handle_call_ended(payload: dict) -> dict:
     # protected, so we must bind the tenant before reading or writing them. The
     # call belongs to the same practice that call_started used (same agent_id).
     agent_id = call_data.get("agent_id") or payload.get("agent_id")
-    resolved_practice = await _resolve_practice(agent_id)
+    resolved_practice = await _resolve_practice_meta(call_data, agent_id)
 
     async with _app_db.async_session_factory() as session:
         if resolved_practice is not None:
