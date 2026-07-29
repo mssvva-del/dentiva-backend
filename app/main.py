@@ -23,6 +23,7 @@ from app.middleware.request_context import RequestContextMiddleware
 from app.observability.sentry import init_sentry
 from app.routes import (
     admin,
+    assistant,
     billing,
     bookings,
     callbacks,
@@ -247,6 +248,7 @@ async def health_ready() -> JSONResponse:
         )
 
 
+app.include_router(assistant.router)
 app.include_router(me.router)
 app.include_router(onboarding.router)
 app.include_router(team.router)

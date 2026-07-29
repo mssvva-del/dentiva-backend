@@ -196,3 +196,25 @@ async def test_onboarding_requires_manage_settings(client, db_session):
         "name": "X", "timezone": "America/New_York",
     })
     assert r.status_code == 403
+
+
+async def test_pms_choice_pages_us_so_connecting_is_true(client, db_session):
+    """The UI tells the clinic their PMS connection is being set up. That only
+    stays true if a human actually finds out — choosing a real PMS must alert."""
+    from app.observability import alerts
+    from tests.conftest import seed_practice
+
+    await seed_practice(db_session, name="PmsAlert", clerk_org_id="org_pa", clerk_user_id="u_pa")
+    await db_session.commit()
+    h = {"X-Dev-Clerk-User-Id": "u_pa", "X-Dev-Clerk-Org-Id": "org_pa"}
+
+    before = alerts.recent_alerts()["by_kind"].get("pms_connection_requested", 0)
+    r = await client.put("/api/onboarding/pms", headers=h, json={"pms_system": "open_dental"})
+    assert r.status_code == 200
+    after = alerts.recent_alerts()["by_kind"].get("pms_connection_requested", 0)
+    assert after == before + 1, "picking a PMS must page us — otherwise nothing connects"
+
+    # "Skip for now" promises nothing, so it must NOT page us.
+    r2 = await client.put("/api/onboarding/pms", headers=h, json={"pms_system": "none"})
+    assert r2.status_code == 200
+    assert alerts.recent_alerts()["by_kind"].get("pms_connection_requested", 0) == after

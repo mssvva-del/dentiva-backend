@@ -36,6 +36,7 @@ from app.models.audit_log import AuditLog
 from app.models.baa_acceptance import BaaAcceptance
 from app.models.practice import Practice
 from app.models.user import User
+from app.observability.alerts import record_alert
 from app.schemas.onboarding import (
     AgentStep,
     ClinicStep,
@@ -276,6 +277,14 @@ async def step_pms(
     _advance(p, 4)
     await _audit(db, p, user, "onboarding_step",
                  {"step": 4, "name": "pms", "pms_system": payload.pms_system})
+    # The UI tells the clinic their connection is being set up — that has to be
+    # true, so page us. Open Dental and NexHealth both need a person on the
+    # vendor side; without this the promise was a label with nothing behind it.
+    if payload.pms_system and payload.pms_system != "none":
+        record_alert(
+            "pms_connection_requested",
+            f"practice={p.id} pms={payload.pms_system}",
+        )
     await db.commit()
     await db.refresh(p)
     return _state(p)
