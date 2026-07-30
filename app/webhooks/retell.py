@@ -1825,7 +1825,13 @@ from app.services.llm.dynamic_vars import build_dynamic_variables  # noqa: E402
 # Retell substitutes ONLY the keys we send, so a key the prompt references and we
 # omit is spoken aloud as a literal "{{callback_eta}}". The emergency branch reads
 # these two, so they must never be missing — even when the practice lookup fails.
-_VAR_FALLBACKS = {"office_status": "open", "callback_eta": "shortly"}
+_VAR_FALLBACKS = {
+    "office_status": "open",
+    "callback_eta": "shortly",
+    # No clinic resolved → no line to transfer to. Empty keeps the prompt on the
+    # callback path instead of dialling a literal "{{clinic_transfer_number}}".
+    "clinic_transfer_number": "",
+}
 
 
 async def _resolve_practice_for_inbound(agent_id: str | None,

@@ -63,6 +63,13 @@ def build_dynamic_variables(practice: Practice) -> dict[str, str]:
         # emergency has to be sent to the ER, not put in a queue.
         "office_status": status,
         "callback_eta": eta,
+        # Destination for the NATIVE transfer_call tools. Empty string when the
+        # clinic has given us no line to ring: the prompt then forbids transfers
+        # and the agent takes an urgent callback instead — a transfer into a
+        # number that doesn't exist is the dead-air bug all over again.
+        "clinic_transfer_number": (
+            practice.transfer_phone_number or practice.phone_number or ""
+        ),
         # The structured clinic brain (providers/visit types/insurance/policies).
         "kb_context": kb if kb else "No additional clinic details on file.",
     }

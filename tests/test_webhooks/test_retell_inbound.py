@@ -181,4 +181,10 @@ async def test_inbound_webhook_unknown_agent_returns_empty_when_multi(client,
     # But the two variables the emergency branch SPEAKS must still be present:
     # Retell substitutes only the keys we send, so a missing one is read aloud as
     # a literal "{{callback_eta}}" to someone describing an emergency.
-    assert variables == {"office_status": "open", "callback_eta": "shortly"}
+    assert variables == {
+        "office_status": "open",
+        "callback_eta": "shortly",
+        # Empty: with no clinic resolved there is no line to transfer to, and the
+        # prompt keeps the agent on the callback path.
+        "clinic_transfer_number": "",
+    }
