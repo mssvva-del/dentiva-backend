@@ -228,10 +228,12 @@ async def clinic_detail(
         user_count=users, call_count=calls, booking_count=bookings,
         address=p.address, phone_number=p.phone_number,
         transfer_phone_number=p.transfer_phone_number,
-        ai_phone_number=_s.retell_from_number or None,
+        # This clinic's own provisioned number (NUM-1); global env is the
+        # pre-NUM-1 fallback so older practices still display something.
+        ai_phone_number=p.ai_phone_number or _s.retell_from_number or None,
         forwarding_instruction=forwarding_instruction(
             answer_mode=p.answer_mode, rings_before_ai=p.rings_before_ai,
-            ai_number=_s.retell_from_number or None),
+            ai_number=p.ai_phone_number or _s.retell_from_number or None),
         business_hours=p.business_hours or {},
         agent_name=(str(agent.get("agent_name") or "").strip() or "Alex"),
         agent_greeting=(str(agent.get("greeting") or "").strip() or None),

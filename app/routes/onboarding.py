@@ -92,6 +92,9 @@ def _state(practice: Practice) -> OnboardingState:
     from app.services.call_routing import forwarding_instruction
 
     settings = get_settings()
+    # This clinic's own provisioned number; the global env number is the
+    # single-tenant fallback for practices provisioned before NUM-1.
+    ai_number = practice.ai_phone_number or settings.retell_from_number or None
     return OnboardingState(
         practice_id=str(practice.id),
         status=practice.status,
@@ -106,11 +109,11 @@ def _state(practice: Practice) -> OnboardingState:
         pms_system=practice.pms_system,
         languages_enabled=list(practice.languages_enabled),
         agent_settings=practice.agent_settings,
-        ai_phone_number=settings.retell_from_number or None,
+        ai_phone_number=ai_number,
         forwarding_instruction=forwarding_instruction(
             answer_mode=practice.answer_mode,
             rings_before_ai=practice.rings_before_ai,
-            ai_number=settings.retell_from_number or None,
+            ai_number=ai_number,
         ),
     )
 
@@ -256,10 +259,75 @@ async def step_phone(
     # without it doesn't wipe a previously set number.
     if payload.transfer_number is not None:
         p.transfer_phone_number = payload.transfer_number
+
+    # A clinic that wants to forward needs a number to forward TO, and it has to
+    # be ITS OWN: inbound routing identifies the practice by the number dialled,
+    # so a shared number makes two clinics indistinguishable. Provision on demand,
+    # in the clinic's area code, bound to our agent.
+    #
+    # Fail-safe: provisioning talks to an external provider, and a hiccup there
+    # must not block setup. On failure the step still saves and the UI already
+    # says the number is being provisioned and we'll email it.
+    provisioned = False
+    if payload.mode == "forward" and not p.ai_phone_number:
+        from app.services.retell_admin import RetellError, RetellNotConfigured
+        from app.services.telephony.provision import provision_number_for_practice
+        try:
+            p.ai_phone_number = await provision_number_for_practice(p)
+            provisioned = True
+        except (RetellError, RetellNotConfigured) as exc:
+            logger.warning("phone step: provisioning failed for %s: %s", p.id, exc)
+            record_alert("number_provision_failed", f"practice={p.id}")
+
     _advance(p, 3)
     await _audit(db, p, user, "onboarding_step",
                  {"step": 3, "name": "phone", "mode": payload.mode,
-                  "transfer_set": payload.transfer_number is not None})
+                  "transfer_set": payload.transfer_number is not None,
+                  "number_provisioned": provisioned})
+    await db.commit()
+    await db.refresh(p)
+    return _state(p)
+
+
+@router.post("/phone/provision", response_model=OnboardingState)
+async def provision_phone_number(
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+    user: User = Depends(require_permission(MANAGE_SETTINGS)),
+) -> OnboardingState:
+    """Get this clinic its own Dentovox number, so the forwarding instructions on
+    the Phone step can show a real number to forward to.
+
+    Idempotent: a practice that already has one gets it back unchanged — clicking
+    twice must never buy two numbers.
+    """
+    from app.services.retell_admin import RetellError, RetellNotConfigured
+    from app.services.telephony.provision import provision_number_for_practice
+
+    # FOR UPDATE, not a plain read: this endpoint SPENDS MONEY. Two concurrent
+    # calls (a double click, or React re-running the effect) would both see NULL
+    # and both buy a number — the unique constraint would reject the second write
+    # but the number would already exist at the provider, billed forever. The lock
+    # makes the second caller wait and then take the idempotent path below.
+    p = (await db.execute(
+        select(Practice).where(Practice.id == practice.id).with_for_update()
+    )).scalar_one()
+    if p.ai_phone_number:
+        return _state(p)
+    try:
+        p.ai_phone_number = await provision_number_for_practice(p)
+    except RetellNotConfigured as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Phone numbers aren't available right now — we'll email yours shortly.",
+        ) from exc
+    except RetellError as exc:
+        record_alert("number_provision_failed", f"practice={p.id}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="We couldn't get a number just now — we'll email yours shortly.",
+        ) from exc
+    await _audit(db, p, user, "number_provisioned", {"has_number": True})
     await db.commit()
     await db.refresh(p)
     return _state(p)

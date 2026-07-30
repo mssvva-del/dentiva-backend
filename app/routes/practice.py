@@ -24,6 +24,8 @@ def _build_practice_me(practice: Practice) -> PracticeMe:
         practice.pms_credentials_secret_key
     )
     agent = practice.agent_settings or {}
+    # Per-clinic number (NUM-1); global env is the pre-NUM-1 fallback.
+    ai_number = practice.ai_phone_number or settings.retell_from_number or None
     return PracticeMe(
         id=str(practice.id),
         name=practice.name,
@@ -43,9 +45,9 @@ def _build_practice_me(practice: Practice) -> PracticeMe:
         forwarding_instruction=forwarding_instruction(
             answer_mode=practice.answer_mode,
             rings_before_ai=practice.rings_before_ai,
-            ai_number=settings.retell_from_number or None,
+            ai_number=ai_number,
         ),
-        ai_phone_number=settings.retell_from_number or None,
+        ai_phone_number=ai_number,
         # Mirrors what build_dynamic_variables sends into every live call, so the
         # Settings card can never show a persona the agent doesn't actually use.
         agent_name=(str(agent.get("agent_name") or "").strip() or "Alex"),

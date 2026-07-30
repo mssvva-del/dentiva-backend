@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     # Where Stripe Checkout returns the user (success/cancel). The dashboard
     # origin; defaults to local dev. Set to the deployed dashboard URL in prod.
     dashboard_base_url: str = "http://localhost:3000"
+    # This backend's own public origin. Needed when we hand a callback URL to a
+    # provider — e.g. the inbound webhook baked into a clinic's provisioned phone
+    # number, which the provider calls before answering. Must be the deployed
+    # backend URL in production (a localhost value there means the number would
+    # answer with no clinic context).
+    public_base_url: str = "http://localhost:8000"
     # Stripe Price IDs per tier × cycle (ADM7 grid). Created by
     # scripts/sync_stripe_catalog.py; paste its output into these env vars.
     stripe_price_after_hours_monthly: str = ""
