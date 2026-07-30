@@ -731,7 +731,9 @@ async def test_create_callback_request_persists_row(client, db_session):
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "callback_logged"
+    # "uncontrolled bleeding" belongs in an emergency room, so the SPOKEN answer
+    # is an ER referral — the row below is still written, for follow-up.
+    assert resp.json()["status"] == "er_referral"
 
     await db_session.commit()
     rows = (

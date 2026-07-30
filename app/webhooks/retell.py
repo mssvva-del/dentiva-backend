@@ -44,6 +44,7 @@ from app.observability.alerts import record_alert
 from app.services.availability import compute_native_slots, slot_to_utc
 from app.services.call_outcome import BOOKED, classify_outcome
 from app.services.sms import (
+    page_clinic_new_booking,
     page_clinic_urgent_callback,
     send_booking_confirmation,
     send_cancellation_notice,
@@ -149,6 +150,45 @@ _EMERGENCY_PATTERNS = (
     r"urgent",
 )
 _EMERGENCY_RE = re.compile("|".join(_EMERGENCY_PATTERNS), re.IGNORECASE)
+
+# A SECOND, NARROWER tier inside the emergency lock: signs that belong in an
+# emergency room, not in our callback queue. The wide _EMERGENCY_PATTERNS above
+# cover "urgent" dental pain — those are ours to call back about. These are not:
+# an airway or an uncontrolled bleed cannot wait for the office to open, and
+# after hours a callback promise is actively dangerous ("the team will call you
+# back" at 11pm = wait until morning).
+_MEDICAL_ER_PATTERNS = (
+    r"(can'?t|cannot|hard\s+to|trouble|difficulty)\s+(breath|swallow)",
+    r"(breath|swallow)\w*\s+(is\s+)?(hard|difficult)",
+    r"airway",
+    r"choking",
+    r"(uncontroll\w*|heavy|profuse)\s+bleed",
+    r"bleed\w*\s+(that\s+)?(won'?t|will\s+not|doesn'?t)\s+stop",
+    r"won'?t\s+stop\s+bleed",
+    r"(face|facial|throat|neck|tongue|eye)\s+(is\s+)?swell",
+    r"swollen\s+(face|throat|neck|tongue|eye)",
+    r"swelling\s+(in|of)\s+(my\s+)?(face|throat|neck|tongue)",
+    r"passed\s+out",
+    r"unconscious",
+    r"lost\s+consciousness",
+    r"knocked\s+unconscious",
+)
+_MEDICAL_ER_RE = re.compile("|".join(_MEDICAL_ER_PATTERNS), re.IGNORECASE)
+
+# Spoken to the caller INSTEAD of a callback promise. Independent of the hour and
+# of what the model decided — the office being open does not make an airway ours.
+_ER_REFERRAL_MESSAGE = (
+    "Tell the caller, calmly and immediately: this needs emergency care now — "
+    "hang up and call 911, or go to the nearest emergency room. Do NOT offer an "
+    "appointment, a callback, or a hold as the next step. Say the team has been "
+    "notified and will follow up afterwards."
+)
+
+
+def _needs_emergency_room(args: dict) -> bool:
+    """Life-threatening signs in ANY tool's arguments — deterministic, no LLM."""
+    return bool(_MEDICAL_ER_RE.search(_args_to_text(args)))
+
 
 # Tools that schedule and must be refused while an emergency is active.
 # reschedule is scheduling too; cancel stays allowed (it only frees up time).
@@ -775,6 +815,13 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
             await session.execute(select(Practice).where(Practice.id == practice_id))
         ).scalar_one_or_none()
         practice_name = (practice_obj.name if practice_obj else None) or "our office"
+        # Read while the session is open: after commit the instance is expired, and
+        # touching it below (the SMS fires outside the block) would lazy-load.
+        clinic_alert_line = (
+            (practice_obj.transfer_phone_number or practice_obj.phone_number)
+            if practice_obj is not None and practice_obj.booking_alerts_enabled
+            else None
+        )
 
         # Language this call was conducted in — the agent passes it, falling back
         # to Retell's mid-call detection on the call row. Drives preferred_language
@@ -910,6 +957,17 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         opted_out=patient_opted_out,
         language=patient.preferred_language,
     ))
+
+    # And tell the CLINIC — an AI booking they never see is a double-booking
+    # waiting to happen while there's no PMS sync. Name + time only.
+    if clinic_alert_line:
+        _fire_sms(page_clinic_new_booking(
+            to=clinic_alert_line,
+            practice_name=practice_name,
+            first_name=first_name,
+            date=booked_date,
+            time=booked_time,
+        ))
 
     return {
         "booked": True,
@@ -1503,6 +1561,9 @@ async def _handle_create_callback_request(
     phone = args.get("patient_phone") or args.get("phone")
     reason = args.get("reason")
     urgent = _is_truthy(args.get("urgent"))
+    to_er = _needs_emergency_room(args)
+    if to_er:
+        urgent = True  # the follow-up is urgent even though the ER comes first
 
     async with _app_db.async_session_factory() as session:
         call = await _get_or_create_call(session, retell_call_id, agent_id)
@@ -1522,8 +1583,9 @@ async def _handle_create_callback_request(
             # Alert so a human can chase the call before the caller gives up on us.
             record_alert("callback_not_persisted", f"call={retell_call_id}")
             return {
-                "status": "callback_logged",
-                "message": "Your callback request has been recorded; our team will reach out.",
+                "status": "er_referral" if to_er else "callback_logged",
+                "message": _ER_REFERRAL_MESSAGE if to_er else
+                "Your callback request has been recorded; our team will reach out.",
             }
 
         # RLS tenant context so the insert is allowed.
@@ -1544,11 +1606,16 @@ async def _handle_create_callback_request(
             await _page_clinic_urgent_callback(session, practice_id, first_name, phone)
 
     logger.info(
-        "create_callback_request persisted: call=%s phone=%s urgent=%s",
+        "create_callback_request persisted: call=%s phone=%s urgent=%s er=%s",
         retell_call_id,
         (phone or "")[-4:],
         urgent,
+        to_er,
     )
+    if to_er:
+        # The row is written for follow-up, but what the caller hears is the ER.
+        record_alert("medical_er_referral", f"call={retell_call_id}")
+        return {"status": "er_referral", "message": _ER_REFERRAL_MESSAGE}
     return {
         "status": "callback_logged",
         "message": "Your callback request has been recorded; our team will reach out.",
@@ -1570,13 +1637,19 @@ async def _handle_transfer_to_human(retell_call_id: str, args: dict) -> dict:
     line to the caller. The caller's own number is used when the agent hasn't
     collected one, so the request is always actionable.
     """
-    honest_reply = {
-        "status": "callback_logged",
-        "message": (
-            "Of course — I'm flagging this for the team right now and someone "
-            "will call you straight back."
-        ),
-    }
+    if _needs_emergency_room(args):
+        # No queue for an airway or an uncontrolled bleed. The callback row below
+        # still gets written for follow-up, but what the caller HEARS is the ER.
+        record_alert("medical_er_referral", f"call={retell_call_id}")
+        honest_reply = {"status": "er_referral", "message": _ER_REFERRAL_MESSAGE}
+    else:
+        honest_reply = {
+            "status": "callback_logged",
+            "message": (
+                "Of course — I'm flagging this for the team right now and someone "
+                "will call you straight back."
+            ),
+        }
     async with _app_db.async_session_factory() as session:
         practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
         if practice_id is None:
@@ -1749,6 +1822,11 @@ async def retell_webhook(request: Request) -> dict:
 # ---------------------------------------------------------------------------
 from app.services.llm.dynamic_vars import build_dynamic_variables  # noqa: E402
 
+# Retell substitutes ONLY the keys we send, so a key the prompt references and we
+# omit is spoken aloud as a literal "{{callback_eta}}". The emergency branch reads
+# these two, so they must never be missing — even when the practice lookup fails.
+_VAR_FALLBACKS = {"office_status": "open", "callback_eta": "shortly"}
+
 
 async def _resolve_practice_for_inbound(agent_id: str | None,
                                         to_number: str | None) -> Practice | None:
@@ -1785,17 +1863,17 @@ async def retell_inbound_webhook(request: Request) -> dict:
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError:
-        return {"call_inbound": {"dynamic_variables": {}}}
+        return {"call_inbound": {"dynamic_variables": dict(_VAR_FALLBACKS)}}
 
     inbound = payload.get("call_inbound") or {}
     agent_id = inbound.get("agent_id")
     to_number = inbound.get("to_number")
     try:
         practice = await _resolve_practice_for_inbound(agent_id, to_number)
-        variables = build_dynamic_variables(practice) if practice else {}
+        variables = build_dynamic_variables(practice) if practice else dict(_VAR_FALLBACKS)
     except Exception:  # noqa: BLE001 — never block call pickup on a lookup bug
         logger.exception("retell inbound webhook: variable build failed")
-        variables = {}
+        variables = dict(_VAR_FALLBACKS)
     logger.info("retell inbound: vars=%d practice=%s",
                 len(variables), "yes" if variables else "none")
     return {"call_inbound": {"dynamic_variables": variables}}

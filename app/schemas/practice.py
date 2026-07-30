@@ -17,6 +17,7 @@ class PracticeMe(BaseModel):
     languages_enabled: list[str]
     business_hours: dict
     reminders_enabled: bool = True
+    booking_alerts_enabled: bool = True
     # Call routing (ring count).
     answer_mode: str = "overflow"
     rings_before_ai: int = 3
@@ -39,6 +40,7 @@ class PracticeUpdate(BaseModel):
     languages_enabled: list[str] | None = None
     business_hours: dict | None = None
     reminders_enabled: bool | None = None
+    booking_alerts_enabled: bool | None = None
     answer_mode: str | None = None
     # Rings the clinic line waits before forwarding to AI (1–10).
     rings_before_ai: int | None = Field(default=None, ge=1, le=10)

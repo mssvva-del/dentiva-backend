@@ -16,6 +16,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models.practice import Practice
+from app.services.availability import office_status
 from app.services.llm.prompt import _render_hours, _render_kb
 
 
@@ -32,6 +33,7 @@ def build_dynamic_variables(practice: Practice) -> dict[str, str]:
     kb = _render_kb(practice.knowledge_base or {})
     hours = _render_hours(practice.business_hours or {}) if practice.business_hours else ""
     langs = ", ".join(practice.languages_enabled or []) or "en"
+    status, eta = office_status(practice, now=now)
 
     # Per-practice agent persona (onboarding step 5 / doctor panel). The prompt's
     # canonical opening (incl. the MANDATORY AI-disclosure + recording line) stays
@@ -56,6 +58,11 @@ def build_dynamic_variables(practice: Practice) -> dict[str, str]:
         "today": now.strftime("%A, %B %-d, %Y"),
         "current_time": now.strftime("%-I:%M %p"),
         "timezone": practice.timezone or "UTC",
+        # Is anyone actually there right now? An urgent caller at 11pm must not be
+        # promised a callback "in a few minutes" — and after hours a true medical
+        # emergency has to be sent to the ER, not put in a queue.
+        "office_status": status,
+        "callback_eta": eta,
         # The structured clinic brain (providers/visit types/insurance/policies).
         "kb_context": kb if kb else "No additional clinic details on file.",
     }

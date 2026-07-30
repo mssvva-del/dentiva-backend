@@ -38,6 +38,7 @@ def _build_practice_me(practice: Practice) -> PracticeMe:
         languages_enabled=list(practice.languages_enabled),
         business_hours=practice.business_hours,
         reminders_enabled=practice.reminders_enabled,
+        booking_alerts_enabled=practice.booking_alerts_enabled,
         answer_mode=practice.answer_mode,
         rings_before_ai=practice.rings_before_ai,
         # The clinic-facing instruction, computed from the mode + rings. The AI
@@ -122,6 +123,13 @@ async def update_practice_me(
     ):
         db_practice.reminders_enabled = payload.reminders_enabled
         changed_fields.append("reminders_enabled")
+
+    if (
+        payload.booking_alerts_enabled is not None
+        and payload.booking_alerts_enabled != db_practice.booking_alerts_enabled
+    ):
+        db_practice.booking_alerts_enabled = payload.booking_alerts_enabled
+        changed_fields.append("booking_alerts_enabled")
 
     if payload.answer_mode is not None and payload.answer_mode != db_practice.answer_mode:
         db_practice.answer_mode = payload.answer_mode
