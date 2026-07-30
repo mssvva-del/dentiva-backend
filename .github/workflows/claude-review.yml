@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # The action mints an OIDC token before it looks at ANTHROPIC_API_KEY; without
+  # this it dies with "Unable to get ACTIONS_ID_TOKEN_REQUEST_URL".
+  id-token: write
 
 jobs:
   review:
