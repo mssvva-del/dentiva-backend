@@ -212,3 +212,60 @@ async def compute_native_slots(
                     break
             cursor += timedelta(minutes=step_minutes)
     return slots
+
+
+# ---------------------------------------------------------------------------
+# Is the office open RIGHT NOW? — the agent cannot promise a callback "in a few
+# minutes" at 11pm, and an urgent caller must be told what actually happens next.
+# ---------------------------------------------------------------------------
+
+_DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _spoken_time(hour: int, minute: int) -> str:
+    ampm = "AM" if hour < 12 else "PM"
+    h12 = hour % 12 or 12
+    return f"{h12} {ampm}" if minute == 0 else f"{h12}:{minute:02d} {ampm}"
+
+
+def office_status(practice: Practice, *, now: datetime | None = None) -> tuple[str, str]:
+    """("open"|"closed", phrase for when the team is next reachable).
+
+    The phrase is spoken to the caller, so it is relative and human: "in a few
+    minutes" while open, "first thing tomorrow morning, from 9 AM" when closed.
+    Unknown/empty business_hours → treated as OPEN with a vague phrase: assuming
+    closed would tell a caller with a real problem to wait until tomorrow.
+    """
+    tz = _tz(practice.timezone)
+    now_local = (now or datetime.now(tz=UTC)).astimezone(tz)
+    hours = practice.business_hours or {}
+
+    def _day(d) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        h = hours.get(_WEEKDAY_KEYS[d.weekday()])
+        if not isinstance(h, dict):
+            return None
+        o, c = _parse_hhmm(h.get("open", "")), _parse_hhmm(h.get("close", ""))
+        return (o, c) if o and c else None
+
+    if not hours:
+        return "open", "shortly"
+
+    today = _day(now_local.date())
+    if today is not None:
+        (oh, om), (ch, cm) = today
+        minutes_now = now_local.hour * 60 + now_local.minute
+        if oh * 60 + om <= minutes_now < ch * 60 + cm:
+            return "open", "in a few minutes"
+        if minutes_now < oh * 60 + om:
+            return "closed", f"as soon as we open this morning, at {_spoken_time(oh, om)}"
+
+    # Closed for the day — find the next day we're open (a week is enough).
+    for offset in range(1, 8):
+        day = (now_local + timedelta(days=offset)).date()
+        nxt = _day(day)
+        if nxt is None:
+            continue
+        (oh, om), _ = nxt
+        when = "tomorrow" if offset == 1 else f"on {_DAY_NAMES[day.weekday()]}"
+        return "closed", f"first thing {when}, from {_spoken_time(oh, om)}"
+    return "closed", "as soon as the office reopens"

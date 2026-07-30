@@ -368,3 +368,24 @@ async def page_clinic_urgent_callback(
     )
     # opted_out is a patient-consent concept; this goes to the practice's own line.
     return await send_sms(to, body, client=client)
+
+
+async def page_clinic_new_booking(
+    *,
+    to: str | None,
+    practice_name: str,
+    first_name: str | None,
+    date: str,
+    time: str,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Text the CLINIC that the AI booked an appointment.
+
+    Name and time only: the reason for the visit is clinical detail the clinic can
+    read in the dashboard, and this SMS travels unencrypted.
+    """
+    body = (
+        f"{practice_name}: AI booked {first_name or 'a patient'} for {date} at {time}. "
+        "Details in your Dentovox dashboard."
+    )
+    return await send_sms(to, body, client=client)

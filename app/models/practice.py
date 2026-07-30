@@ -54,6 +54,13 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     reminders_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true", default=True
     )
+    # Text the clinic when the AI books an appointment. Until a PMS sync exists,
+    # a new booking is only visible in our dashboard — a front desk does not watch
+    # a dashboard, so the alert is what keeps their day accurate. Default on;
+    # a busy practice can turn it off in Settings.
+    booking_alerts_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true", default=True
+    )
 
     # ── Onboarding + lifecycle (Platform Iter 1, Phase B) ────────────────────
     # Wizard progress. Convention: a NEW practice starts at step 1 and counts up

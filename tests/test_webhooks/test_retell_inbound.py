@@ -174,4 +174,11 @@ async def test_inbound_webhook_unknown_agent_returns_empty_when_multi(client,
     r = await client.post("/webhooks/retell/inbound", content=body,
                           headers={"content-type": "application/json"})
     assert r.status_code == 200
-    assert r.json()["call_inbound"]["dynamic_variables"] == {}
+    variables = r.json()["call_inbound"]["dynamic_variables"]
+    # No clinic identity may leak when the clinic is ambiguous.
+    assert "practice_name" not in variables
+    assert "kb_context" not in variables
+    # But the two variables the emergency branch SPEAKS must still be present:
+    # Retell substitutes only the keys we send, so a missing one is read aloud as
+    # a literal "{{callback_eta}}" to someone describing an emergency.
+    assert variables == {"office_status": "open", "callback_eta": "shortly"}

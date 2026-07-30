@@ -18,14 +18,20 @@ jobs:
     runs-on: ubuntu-latest
     # Advisory: never block a merge — even on a missing key or action error.
     continue-on-error: true
-    # Skip when the key isn't configured yet, so PRs aren't blocked by a red job.
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    # Read the secret at job level so the step below can TEST it: the `secrets`
+    # context isn't available in a job-level `if`, and without this the action
+    # fails loudly ("ANTHROPIC_API_KEY is required") on every PR until the secret
+    # exists, which reads as a broken build rather than a feature not set up yet.
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: anthropics/claude-code-action@v1
+      - if: env.ANTHROPIC_API_KEY != ''
+        uses: anthropics/claude-code-action@v1
         with:
           prompt: |
             Review this PR for the Dentovox backend (FastAPI, async SQLAlchemy 2,

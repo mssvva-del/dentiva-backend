@@ -19,6 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 os.environ["AUTH_DEV_BYPASS"] = "true"
+# No outbound SMS from the test suite, ever. A developer .env with real Twilio
+# credentials was being picked up here, so every booking test fired live requests
+# at Twilio — real money, real rate limits, and a suite that hung on the network
+# instead of failing. Tests that care about SMS assert on the call, not the send.
+os.environ["SMS_ENABLED"] = "false"
+os.environ["TWILIO_ACCOUNT_SID"] = ""
+os.environ["TWILIO_AUTH_TOKEN"] = ""
 # Mount the Groq custom-LLM relay so its WS tests run (prod keeps it off by default).
 os.environ["ENABLE_LLM_RELAY"] = "true"
 # App connects as the RLS-enforced dentiva_app role; schema mgmt uses the owner.

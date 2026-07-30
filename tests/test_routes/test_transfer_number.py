@@ -120,3 +120,146 @@ async def test_non_urgent_callback_does_not_page(client, db_session, monkeypatch
     assert resp.status_code == 200
     await asyncio.sleep(0)
     assert paged == [], "routine callbacks must not text the clinic every time"
+
+
+# ---------------------------------------------------------------------------
+# TIER 1 — the emergency room, not our callback queue.
+#
+# "The team will call you back" is dangerous for an airway or a bleed that won't
+# stop, and after hours it means "wait until morning". The tier is decided in the
+# backend by regex over the tool arguments, so it holds regardless of what the
+# model concluded and regardless of the hour.
+# ---------------------------------------------------------------------------
+
+
+async def test_life_threatening_signs_get_an_er_referral_not_a_callback_promise(
+    client, db_session
+):
+    await seed_practice(
+        db_session, name="ER One", clerk_org_id="org_er1", clerk_user_id="user_er1"
+    )
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "tr-er-1", "agent_id": "agent_er1"},
+            "name": "create_callback_request",
+            "args": {"patient_phone": "+15552223333", "urgent": False,
+                     "reason": "my face is swelling and I can't breathe"},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "er_referral"
+    assert "911" in body["message"]
+    # It must not tell the agent to offer a slot or a hold instead.
+    assert "emergency room" in body["message"].lower()
+
+    # The follow-up row is still written, and as urgent even though urgent=False
+    # was passed — the caller described a life-threatening sign.
+    await db_session.commit()
+    db_session.expire_all()
+    cb = (await db_session.execute(select(CallbackRequest))).scalars().all()
+    assert len(cb) == 1 and cb[0].urgent is True
+
+
+async def test_escalation_with_life_threatening_signs_also_refers_to_the_er(
+    client, db_session
+):
+    await seed_practice(
+        db_session, name="ER Two", clerk_org_id="org_er2", clerk_user_id="user_er2"
+    )
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "tr-er-2", "agent_id": "agent_er2"},
+            "name": "transfer_to_human",
+            "args": {"reason": "bleeding won't stop after the extraction"},
+        },
+    )
+    assert resp.json()["status"] == "er_referral"
+
+
+async def test_urgent_dental_pain_stays_ours(client, db_session):
+    """Severe pain and a knocked-out tooth are dental urgencies, not ER cases —
+    sending every one of those to an ER would be its own failure."""
+    await seed_practice(
+        db_session, name="ER Three", clerk_org_id="org_er3", clerk_user_id="user_er3"
+    )
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "tr-er-3", "agent_id": "agent_er3"},
+            "name": "create_callback_request",
+            "args": {"patient_phone": "+15554445555", "urgent": True,
+                     "reason": "severe pain in a back molar, knocked out tooth"},
+        },
+    )
+    assert resp.json()["status"] == "callback_logged"
+
+
+async def test_booking_texts_the_clinic_without_the_reason(client, db_session, monkeypatch):
+    """A booking the clinic never sees is a double-booking waiting to happen —
+    but the reason for the visit stays out of the SMS."""
+    from app.webhooks import retell as retell_mod
+
+    sent: list[dict] = []
+
+    async def _fake_page(**kwargs):
+        sent.append(kwargs)
+        return {"sent": True}
+
+    monkeypatch.setattr(retell_mod, "page_clinic_new_booking", _fake_page)
+    practice, _ = await seed_practice(
+        db_session, name="Alerted Dental", clerk_org_id="org_ba1", clerk_user_id="user_ba1"
+    )
+    practice.phone_number = "+15551112222"
+    await db_session.commit()
+
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "tr-ba-1", "agent_id": "agent_ba1"},
+            "name": "book_appointment",
+            "args": {"patient_first_name": "Dana", "patient_last_name": "Reed",
+                     "patient_phone": "+15553334444", "procedure": "cleaning",
+                     "preferred_date": "2099-12-15", "preferred_time_window": "morning"},
+        },
+    )
+    assert resp.json()["booked"] is True
+    await asyncio.sleep(0)
+    assert len(sent) == 1
+    assert sent[0]["to"] == "+15551112222"
+    assert sent[0]["first_name"] == "Dana"
+    assert "procedure" not in sent[0], "the visit reason belongs in the dashboard"
+
+
+async def test_clinic_can_turn_booking_alerts_off(client, db_session, monkeypatch):
+    from app.webhooks import retell as retell_mod
+
+    sent: list[dict] = []
+
+    async def _fake_page(**kwargs):
+        sent.append(kwargs)
+        return {"sent": True}
+
+    monkeypatch.setattr(retell_mod, "page_clinic_new_booking", _fake_page)
+    practice, _ = await seed_practice(
+        db_session, name="Quiet Alerts", clerk_org_id="org_ba2", clerk_user_id="user_ba2"
+    )
+    practice.phone_number = "+15559990000"
+    practice.booking_alerts_enabled = False
+    await db_session.commit()
+
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "tr-ba-2", "agent_id": "agent_ba2"},
+            "name": "book_appointment",
+            "args": {"patient_first_name": "Sam", "patient_last_name": "Lee",
+                     "patient_phone": "+15557778888", "procedure": "cleaning",
+                     "preferred_date": "2099-12-16", "preferred_time_window": "morning"},
+        },
+    )
+    assert resp.json()["booked"] is True
+    await asyncio.sleep(0)
+    assert sent == []
