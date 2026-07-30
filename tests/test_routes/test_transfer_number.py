@@ -263,3 +263,25 @@ async def test_clinic_can_turn_booking_alerts_off(client, db_session, monkeypatc
     assert resp.json()["booked"] is True
     await asyncio.sleep(0)
     assert sent == []
+
+
+async def test_transfer_destination_is_published_to_the_agent(db_session):
+    """The native transfer tools dial {{clinic_transfer_number}} — if we don't
+    fill it, the agent transfers into an empty string."""
+    from app.services.llm.dynamic_vars import build_dynamic_variables
+
+    practice, _ = await seed_practice(
+        db_session, name="Dest Dental", clerk_org_id="org_dst", clerk_user_id="user_dst"
+    )
+    practice.transfer_phone_number = "+15551234567"
+    practice.phone_number = "+15559999999"
+    variables = build_dynamic_variables(practice)
+    assert variables["clinic_transfer_number"] == "+15551234567"
+
+    # No dedicated transfer line → the main office line.
+    practice.transfer_phone_number = None
+    assert build_dynamic_variables(practice)["clinic_transfer_number"] == "+15559999999"
+
+    # No line at all → empty, so the prompt keeps the agent on the callback path.
+    practice.phone_number = None
+    assert build_dynamic_variables(practice)["clinic_transfer_number"] == ""
