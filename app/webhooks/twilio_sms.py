@@ -33,6 +33,7 @@ import uuid
 from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, Request, Response
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import app.db as _app_db
@@ -40,6 +41,7 @@ from app.config import get_settings
 from app.db import set_tenant
 from app.models.audit_log import AuditLog
 from app.models.enums import CANCELLED
+from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
 from app.services.sms import send_cancellation_notice, send_waitlist_opening
 from app.webhooks.retell import (
@@ -177,7 +179,7 @@ async def twilio_sms_webhook(request: Request) -> Response:
     logger.info("twilio-sms: from=…%s intent=%s", from_number[-4:] if from_number else "??", intent)
 
     try:
-        return await _handle_sms(from_number, intent)
+        return await _handle_sms(from_number, intent, params.get("To", ""))
     except Exception:  # noqa: BLE001 — never retry-storm Twilio
         logger.exception("twilio-sms: handler failed")
         return _twiml()
@@ -199,8 +201,23 @@ async def _already_claimed(sid: str) -> bool:
     return result.rowcount == 0
 
 
-async def _handle_sms(from_number: str, intent: str) -> Response:
-    practice = await _resolve_practice(None)
+async def _resolve_practice_for_sms(to_number: str):
+    """Which clinic was texted. ``To`` is OUR number for that clinic (unique per
+    practice since NUM-1), so an inbound STOP/CANCEL reaches the right records
+    even with several clinics — previously this guessed and, with more than one
+    practice, silently did nothing (a missed opt-out is a TCPA problem)."""
+    if to_number:
+        async with _app_db.async_session_factory() as session:
+            p = (await session.execute(
+                select(Practice).where(Practice.ai_phone_number == to_number)
+            )).scalar_one_or_none()
+            if p is not None:
+                return p
+    return await _resolve_practice(None)
+
+
+async def _handle_sms(from_number: str, intent: str, to_number: str = "") -> Response:
+    practice = await _resolve_practice_for_sms(to_number)
     if practice is None:
         return _twiml()
     practice_id = practice.id

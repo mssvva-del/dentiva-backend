@@ -863,3 +863,27 @@ async def test_web_call_metadata_attributes_to_right_practice(client, db_session
         select(Call).where(Call.retell_call_id == "retell-meta-1")
     )).scalar_one_or_none()
     assert call is not None and call.practice_id == p2_id
+
+
+async def test_inbound_routes_by_per_clinic_number(client, db_session):
+    """NUM-1: the number the caller reached identifies the clinic. With two
+    clinics, a call to clinic B's Dentovox number must return B's variables —
+    a shared number made this ambiguous and the router refused to guess."""
+    from app.webhooks.retell import _resolve_practice_for_inbound
+    a, _ = await seed_practice(db_session, name="RouteA", clerk_org_id="org_ra",
+                              clerk_user_id="u_ra")
+    b, _ = await seed_practice(db_session, name="RouteB", clerk_org_id="org_rb",
+                              clerk_user_id="u_rb")
+    a.ai_phone_number = "+16205550001"
+    b.ai_phone_number = "+17185550002"
+    b_id, b_name = b.id, b.name
+    await db_session.commit()
+
+    got = await _resolve_practice_for_inbound(None, "+17185550002")
+    assert got is not None and got.id == b_id and got.name == b_name
+
+    got_a = await _resolve_practice_for_inbound(None, "+16205550001")
+    assert got_a is not None and got_a.id == a.id
+
+    # An unknown number with 2+ clinics must NOT be guessed at.
+    assert await _resolve_practice_for_inbound(None, "+19995559999") is None

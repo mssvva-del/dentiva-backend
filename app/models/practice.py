@@ -42,6 +42,11 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     )
     business_hours: Mapped[dict] = mapped_column(JSONB, nullable=False)
     retell_agent_id: Mapped[str | None] = mapped_column(Text)
+    # The Dentovox number THIS clinic forwards its own line to. Provisioned per
+    # practice (Retell buys it in the clinic's area code) — inbound routing keys
+    # off it, so it must be unique. NULL until provisioned; the global
+    # RETELL_FROM_NUMBER is the single-tenant fallback while that's the case.
+    ai_phone_number: Mapped[str | None] = mapped_column(Text, unique=True)
     # Per-practice toggle for the appointment-reminder scheduler. The global
     # REMINDERS_ENABLED env is the master switch (starts the loop); this lets an
     # individual practice opt in/out. Default on so reminders work once enabled

@@ -1675,10 +1675,21 @@ from app.services.llm.dynamic_vars import build_dynamic_variables  # noqa: E402
 
 async def _resolve_practice_for_inbound(agent_id: str | None,
                                         to_number: str | None) -> Practice | None:
-    """Prefer the explicit agent binding; else the practice owning the dialed
-    number; else the single-tenant fallback in _resolve_practice."""
+    """Which clinic was called.
+
+    ``to_number`` is the number the caller reached — OUR number for this clinic
+    (the one they forward their line to), which is unique per practice (NUM-1).
+    That makes it the reliable key. We also still match the clinic's OWN number,
+    because a practice can point a line at us directly rather than forwarding.
+    Falls back to agent-id routing, then the single-practice case.
+    """
     if to_number:
         async with _app_db.async_session_factory() as session:
+            p = (await session.execute(
+                select(Practice).where(Practice.ai_phone_number == to_number)
+            )).scalar_one_or_none()
+            if p is not None:
+                return p
             p = (await session.execute(
                 select(Practice).where(Practice.phone_number == to_number)
             )).scalar_one_or_none()
