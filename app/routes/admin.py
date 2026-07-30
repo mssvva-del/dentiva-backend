@@ -601,9 +601,18 @@ class QaPattern(BaseModel):
     fixes: list[str]
 
 
+class QaBrokenPromise(BaseModel):
+    call_id: str
+    outcome: str | None
+    reasons: list[str]
+
+
 class QaReview(BaseModel):
     reviewed: int
     lost_callers: int
+    # Non-empty = the agent promised something we don't deliver. Release blocker,
+    # not a nice-to-have; scanned on EVERY recent call, not just failed ones.
+    broken_promises: list[QaBrokenPromise] = []
     patterns: list[QaPattern]
     findings: list[QaFinding]
 
@@ -1627,6 +1636,88 @@ async def get_voice_model(
         raise _retell_http(exc) from exc
     return VoiceModelState(model=model, allowed=list(ALLOWED_VOICE_MODELS),
                            agent_id=agent_id)
+
+
+class VoiceLiveConfig(BaseModel):
+    agent_id: str
+    voice_id: str | None
+    voice_model: str | None
+    interruption_sensitivity: float | None
+    end_call_after_silence_ms: int | None
+    model: str | None
+    tools: list[str]
+    native_transfer_tools: list[str]
+    has_emergency_room_branch: bool
+    promises_a_bridge_it_cannot_make: bool
+    drift: list[str]
+
+
+@router.get("/voice/live-config", response_model=VoiceLiveConfig)
+async def get_voice_live_config(
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_SYSTEM_HEALTH)),
+) -> VoiceLiveConfig:
+    """What the agent CALLERS actually reach is configured to do, read live.
+
+    Repo files and the live agent have already drifted twice — a prompt fix was
+    published to one agent while production answered on another, and the voice
+    tuning in the repo never matched the live one. This reads the real thing
+    through the server's own Retell key and names the differences that change
+    what a caller hears.
+    """
+    agent_id = await _live_agent_id()
+    try:
+        agent = await get_agent(agent_id)
+        llm_id = (agent.get("response_engine") or {}).get("llm_id")
+        llm = await get_llm(llm_id) if llm_id else {}
+    except (RetellNotConfigured, RetellError) as exc:
+        raise _retell_http(exc) from exc
+
+    prompt = llm.get("general_prompt") or ""
+    tools = llm.get("general_tools") or []
+    native = [t.get("name", "") for t in tools if t.get("type") == "transfer_call"]
+    # The exact wording that left callers listening to silence.
+    lying = bool(re.search(r"connect(ing)? you|transferr?ing you|put you through",
+                           prompt, re.IGNORECASE))
+    has_er = "911" in prompt or "emergency room" in prompt.lower()
+
+    drift: list[str] = []
+    if lying:
+        drift.append(
+            "prompt still promises to connect the caller — a custom tool cannot "
+            "bridge a call, so that promise ends in silence"
+        )
+    if not has_er:
+        drift.append(
+            "no emergency-room branch: a caller who can't breathe would be put in "
+            "the callback queue"
+        )
+    if not native:
+        drift.append("no native transfer_call tool — escalation can only be a callback")
+    sens = agent.get("interruption_sensitivity")
+    if sens is not None and sens > 0.7:
+        drift.append(
+            f"interruption_sensitivity={sens}: above 0.7 the agent chops its own "
+            "speech on echo"
+        )
+    if "{{office_status}}" not in prompt and "{{callback_eta}}" not in prompt:
+        drift.append(
+            "callback promise is not hours-aware — at 11pm it still says the team "
+            "will call back shortly"
+        )
+
+    return VoiceLiveConfig(
+        agent_id=agent_id,
+        voice_id=agent.get("voice_id"),
+        voice_model=agent.get("voice_model"),
+        interruption_sensitivity=sens,
+        end_call_after_silence_ms=agent.get("end_call_after_silence_ms"),
+        model=llm.get("model"),
+        tools=[t.get("name", "") for t in tools],
+        native_transfer_tools=native,
+        has_emergency_room_branch=has_er,
+        promises_a_bridge_it_cannot_make=lying,
+        drift=drift,
+    )
 
 
 @router.put("/voice/model", response_model=VoiceModelState)

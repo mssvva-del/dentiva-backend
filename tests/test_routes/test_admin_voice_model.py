@@ -126,3 +126,76 @@ async def test_voice_model_404_without_agent(client, db_session, monkeypatch):
     # no practice has retell_agent_id and env is empty in tests
     r = await client.get("/api/admin/voice/model", headers=_h("sa_vm4"))
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Live-config drift check.
+#
+# Twice in one day the repo and the live agent disagreed: a prompt fix went to one
+# agent while production answered on another, and the voice tuning in the repo was
+# never the tuning callers heard. This endpoint reads the real agent and names the
+# differences that change what a caller hears.
+# ---------------------------------------------------------------------------
+
+_GOOD_PROMPT = (
+    "EMERGENCY: tell them to call 911 or go to the nearest emergency room. "
+    "Otherwise the team calls back {{callback_eta}} while the office is "
+    "{{office_status}}."
+)
+_BAD_PROMPT = "On request: 'let me connect you with a team member, one moment.'"
+
+
+def _fake_live(monkeypatch, *, prompt, tools, sensitivity):
+    async def _agent(agent_id, **_kw):
+        return {"agent_id": agent_id, "response_engine": {"llm_id": "llm_vm"},
+                "voice_id": "11labs-Marissa", "voice_model": "eleven_flash_v2_5",
+                "interruption_sensitivity": sensitivity,
+                "end_call_after_silence_ms": 45000}
+
+    async def _llm(llm_id, **_kw):
+        return {"llm_id": llm_id, "model": "gpt-4.1", "general_prompt": prompt,
+                "general_tools": tools}
+
+    monkeypatch.setattr(admin_mod, "get_agent", _agent)
+    monkeypatch.setattr(admin_mod, "get_llm", _llm)
+
+
+async def test_live_config_reports_a_clean_agent(client, db_session, monkeypatch):
+    await _internal(db_session, clerk_id="eng_lc1", role="engineer")
+    practice, _ = await seed_practice(db_session, name="LCCo",
+                                      clerk_org_id="o_lc1", clerk_user_id="u_lc1")
+    await _bind_agent(db_session, practice.id, agent_id="agent_lc_1")
+    _fake_live(monkeypatch, prompt=_GOOD_PROMPT, sensitivity=0.65, tools=[
+        {"name": "book_appointment", "type": "custom"},
+        {"name": "transfer_to_team", "type": "transfer_call"},
+    ])
+
+    r = await client.get("/api/admin/voice/live-config", headers=_h("eng_lc1"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["drift"] == []
+    assert body["native_transfer_tools"] == ["transfer_to_team"]
+    assert body["has_emergency_room_branch"] is True
+    assert body["promises_a_bridge_it_cannot_make"] is False
+
+
+async def test_live_config_names_every_drift(client, db_session, monkeypatch):
+    """An agent stuck on the pre-fix config must be impossible to miss."""
+    await _internal(db_session, clerk_id="eng_lc2", role="engineer")
+    practice, _ = await seed_practice(db_session, name="LCCo2",
+                                      clerk_org_id="o_lc2", clerk_user_id="u_lc2")
+    await _bind_agent(db_session, practice.id, agent_id="agent_lc_2")
+    _fake_live(monkeypatch, prompt=_BAD_PROMPT, sensitivity=0.8, tools=[
+        {"name": "book_appointment", "type": "custom"},
+    ])
+
+    r = await client.get("/api/admin/voice/live-config", headers=_h("eng_lc2"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["promises_a_bridge_it_cannot_make"] is True
+    assert body["has_emergency_room_branch"] is False
+    assert body["native_transfer_tools"] == []
+    joined = " | ".join(body["drift"])
+    for expected in ("promises to connect", "emergency-room", "native transfer_call",
+                     "interruption_sensitivity", "hours-aware"):
+        assert expected in joined, f"drift must name {expected}: {joined}"
