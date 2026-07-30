@@ -25,6 +25,21 @@ from app.services.retell_admin import RetellError, RetellNotConfigured, _request
 
 logger = logging.getLogger("dentiva.telephony.provision")
 
+# A number costs money every month, for as long as it exists. Most self-serve
+# signups never become customers, and an unused number doesn't go away by itself —
+# a year of tyre-kickers is a permanent monthly bill. So a number follows a
+# COMMERCIAL COMMITMENT, not a signup: the practice must have been moved past raw
+# onboarding (trial/pilot by us today, payment-backed once Stripe is live).
+#
+# Nothing is lost for the prospect: the browser demo already lets them talk to
+# their own AI receptionist, using their own clinic's data, before any number
+# exists. The number is what turns that into a live phone line.
+PROVISIONABLE_STATUSES = frozenset({"trial", "pilot", "active"})
+
+
+class NotEntitledToNumber(Exception):
+    """Practice hasn't reached a paid/approved state — no number for it yet."""
+
 
 def area_code_of(*numbers: str | None) -> int | None:
     """US area code from the first usable number given, else None.
@@ -53,6 +68,10 @@ async def provision_number_for_practice(
     number answers correctly from the first call. Raises RetellNotConfigured /
     RetellError — the caller maps those to a clean HTTP status.
     """
+    if practice.status not in PROVISIONABLE_STATUSES:
+        raise NotEntitledToNumber(
+            f"practice status '{practice.status}' is not entitled to a number"
+        )
     settings = get_settings()
     if not settings.retell_agent_id:
         raise RetellNotConfigured("RETELL_AGENT_ID not set — nothing to bind the number to")

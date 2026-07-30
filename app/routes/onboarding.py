@@ -271,10 +271,17 @@ async def step_phone(
     provisioned = False
     if payload.mode == "forward" and not p.ai_phone_number:
         from app.services.retell_admin import RetellError, RetellNotConfigured
-        from app.services.telephony.provision import provision_number_for_practice
+        from app.services.telephony.provision import (
+            NotEntitledToNumber,
+            provision_number_for_practice,
+        )
         try:
             p.ai_phone_number = await provision_number_for_practice(p)
             provisioned = True
+        except NotEntitledToNumber:
+            # Expected for a practice still evaluating — not a failure, and not
+            # something to page anyone about. The step's copy explains it.
+            logger.info("phone step: %s not entitled to a number yet", p.id)
         except (RetellError, RetellNotConfigured) as exc:
             logger.warning("phone step: provisioning failed for %s: %s", p.id, exc)
             record_alert("number_provision_failed", f"practice={p.id}")
@@ -302,7 +309,10 @@ async def provision_phone_number(
     twice must never buy two numbers.
     """
     from app.services.retell_admin import RetellError, RetellNotConfigured
-    from app.services.telephony.provision import provision_number_for_practice
+    from app.services.telephony.provision import (
+        NotEntitledToNumber,
+        provision_number_for_practice,
+    )
 
     # FOR UPDATE, not a plain read: this endpoint SPENDS MONEY. Two concurrent
     # calls (a double click, or React re-running the effect) would both see NULL
@@ -316,6 +326,14 @@ async def provision_phone_number(
         return _state(p)
     try:
         p.ai_phone_number = await provision_number_for_practice(p)
+    except NotEntitledToNumber as exc:
+        # 402, not 403: this is "start your plan", not "you may not". The wizard
+        # shows the activate path and web calls keep working meanwhile.
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Your own phone number activates when your plan starts. "
+                   "Web calls work now — try your receptionist from the dashboard.",
+        ) from exc
     except RetellNotConfigured as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
