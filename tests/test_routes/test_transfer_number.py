@@ -7,6 +7,8 @@ promise a connection that could not happen. These tests pin the honest contract.
 
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy import select
 
 from app.db import set_tenant
@@ -64,3 +66,57 @@ async def test_practice_me_exposes_transfer_number(client, db_session):
         await db_session.execute(select(Practice).where(Practice.id == practice.id))
     ).scalar_one()
     assert db_practice.transfer_phone_number == "+15550001234"
+
+
+async def test_urgent_callback_pages_the_clinic(client, db_session, monkeypatch):
+    """A row in the dashboard is not a page — the team must be told."""
+    from app.webhooks import retell as retell_mod
+
+    paged: list[dict] = []
+
+    async def _fake_page(**kwargs):
+        paged.append(kwargs)
+        return {"sent": True}
+
+    monkeypatch.setattr(retell_mod, "page_clinic_urgent_callback", _fake_page)
+
+    practice, _ = await seed_practice(
+        db_session, name="Paged Dental", clerk_org_id="org_pg1", clerk_user_id="user_pg1"
+    )
+    practice.transfer_phone_number = "+15550009999"
+    await db_session.commit()
+
+    resp = await _transfer(client)
+    assert resp.status_code == 200
+    await asyncio.sleep(0)  # let the detached send task run
+    assert len(paged) == 1
+    assert paged[0]["to"] == "+15550009999"      # the clinic's own line, not the patient
+    assert paged[0]["practice_name"] == "Paged Dental"
+
+
+async def test_non_urgent_callback_does_not_page(client, db_session, monkeypatch):
+    from app.webhooks import retell as retell_mod
+
+    paged: list[dict] = []
+
+    async def _fake_page(**kwargs):
+        paged.append(kwargs)
+        return {"sent": True}
+
+    monkeypatch.setattr(retell_mod, "page_clinic_urgent_callback", _fake_page)
+    await seed_practice(
+        db_session, name="Quiet Dental", clerk_org_id="org_pg2", clerk_user_id="user_pg2"
+    )
+
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "tr-call-2", "agent_id": "agent_tr2"},
+            "name": "create_callback_request",
+            "args": {"patient_first_name": "Ann", "patient_phone": "+15551110000",
+                     "reason": "wants a price for whitening", "urgent": False},
+        },
+    )
+    assert resp.status_code == 200
+    await asyncio.sleep(0)
+    assert paged == [], "routine callbacks must not text the clinic every time"

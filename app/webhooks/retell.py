@@ -44,6 +44,7 @@ from app.observability.alerts import record_alert
 from app.services.availability import compute_native_slots, slot_to_utc
 from app.services.call_outcome import BOOKED, classify_outcome
 from app.services.sms import (
+    page_clinic_urgent_callback,
     send_booking_confirmation,
     send_cancellation_notice,
     send_waitlist_opening,
@@ -1460,6 +1461,35 @@ async def _update_and_read_emergency_flag(
         return bool(call.emergency_active)
 
 
+async def _page_clinic_urgent_callback(
+    session, practice_id, first_name: str | None, phone: str | None
+) -> None:
+    """Text the clinic that an urgent callback is waiting.
+
+    The dashboard row is not a page — the sidebar badge only moves while someone
+    has the tab open. We tell urgent callers the team will ring back within
+    minutes, so the team has to be told without watching a screen. Best-effort:
+    a failed page must never fail the callback itself (send_sms already alerts).
+    """
+    row = (await session.execute(
+        select(Practice.name, Practice.transfer_phone_number, Practice.phone_number)
+        .where(Practice.id == practice_id)
+    )).first()
+    if row is None:
+        return
+    name, transfer_to, main_to = row
+    dest = transfer_to or main_to
+    if not dest:
+        record_alert("urgent_callback_unpageable", f"practice={practice_id}")
+        return
+    _fire_sms(page_clinic_urgent_callback(
+        to=dest,
+        practice_name=name or "Dentovox",
+        first_name=first_name,
+        patient_phone=phone,
+    ))
+
+
 async def _handle_create_callback_request(
     retell_call_id: str, args: dict, agent_id: str | None
 ) -> dict:
@@ -1487,6 +1517,10 @@ async def _handle_create_callback_request(
                 "create_callback_request: no practice found; not persisted. call=%s",
                 retell_call_id,
             )
+            # The agent is about to tell the caller their request was recorded, and
+            # nothing was written — we cannot resolve a tenant to write it under.
+            # Alert so a human can chase the call before the caller gives up on us.
+            record_alert("callback_not_persisted", f"call={retell_call_id}")
             return {
                 "status": "callback_logged",
                 "message": "Your callback request has been recorded; our team will reach out.",
@@ -1506,6 +1540,8 @@ async def _handle_create_callback_request(
         )
         session.add(callback)
         await session.commit()
+        if urgent:
+            await _page_clinic_urgent_callback(session, practice_id, first_name, phone)
 
     logger.info(
         "create_callback_request persisted: call=%s phone=%s urgent=%s",
@@ -1545,11 +1581,29 @@ async def _handle_transfer_to_human(retell_call_id: str, args: dict) -> dict:
         practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
         if practice_id is None:
             logger.warning("transfer_to_human: no practice for call=%s", retell_call_id)
+            record_alert("escalation_not_persisted", f"call={retell_call_id}")
             return honest_reply
         await set_tenant(session, practice_id)
         call = (await session.execute(
             select(Call).where(Call.retell_call_id == retell_call_id)
         )).scalar_one_or_none()
+        # The emergency flow calls create_callback_request(urgent=true) and THEN
+        # escalates, so without this the team gets the same caller twice in the
+        # queue and two pages.
+        if call is not None:
+            dup = (await session.execute(
+                select(CallbackRequest.id).where(
+                    CallbackRequest.call_id == call.id,
+                    CallbackRequest.urgent.is_(True),
+                    CallbackRequest.status == "pending",
+                )
+            )).first()
+            if dup is not None:
+                logger.info(
+                    "transfer_to_human: urgent callback already queued for call=%s",
+                    retell_call_id,
+                )
+                return honest_reply
         session.add(CallbackRequest(
             id=uuid.uuid4(),
             practice_id=practice_id,
@@ -1566,6 +1620,10 @@ async def _handle_transfer_to_human(retell_call_id: str, args: dict) -> dict:
             status="pending",
         ))
         await session.commit()
+        await _page_clinic_urgent_callback(
+            session, practice_id, args.get("patient_first_name"),
+            args.get("patient_phone") or (call.from_number if call else None),
+        )
 
     logger.info("transfer_to_human → urgent callback: call=%s reason=%s",
                 retell_call_id, args.get("reason"))

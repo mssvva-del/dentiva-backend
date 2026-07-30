@@ -341,3 +341,30 @@ async def send_waitlist_opening(
         time=time,
     )
     return await send_sms(to, body, opted_out=opted_out, client=client)
+
+
+async def page_clinic_urgent_callback(
+    *,
+    to: str | None,
+    practice_name: str,
+    first_name: str | None,
+    patient_phone: str | None,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Text the CLINIC that an urgent callback is waiting.
+
+    The row in the dashboard is not a page: the sidebar badge only updates while
+    someone has the tab open. An escalated caller has been told the team will
+    call back within minutes, so the team has to learn about it without watching
+    a screen.
+
+    Minimum necessary PHI: first name + the number to call. The stated reason can
+    contain clinical detail, so it stays in the dashboard, not in an SMS.
+    """
+    body = (
+        f"{practice_name}: URGENT callback waiting — "
+        f"{first_name or 'a caller'} at {patient_phone or 'number in dashboard'}. "
+        "Details in your Dentovox dashboard."
+    )
+    # opted_out is a patient-consent concept; this goes to the practice's own line.
+    return await send_sms(to, body, client=client)
