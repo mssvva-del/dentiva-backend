@@ -106,6 +106,48 @@ async def analyze_call(transcript: dict | list | None, outcome: str | None) -> d
     }
 
 
+# ---------------------------------------------------------------------------
+# Broken-promise scan — deterministic, runs on EVERY call, not just failures.
+#
+# transfer_to_human once answered "transfer_initiated" while nothing bridged the
+# call, so the agent said "let me connect you" and the caller heard silence. That
+# call ends as a normal callback, so the failure-outcome review above would never
+# look at it. Any promise we cannot keep is checked here by regex — no LLM, no
+# outcome dependency, no PHI leaving the box.
+# ---------------------------------------------------------------------------
+
+_BROKEN_PROMISES = (
+    (r"connect(ing)?\s+you", "promised to connect the caller — no live bridge exists"),
+    (r"transferr?ing\s+you", "promised a transfer — no live bridge exists"),
+    (r"put\s+you\s+through", "promised to put the caller through — no live bridge exists"),
+    (r"stay\s+on\s+the\s+line\s+while", "asked the caller to hold for a person"),
+    (r"one\s+moment\s+while\s+i\s+(get|connect|transfer)", "implied someone is coming on"),
+)
+_BROKEN_PROMISE_RES = tuple((re.compile(p, re.I), why) for p, why in _BROKEN_PROMISES)
+
+
+def find_broken_promises(transcript: dict | list | None) -> list[str]:
+    """Reasons this transcript contains a promise the product cannot keep.
+
+    Agent turns only — a CALLER saying "can you connect me to a person" is a
+    request, not a false promise.
+    """
+    turns: list[str] = []
+    if isinstance(transcript, list):
+        turns = [str(x.get("content") or "") for x in transcript
+                 if isinstance(x, dict) and x.get("role") == "agent"]
+    elif isinstance(transcript, str):
+        # Flat transcripts are "Agent: ...\nUser: ..." — keep the agent lines.
+        turns = [ln.split(":", 1)[1] for ln in transcript.splitlines()
+                 if ln.lower().startswith("agent:") and ":" in ln]
+    hits: list[str] = []
+    for text in turns:
+        for rx, why in _BROKEN_PROMISE_RES:
+            if rx.search(text) and why not in hits:
+                hits.append(why)
+    return hits
+
+
 async def review_recent_failures(
     session: AsyncSession, *, limit: int = 15
 ) -> dict:
@@ -115,6 +157,20 @@ async def review_recent_failures(
     admin session — in prod that's the superuser role, which sees every tenant;
     the endpoint gates this to super_admin.
     """
+    # Scan EVERY recent call for promises we cannot keep — independent of outcome,
+    # because a false "connecting you" usually ends as a perfectly normal call.
+    recent = (await session.execute(
+        select(Call.id, Call.transcript_jsonb, Call.outcome)
+        .where(Call.transcript_jsonb.isnot(None))
+        .order_by(Call.started_at.desc())
+        .limit(max(limit, 50))
+    )).all()
+    broken_promises = [
+        {"call_id": str(cid), "outcome": outcome, "reasons": reasons}
+        for cid, tr, outcome in recent
+        if (reasons := find_broken_promises(tr))
+    ]
+
     rows = (await session.execute(
         select(Call)
         .where(Call.outcome.in_(tuple(FAILURE_OUTCOMES)))
@@ -153,6 +209,9 @@ async def review_recent_failures(
     return {
         "reviewed": len(findings),
         "lost_callers": sum(1 for f in findings if f["lost_caller"]),
+        # Non-empty here means the agent is promising something we don't deliver —
+        # treat as a release blocker, not a nice-to-have.
+        "broken_promises": broken_promises,
         "patterns": patterns,
         "findings": findings,
     }
