@@ -1520,38 +1520,57 @@ async def _handle_create_callback_request(
 
 
 async def _handle_transfer_to_human(retell_call_id: str, args: dict) -> dict:
-    """Allowed during an emergency — hands the call to a live team member.
+    """Escalate to a human — currently as an URGENT CALLBACK, not a live bridge.
 
-    Resolves the practice's transfer destination (transfer_phone_number, falling
-    back to its main phone_number) so Retell can bridge the call / the agent can
-    read it out. Returns ``transfer_number`` (None if the practice has none set).
+    We do not yet configure Retell's native transfer_call tool, and a `type:
+    custom` tool cannot bridge a call: the platform only connects the parties for
+    the native tool. This handler used to return "transfer_initiated" and a
+    number, so the agent announced "let me connect you" and then nothing
+    happened — the caller sat in silence. For someone in pain that is worse than
+    making no promise at all.
+
+    Until the native transfer ships, escalation takes the path that demonstrably
+    works: an urgent callback row the team sees in the dashboard, and an honest
+    line to the caller. The caller's own number is used when the agent hasn't
+    collected one, so the request is always actionable.
     """
-    transfer_number = None
+    honest_reply = {
+        "status": "callback_logged",
+        "message": (
+            "Of course — I'm flagging this for the team right now and someone "
+            "will call you straight back."
+        ),
+    }
     async with _app_db.async_session_factory() as session:
         practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
-        if practice_id is not None:
-            row = (
-                await session.execute(
-                    select(
-                        Practice.transfer_phone_number, Practice.phone_number
-                    ).where(Practice.id == practice_id)
-                )
-            ).first()
-            if row is not None:
-                transfer_number = row[0] or row[1]
+        if practice_id is None:
+            logger.warning("transfer_to_human: no practice for call=%s", retell_call_id)
+            return honest_reply
+        await set_tenant(session, practice_id)
+        call = (await session.execute(
+            select(Call).where(Call.retell_call_id == retell_call_id)
+        )).scalar_one_or_none()
+        session.add(CallbackRequest(
+            id=uuid.uuid4(),
+            practice_id=practice_id,
+            call_id=call.id if call else None,
+            patient_first_name=args.get("patient_first_name") or args.get("first_name"),
+            # The number they're calling from is the reliable one — the agent
+            # reaches this tool without having asked for a callback number.
+            phone=args.get("patient_phone") or args.get("phone")
+                  or (call.from_number if call else None),
+            reason=args.get("reason") or "caller asked for a person",
+            # A request for a human is urgent by definition — it should sit at
+            # the top of the team's queue.
+            urgent=True,
+            status="pending",
+        ))
+        await session.commit()
 
-    dest_last4 = f"…{transfer_number[-4:]}" if transfer_number else "none"
-    logger.info(
-        "transfer_to_human: call=%s reason=%s dest=%s",
-        retell_call_id,
-        args.get("reason"),
-        dest_last4,
-    )
-    return {
-        "status": "transfer_initiated",
-        "transfer_number": transfer_number,
-        "message": "Of course — let me connect you with a team member, one moment.",
-    }
+    logger.info("transfer_to_human → urgent callback: call=%s reason=%s",
+                retell_call_id, args.get("reason"))
+    record_alert("human_escalation_requested", f"call={retell_call_id}")
+    return honest_reply
 
 
 # ---------------------------------------------------------------------------

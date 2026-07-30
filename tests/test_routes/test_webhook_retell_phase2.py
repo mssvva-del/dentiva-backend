@@ -696,7 +696,9 @@ async def test_after_emergency_only_callback_and_transfer_allowed(client, db_ses
         },
     )
     assert rt.status_code == 200
-    assert rt.json()["status"] == "transfer_initiated"
+    # Escalation stays allowed during an emergency — as an urgent callback, which
+    # is the only thing a custom tool can actually deliver.
+    assert rt.json()["status"] == "callback_logged"
 
     # No booking ever created during the emergency.
     await db_session.commit()
@@ -887,3 +889,57 @@ async def test_inbound_routes_by_per_clinic_number(client, db_session):
 
     # An unknown number with 2+ clinics must NOT be guessed at.
     assert await _resolve_practice_for_inbound(None, "+19995559999") is None
+
+
+# ---------------------------------------------------------------------------
+# ESCALATION HONESTY
+#
+# transfer_to_human is a `type: custom` tool, so the platform never bridges a
+# human onto the call. It used to answer "transfer_initiated" with a number, so
+# the agent said "let me connect you" and the caller then heard silence. The
+# tool must instead do what it can actually deliver: an urgent callback row.
+# ---------------------------------------------------------------------------
+
+
+async def test_transfer_to_human_queues_an_urgent_callback(client, db_session):
+    practice, _ = await seed_practice(
+        db_session, name="Escalate One", clerk_org_id="org_esc1", clerk_user_id="user_esc1"
+    )
+    call_id = "retell-transfer-001"
+
+    await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "call_started",
+            "call_id": call_id,
+            "call": {"from_number": "+15557778888", "to_number": "+15559876543",
+                     "start_timestamp": 1748563200000},
+        },
+    )
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "transfer_to_human",
+            "args": {"reason": "caller wants to speak to a person about a billing dispute"},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # The reply must not promise a live connection that cannot happen.
+    spoken = (body.get("message") or "").lower()
+    for lie in ("connect", "transfer", "put you through", "one moment while"):
+        assert lie not in spoken, f"reply still promises a live bridge: {spoken!r}"
+    assert "transfer_number" not in body
+
+    await db_session.commit()
+    db_session.expire_all()
+    callbacks = (await db_session.execute(select(CallbackRequest))).scalars().all()
+    assert len(callbacks) == 1, "escalation must leave a row the team can act on"
+    cb = callbacks[0]
+    assert cb.urgent is True          # a caller asking for a human waits for nobody
+    assert cb.status == "pending"
+    assert cb.phone == "+15557778888"  # falls back to the number they called from
+    assert cb.call_id is not None      # linked to the call so the team has context
