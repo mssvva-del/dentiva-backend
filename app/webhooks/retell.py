@@ -41,7 +41,13 @@ from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.waitlist_entry import WaitlistEntry
 from app.observability.alerts import record_alert
-from app.services.availability import compute_native_slots, slot_to_utc
+from app.services.availability import (
+    VOICE_PATIENT_PREFIX,
+    compute_native_slots,
+    compute_pms_slots,
+    pms_is_connected,
+    slot_to_utc,
+)
 from app.services.call_outcome import BOOKED, classify_outcome
 from app.services.sms import (
     page_clinic_new_booking,
@@ -751,6 +757,73 @@ async def _handle_call_analyzed(payload: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+
+
+async def _write_booking_to_pms(
+    practice_id, booking_id, patient_pms_id: str, provider_id: str, operatory_id
+) -> None:
+    """Write a confirmed booking into the clinic's PMS. Never raises.
+
+    The booking already exists on our side and the caller has already been told
+    it's confirmed, so a PMS failure must not undo any of that — it degrades to
+    an alert the clinic can act on. write_back_booking re-checks the slot is
+    still free in the PMS first and reports 'conflict' rather than double-booking
+    a real patient.
+    """
+    from app.services.reactivation.writeback import write_back_booking
+
+    try:
+        async with _app_db.async_session_factory() as session:
+            await set_tenant(session, practice_id)
+            booking = (await session.execute(
+                select(Booking).where(Booking.id == booking_id)
+            )).scalar_one_or_none()
+            if booking is None:
+                return
+            status = await write_back_booking(
+                session, practice_id, booking,
+                patient_pms_id=patient_pms_id,
+                provider_id=provider_id,
+                operatory_id=operatory_id,
+            )
+    except Exception:  # noqa: BLE001 — a PMS problem is never worth a 500 mid-call
+        logger.exception("PMS write-back crashed for booking %s", booking_id)
+        record_alert("pms_write_crashed", f"booking={booking_id}")
+        return
+
+    if status != "written":
+        # 'conflict' is the one that needs a human NOW: the clinic's calendar took
+        # that time while we were on the phone, so the patient is holding a slot
+        # the practice no longer has.
+        record_alert(f"pms_write_{status}", f"booking={booking_id}")
+    logger.info("PMS write-back %s for booking %s", status, booking_id)
+
+
+async def _open_slots(session, practice, *, procedure, preferred_date, preferred_window):
+    """Times we can actually offer — from the clinic's PMS when it has one.
+
+    Our own book knows nothing about walk-ins, the front desk booking directly, or
+    a second staff member's phone call, so on a connected practice the PMS is the
+    only honest answer. When the PMS can't answer we fall back to our own book and
+    alert: offering a slot we're less sure about beats leaving a caller with none.
+    """
+    if pms_is_connected(practice):
+        pms_slots = await compute_pms_slots(
+            practice,
+            preferred_date=preferred_date,
+            preferred_window=preferred_window,
+        )
+        if pms_slots is not None:
+            return pms_slots
+        record_alert("pms_slots_unavailable", f"practice={practice.id}")
+    return await compute_native_slots(
+        session, practice,
+        procedure=procedure,
+        preferred_date=preferred_date,
+        preferred_window=preferred_window,
+    )
+
+
 async def _handle_check_availability(retell_call_id: str, args: dict) -> dict:
     """Offer REAL openings from the clinic's own hours minus its booked slots.
 
@@ -767,7 +840,7 @@ async def _handle_check_availability(retell_call_id: str, args: dict) -> dict:
         ).scalar_one_or_none()
         if practice is None:
             return {"available_slots": []}
-        slots = await compute_native_slots(
+        slots = await _open_slots(
             session, practice,
             procedure=args.get("procedure", "cleaning"),
             preferred_date=args.get("preferred_date", ""),
@@ -880,7 +953,7 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         wanted_time = (args.get("preferred_time") or "").strip()
         slots = []
         if practice_obj is not None:
-            slots = await compute_native_slots(
+            slots = await _open_slots(
                 session, practice_obj,
                 procedure=procedure,
                 preferred_date=preferred_date,
@@ -976,6 +1049,32 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         session.add(audit)
         await session.commit()
 
+        # Gather what the PMS write needs before the session closes and these
+        # instances expire. None = nothing to write (no PMS, or this patient
+        # doesn't exist in it yet).
+        pms_write_target = None
+        if practice_obj is not None and pms_is_connected(practice_obj):
+            patient_pms_id = patient.pms_external_id or ""
+            if not patient_pms_id or patient_pms_id.startswith(VOICE_PATIENT_PREFIX):
+                # We met this person on the phone; the clinic's system has never
+                # heard of them. Writing an appointment against an unknown patient
+                # is not possible, so the front desk has to add them by hand — and
+                # must be told, or the slot silently exists only here.
+                record_alert(
+                    "pms_patient_not_in_pms",
+                    f"practice={practice_id} booking={booking.id}",
+                )
+            elif not chosen_slot.prov_num:
+                record_alert(
+                    "pms_slot_without_provider",
+                    f"practice={practice_id} booking={booking.id}",
+                )
+            else:
+                pms_write_target = (
+                    practice_id, booking.id, patient_pms_id,
+                    chosen_slot.prov_num, chosen_slot.op_num,
+                )
+
     logger.info(
         "book_appointment: booking created. retell_call_id=%s booking_id=%s",
         retell_call_id,
@@ -997,6 +1096,12 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         opted_out=patient_opted_out,
         language=patient.preferred_language,
     ))
+
+    # Put it in the clinic's own calendar when they have one. Their front desk
+    # works from the PMS, not from us, so a booking that lives only here is the
+    # double-booking we keep warning about.
+    if pms_write_target is not None:
+        await _write_booking_to_pms(*pms_write_target)
 
     # And tell the CLINIC — an AI booking they never see is a double-booking
     # waiting to happen while there's no PMS sync. Name + time only.

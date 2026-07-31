@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.open_dental.models import AvailableSlot
+from app.config import get_settings
 from app.models.booking import Booking
 from app.models.practice import Practice
 
@@ -269,3 +270,113 @@ def office_status(practice: Practice, *, now: datetime | None = None) -> tuple[s
         when = "tomorrow" if offset == 1 else f"on {_DAY_NAMES[day.weekday()]}"
         return "closed", f"first thing {when}, from {_spoken_time(oh, om)}"
     return "closed", "as soon as the office reopens"
+
+
+# ---------------------------------------------------------------------------
+# The clinic's REAL calendar.
+#
+# Everything above computes openings from business_hours minus OUR bookings, so
+# it is blind to every other way a clinic fills its day: walk-ins, the front desk
+# booking directly, another staff member's phone call. Every clinic has those on
+# day one, which makes "9:30 is available" true only in our own book.
+#
+# When a practice has a PMS connected, the slots come from the PMS instead, and
+# they carry the provider/operatory ids needed to write the appointment back.
+# ---------------------------------------------------------------------------
+
+# Patients created by a voice call get a synthetic id (see _upsert_patient); they
+# exist for us, not in the clinic's PMS, so they cannot be written back yet.
+VOICE_PATIENT_PREFIX = "VOICE-"
+
+_PMS_NONE = frozenset({"", "none", "mock", "other"})
+
+
+def pms_is_connected(practice: Practice) -> bool:
+    """Does this practice have a PMS we can actually talk to right now?
+
+    Both halves matter: the practice must have chosen a real PMS AND the adapter
+    must be configured. A clinic that selected "open_dental" during onboarding
+    while no credentials exist is not connected — treating it as connected would
+    fail every call at the worst possible moment.
+    """
+    system = (practice.pms_system or "").strip().lower()
+    if system in _PMS_NONE:
+        return False
+    settings = get_settings()
+    return bool(
+        settings.nexhealth_api_key
+        and settings.nexhealth_subdomain
+        and settings.nexhealth_location_id
+    )
+
+
+async def compute_pms_slots(
+    practice: Practice,
+    *,
+    preferred_date: str = "",
+    preferred_window: str | None = None,
+    now: datetime | None = None,
+    days_ahead: int = 14,
+    max_slots: int = 6,
+    client=None,
+) -> list[AvailableSlot] | None:
+    """Open slots from the clinic's own PMS, or None if the PMS can't answer.
+
+    None is the important return: a PMS outage must not leave a caller with no
+    times at all, so the caller falls back to our own book and the clinic gets an
+    alert. Silence would be worse than a slot we're less sure about.
+    """
+    from app.adapters.nexhealth.client import (
+        NexHealthClient,
+        NexHealthError,
+        NexHealthUnavailable,
+    )
+
+    tz = _tz(practice.timezone)
+    now_local = (now or datetime.now(tz=UTC)).astimezone(tz)
+    start_day = now_local.date()
+    if preferred_date:
+        try:
+            asked = datetime.fromisoformat(preferred_date).date()
+            if asked >= start_day:
+                start_day = asked
+        except ValueError:
+            pass
+
+    lo, hi = _WINDOWS.get((preferred_window or "any").lower(), _WINDOWS["any"])
+    earliest = now_local + timedelta(minutes=30)
+    client = client or NexHealthClient()
+    try:
+        raw = await client.find_appointment_slots(
+            start_date=start_day.isoformat(),
+            days=days_ahead,
+            slot_length=_duration_minutes(practice, "cleaning"),
+        )
+    except (NexHealthUnavailable, NexHealthError):
+        return None
+
+    provider_label = _provider_name(practice)
+    slots: list[AvailableSlot] = []
+    per_day: dict[str, int] = {}
+    for s in raw:
+        try:
+            when = datetime.fromisoformat(s.start_time)
+        except (ValueError, TypeError):
+            continue
+        when = when.astimezone(tz) if when.tzinfo else when.replace(tzinfo=tz)
+        if when < earliest or not (lo <= when.hour < hi):
+            continue
+        day_key = when.date().isoformat()
+        if per_day.get(day_key, 0) >= 2:  # spread the offer across days
+            continue
+        per_day[day_key] = per_day.get(day_key, 0) + 1
+        slots.append(AvailableSlot(
+            date=day_key,
+            time=when.strftime("%H:%M"),
+            provider=provider_label,
+            prov_num=s.provider_id,
+            op_num=s.operatory_id,
+        ))
+        if len(slots) >= max_slots:
+            break
+    return slots
