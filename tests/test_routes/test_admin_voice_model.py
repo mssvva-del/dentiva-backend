@@ -233,3 +233,21 @@ async def test_admin_reads_go_through_the_platform_connection():
         "cross-clinic reads belong on platform_session_factory"
     )
     assert "_app_db.platform_session_factory()" in src
+
+
+async def test_system_health_preflights_the_rls_switch(client, db_session):
+    """Before repointing DATABASE_URL at the RLS-enforced role, we need to know
+    whether that role can still read every table — otherwise the first symptom is
+    a live call dying on "permission denied for table …"."""
+    await _internal(db_session, clerk_id="eng_rls1", role="engineer")
+    r = await client.get("/api/admin/system-health", headers=_h("eng_rls1"))
+    assert r.status_code == 200
+    body = r.json()
+    assert "rls_enforced" in body and "rls_switch_blockers" in body
+    # The test DB connects as the owner (superuser), which is the same shape as
+    # production today: not enforced, and the pre-flight has an opinion about it.
+    if body["rls_enforced"] is False:
+        assert isinstance(body["rls_switch_blockers"], list)
+    else:
+        # Already enforced → nothing left to pre-flight.
+        assert body["rls_switch_blockers"] == []
