@@ -50,7 +50,7 @@ from app.services.sms import (
     send_cancellation_notice,
     send_waitlist_opening,
 )
-from app.utils.crypto import phone_hmac
+from app.utils.crypto import normalize_phone, phone_hmac
 
 logger = logging.getLogger("dentiva.webhooks.retell")
 
@@ -1062,6 +1062,13 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
                     "Would you like to book a new one?"
                 ),
             }
+        call_row = (await session.execute(
+            select(Call).where(Call.retell_call_id == retell_call_id)
+        )).scalar_one_or_none()
+        if not await _caller_is_verified(session, call_row, patient, args):
+            record_alert("identity_challenge", f"call={retell_call_id} tool=reschedule")
+            return {"rescheduled": False, "verify_identity": True,
+                    "message": _IDENTITY_CHALLENGE}
         booking = await _find_upcoming_booking(session, practice_id, patient.id)
         if booking is None:
             return {
@@ -1202,6 +1209,13 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
                 "cancelled": False,
                 "message": "I couldn't find an appointment under that number.",
             }
+        call_row = (await session.execute(
+            select(Call).where(Call.retell_call_id == retell_call_id)
+        )).scalar_one_or_none()
+        if not await _caller_is_verified(session, call_row, patient, args):
+            record_alert("identity_challenge", f"call={retell_call_id} tool=cancel")
+            return {"cancelled": False, "verify_identity": True,
+                    "message": _IDENTITY_CHALLENGE}
         booking = await _find_upcoming_booking(session, practice_id, patient.id)
         if booking is None:
             return {
@@ -1427,6 +1441,96 @@ async def _backfill_from_waitlist(
 # ---------------------------------------------------------------------------
 
 
+
+# ---------------------------------------------------------------------------
+# WHO IS ASKING — identity check for the tools that read or change a record.
+#
+# lookup_patient / reschedule_appointment / cancel_appointment take a phone
+# number straight from the model's tool call. Nothing compared it to the line the
+# caller is actually on, and the prompt's "verify name and date of birth" had
+# nowhere to land: the tool schemas had no DOB field at all. So "can you check
+# my ex's appointment, her number is …" returned her name and visit time, and
+# "reschedule it" moved it.
+#
+# A human receptionist asks for something only the patient knows. This does the
+# same, in code:
+#   * calling from the number on the record → that's the strong signal, proceed;
+#   * calling from anywhere else → the date of birth must match what we hold.
+# A record with no DOB on file can't be verified that way, so it falls back to
+# requiring the matching line — a patient we know nothing about is the one to be
+# most careful with, not least.
+# ---------------------------------------------------------------------------
+
+_IDENTITY_CHALLENGE = (
+    "Ask the caller for the date of birth on the appointment, then call this "
+    "again with patient_dob. Say you just need to confirm you're speaking with "
+    "the right person before you look anything up. Do NOT read out any name, "
+    "date or time until it matches."
+)
+
+
+_DOB_FORMATS = (
+    "%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%d/%m/%Y",
+    "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y",
+)
+
+
+def _parse_dob(value: str | None) -> tuple[int, int, int] | None:
+    """Read a date of birth however it arrives, or None.
+
+    The clinic's record holds an ISO date; the caller SAYS theirs out loud and
+    Retell transcribes it — "March 7th, 1984", "3/7/1984", "the seventh of March
+    1984". Formatting must never be what decides whether someone reaches a
+    record, in either direction: too strict locks a patient out of their own
+    appointment, too loose lets a wrong date through.
+    """
+    if not value:
+        return None
+    cleaned = re.sub(r"(\d+)(st|nd|rd|th)\b", r"\1", value.strip(), flags=re.I)
+    cleaned = cleaned.replace(",", " ").replace(".", " ")
+    cleaned = re.sub(r"\b(of|the)\b", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    for fmt in _DOB_FORMATS:
+        try:
+            d = datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+        return (d.year, d.month, d.day)
+    return None
+
+
+def _dob_matches(stored: str | None, offered: str | None) -> bool:
+    """True only when both parse AND name the same day."""
+    a, b = _parse_dob(stored), _parse_dob(offered)
+    return a is not None and a == b
+
+
+async def _caller_is_verified(
+    session, call: Call | None, patient: Patient, args: dict
+) -> bool:
+    requested = normalize_phone(args.get("patient_phone") or "")
+    from_number = normalize_phone((call.from_number if call else "") or "")
+    if requested and from_number and requested == from_number:
+        return True
+    if _dob_matches(patient.date_of_birth, args.get("patient_dob")):
+        return True
+    # Same conversation: this caller already booked as this patient on THIS call,
+    # so they are demonstrably the person the record belongs to. Without this, a
+    # patient who books and then changes their mind two sentences later gets
+    # challenged for a date of birth we may not even hold — the common flow, and
+    # the one where a web call has no caller ID to match against.
+    if call is not None:
+        booked_here = (await session.execute(
+            select(Booking.id).where(
+                Booking.source_call_id == call.id,
+                Booking.patient_id == patient.id,
+            ).limit(1)
+        )).first()
+        if booked_here is not None:
+            return True
+    return False
+
+
 async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
     """Recognize a returning patient by phone so the agent can greet by name.
 
@@ -1449,6 +1553,14 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
         patient = await _find_patient_by_phone(session, practice_id, phone)
         if patient is None:
             return not_found
+        call_row = (await session.execute(
+            select(Call).where(Call.retell_call_id == retell_call_id)
+        )).scalar_one_or_none()
+        if not await _caller_is_verified(session, call_row, patient, args):
+            # Deliberately reveals nothing — not even that the record exists.
+            record_alert("identity_challenge", f"call={retell_call_id} tool=lookup")
+            return {"found": False, "verify_identity": True,
+                    "message": _IDENTITY_CHALLENGE}
 
         first_name = patient.first_name
         booking = await _find_upcoming_booking(session, practice_id, patient.id)
