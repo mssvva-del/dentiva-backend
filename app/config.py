@@ -84,6 +84,12 @@ class Settings(BaseSettings):
             self.database_url_sync = _to_sync_url(self.database_url_sync)
         else:
             self.database_url_sync = _to_sync_url(self.database_url)
+        # The platform URL arrives the same way and needs the same treatment:
+        # Railway hands out postgresql:// , and the async engine requires asyncpg.
+        # Pasting the plain reference would otherwise fail at engine creation with
+        # a psycopg2 import error the first time an admin page is opened.
+        if self.database_url_platform:
+            self.database_url_platform = _to_async_url(self.database_url_platform)
         return self
 
     # Encryption
