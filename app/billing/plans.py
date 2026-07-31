@@ -3,6 +3,22 @@
 SINGLE SOURCE OF TRUTH for the BILLED catalog. Sergio's approved grid (updated
 2026-07-13 to match the public site — site is canonical for the displayed price):
   After-Hours    $249/mo · 1500 min · overage $0.18/min
+
+MARGIN CHECK against the measured 17.3¢/min floor (voice 15.8 + telephony 1.5):
+
+  plan            revenue/min if the whole bucket is used   overage vs floor
+  After-Hours     16.6¢   (break-even at 1439 of 1500 min)  +0.7¢
+  Full-Time       16.0¢   (break-even at 2306 of 2500 min)  -2.3¢
+  Growth          15.0¢   (break-even at 3462 of 4000 min)  -4.3¢
+  Multi-Location  30.0¢   (break-even at 5197 of 3000 min)  -6.3¢
+
+Included minutes are a fair-use cap, not expected usage, so a clinic that talks
+for 500 minutes on Full-Time is very profitable — the included-minute column is
+the worst case, not the forecast. The unambiguous problem is the overage column:
+three of four plans charge LESS per extra minute than the minute costs, and the
+rate falls as the tier rises, so a clinic growing into a bigger plan loses us
+more money the more it uses us. Overage should clear the floor with margin at
+every tier.
   Full-Time      $399/mo · 2500 min · overage $0.15/min   (most popular)
   Growth         $599/mo · 4000 min · overage $0.13/min
   Multi-Location $899/mo · 3000 min · overage $0.11/min   (per location)
@@ -30,7 +46,15 @@ ANNUAL_DISCOUNT = 0.15
 # the admin margin view only — a planning estimate, NOT an invoice input. Tune as
 # real vendor costs land; keep it conservative (over-estimate) so margin isn't
 # flattering.
-ESTIMATED_COST_CENTS_PER_MIN = 8
+# MEASURED on a real production call (2026-07-31), not estimated: Retell voice
+# engine 5.5 + ElevenLabs flash TTS 4.0 + gpt-4.1 4.5 + LLM token surcharge 0.9
+# = 15.8¢/min, plus 1.5¢/min telephony on a phone call (0 on a browser call).
+# Rounded to 17 because the margin view exists to stop us fooling ourselves.
+#
+# It read 8 until today — less than half the truth — so every margin figure an
+# admin looked at was roughly double the real one, including while the plan grid
+# below was being set.
+ESTIMATED_COST_CENTS_PER_MIN = 17
 
 
 @dataclass(frozen=True)
