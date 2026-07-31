@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.db as _app_db
@@ -556,6 +556,9 @@ class SystemHealth(BaseModel):
     clinics: int
     internal_staff: int
     environment: str
+    # Is the tenant boundary actually on, and if not, can it be switched on safely?
+    rls_enforced: bool | None = None
+    rls_switch_blockers: list[str] = []
 
 
 @router.get("/system-health", response_model=SystemHealth)
@@ -565,6 +568,8 @@ async def system_health(
     from app.config import get_settings
     db_ok = True
     clinics = staff = 0
+    rls_enforced: bool | None = None
+    blockers: list[str] = []
     try:
         async with _app_db.platform_session_factory() as session:
             clinics = (await session.execute(
@@ -573,12 +578,60 @@ async def system_health(
             staff = (await session.execute(
                 select(func.count()).select_from(DentivaStaff)
             )).scalar_one()
+            rls_enforced, blockers = await _rls_switch_report(session)
     except Exception:  # noqa: BLE001
         db_ok = False
     return SystemHealth(
         db_ok=db_ok, clinics=clinics, internal_staff=staff,
         environment=get_settings().environment,
+        rls_enforced=rls_enforced, rls_switch_blockers=blockers,
     )
+
+
+async def _rls_switch_report(session) -> tuple[bool | None, list[str]]:
+    """Is RLS on, and would repointing DATABASE_URL at dentiva_app actually work?
+
+    Answering this BEFORE the switch matters: the alternative is finding out from
+    a live call failing with "permission denied for table …". Read-only.
+    """
+    row = (await session.execute(text(
+        "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
+    ))).first()
+    enforced = None if row is None else not (bool(row[0]) or bool(row[1]))
+    if enforced:
+        return True, []  # already switched; nothing to pre-flight
+
+    blockers: list[str] = []
+    role = (await session.execute(text(
+        "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'dentiva_app'"
+    ))).first()
+    if role is None:
+        blockers.append(
+            "role dentiva_app does not exist — run migrations (b2c3d4e5f6a7)"
+        )
+        return enforced, blockers
+    if bool(role[0]) or bool(role[1]):
+        blockers.append(
+            "role dentiva_app is SUPERUSER/BYPASSRLS — switching to it would change "
+            "nothing; it must be NOSUPERUSER NOBYPASSRLS"
+        )
+
+    # Any table the app would suddenly be unable to read is a live outage.
+    missing = (await session.execute(text(
+        """
+        SELECT t.tablename FROM pg_tables t
+        WHERE t.schemaname = 'public'
+          AND NOT has_table_privilege('dentiva_app', quote_ident(t.tablename), 'SELECT')
+        ORDER BY t.tablename
+        """
+    ))).scalars().all()
+    if missing:
+        blockers.append(
+            "dentiva_app cannot read: " + ", ".join(missing[:8])
+            + (f" (+{len(missing) - 8} more)" if len(missing) > 8 else "")
+            + " — run migration n5c6d7e8f9a0"
+        )
+    return enforced, blockers
 
 
 # ===========================================================================
