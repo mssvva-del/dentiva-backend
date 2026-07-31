@@ -187,7 +187,7 @@ _ER_REFERRAL_MESSAGE = (
 
 def _needs_emergency_room(args: dict) -> bool:
     """Life-threatening signs in ANY tool's arguments — deterministic, no LLM."""
-    return bool(_MEDICAL_ER_RE.search(_args_to_text(args)))
+    return _matched_and_not_negated(_MEDICAL_ER_RE, _args_to_text(args))
 
 
 # Tools that schedule and must be refused while an emergency is active.
@@ -214,10 +214,37 @@ def _is_truthy(value) -> bool:
     return bool(value)
 
 
+# Arguments whose values come from a FIXED LIST, not from the caller's mouth.
+# Scanning them is how "procedure=emergency" — a visit type we advertise and let
+# the agent book — set the emergency flag on the caller's very first
+# check_availability, refused that call, and then stayed set for the rest of the
+# conversation, so nothing could be booked at all. The symptom scan belongs on
+# free text only.
+_ENUM_ARG_KEYS = frozenset({
+    "procedure", "preferred_time_window", "new_time_window", "language",
+    "preferred_date", "new_date", "preferred_time", "patient_phone", "phone",
+})
+
+# "Any swelling, trouble swallowing, bleeding that won't stop?" is a question the
+# prompt tells the agent to ask. The answer is usually NO, and a plain substring
+# scan locked the call on the patient saying so.
+# The gap between the negation and the symptom must not cross a contrast word:
+# "no fever BUT my face is swelling" is not a denial of the swelling, and reading
+# it as one is the failure direction that gets someone hurt.
+_NEGATION_RE = re.compile(
+    r"\b(no|not|none|without|denies|denied|isn'?t|aren'?t|doesn'?t|don'?t|"
+    r"nothing|never|negative\s+for)\b"
+    r"(?:(?!\b(?:but|however|though|although|yet|except)\b)[^.!?;]){0,40}$",
+    re.IGNORECASE,
+)
+
+
 def _args_to_text(args: dict) -> str:
-    """Flatten arg values into one string for keyword scanning."""
+    """Flatten the FREE-TEXT arg values into one string for keyword scanning."""
     parts: list[str] = []
-    for value in args.values():
+    for key, value in args.items():
+        if key in _ENUM_ARG_KEYS:
+            continue
         if isinstance(value, str):
             parts.append(value)
         elif isinstance(value, (list, tuple)):
@@ -227,8 +254,21 @@ def _args_to_text(args: dict) -> str:
     return " ".join(parts)
 
 
+def _matched_and_not_negated(pattern: re.Pattern, text: str) -> bool:
+    """True when the pattern matches somewhere it isn't being DENIED.
+
+    Deliberately asymmetric: a negation only suppresses the words it precedes
+    within the same clause, so "no swelling but I can't breathe" still fires on
+    the second half. Under-triggering here is the dangerous direction.
+    """
+    for match in pattern.finditer(text):
+        if not _NEGATION_RE.search(text[: match.start()]):
+            return True
+    return False
+
+
 def _contains_emergency_keywords(args: dict) -> bool:
-    return bool(_EMERGENCY_RE.search(_args_to_text(args)))
+    return _matched_and_not_negated(_EMERGENCY_RE, _args_to_text(args))
 
 
 # ---------------------------------------------------------------------------

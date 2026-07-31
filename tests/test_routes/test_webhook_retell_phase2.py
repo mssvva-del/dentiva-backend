@@ -945,3 +945,83 @@ async def test_transfer_to_human_queues_an_urgent_callback(client, db_session):
     assert cb.status == "pending"
     assert cb.phone == "+15557778888"  # falls back to the number they called from
     assert cb.call_id is not None      # linked to the call so the team has context
+
+
+# ---------------------------------------------------------------------------
+# THE EMERGENCY SCAN MUST READ SYMPTOMS, NOT PARAMETERS
+#
+# The scan flattened EVERY argument, including enum values chosen from a fixed
+# list. "emergency" is one of the three procedure types we advertise and let the
+# agent book — so the caller's very first check_availability(procedure=
+# "emergency") set the emergency flag, got itself refused, and left the flag set
+# for the rest of the call: nothing could be booked at all, and the transcript
+# looked like correct emergency handling.
+# ---------------------------------------------------------------------------
+
+
+async def test_booking_the_emergency_visit_type_is_not_an_emergency(client, db_session):
+    await seed_practice(
+        db_session, name="Enum Dental", clerk_org_id="org_enum", clerk_user_id="user_enum"
+    )
+    call_id = "retell-enum-001"
+
+    r = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": call_id,
+            "function_name": "check_availability",
+            "args": {"procedure": "emergency", "preferred_date": "2099-12-15",
+                     "preferred_time_window": "morning"},
+        },
+    )
+    assert r.status_code == 200
+    assert "blocked" not in r.json(), "the visit type we sell must be bookable"
+
+    await db_session.commit()
+    call = (await db_session.execute(
+        select(Call).where(Call.retell_call_id == call_id)
+    )).scalar_one_or_none()
+    if call is not None:
+        assert call.emergency_active is not True, "the flag is sticky — it must not latch here"
+
+
+async def test_a_patient_denying_symptoms_does_not_lock_the_call(client, db_session):
+    """The prompt tells the agent to ask "any swelling, fever, trouble
+    swallowing?" — and the answer is usually no. A plain substring scan turned
+    the patient saying so into a locked call."""
+    await seed_practice(
+        db_session, name="Deny Dental", clerk_org_id="org_deny", clerk_user_id="user_deny"
+    )
+    r = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": "retell-deny-001",
+            "function_name": "check_availability",
+            "args": {"procedure": "cleaning", "preferred_date": "2099-12-15",
+                     "notes": "no swelling, no fever, nothing urgent"},
+        },
+    )
+    assert "blocked" not in r.json()
+
+
+async def test_a_denial_does_not_swallow_a_real_symptom_after_it(client, db_session):
+    """"No fever BUT my face is swelling" is not a denial of the swelling.
+    Under-triggering here is the direction that gets someone hurt."""
+    await seed_practice(
+        db_session, name="Contrast Dental", clerk_org_id="org_contr", clerk_user_id="user_contr"
+    )
+    r = await client.post(
+        "/webhooks/retell",
+        json={
+            "event": "function_call",
+            "call_id": "retell-contr-001",
+            "function_name": "book_appointment",
+            "args": {"patient_first_name": "Ann", "patient_last_name": "Lee",
+                     "patient_phone": "+15551110000", "procedure": "consultation",
+                     "preferred_date": "2099-12-15", "preferred_time_window": "morning",
+                     "reason": "no fever but my face is swelling"},
+        },
+    )
+    assert r.json().get("blocked") is True, "scheduling must be refused"
