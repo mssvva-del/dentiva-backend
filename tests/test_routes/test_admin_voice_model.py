@@ -251,3 +251,18 @@ async def test_system_health_preflights_the_rls_switch(client, db_session):
     else:
         # Already enforced → nothing left to pre-flight.
         assert body["rls_switch_blockers"] == []
+
+
+async def test_the_preflight_cannot_report_the_database_as_down(client, db_session):
+    """The first version of this pre-flight threw on a Postgres name-resolution
+    quirk, the outer handler turned that into db_ok=False, and the admin page
+    announced "Database Unreachable" while the database was serving live calls.
+    A diagnostic that can take down the thing it diagnoses is worse than no
+    diagnostic."""
+    await _internal(db_session, clerk_id="eng_pf1", role="engineer")
+    r = await client.get("/api/admin/system-health", headers=_h("eng_pf1"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["db_ok"] is True, "the pre-flight must not be able to flip this"
+    # And it must have actually run rather than silently reporting nothing.
+    assert body["rls_enforced"] is not None

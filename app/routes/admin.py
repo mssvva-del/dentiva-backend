@@ -18,6 +18,7 @@ privileged COUNT via the practice filter on non-RLS join tables where possible.)
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from datetime import UTC, datetime
@@ -60,6 +61,8 @@ from app.models.usage_record import UsageRecord
 from app.models.user import User
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+logger = logging.getLogger("dentiva.admin")
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +581,15 @@ async def system_health(
             staff = (await session.execute(
                 select(func.count()).select_from(DentivaStaff)
             )).scalar_one()
-            rls_enforced, blockers = await _rls_switch_report(session)
+            try:
+                rls_enforced, blockers = await _rls_switch_report(session)
+            except Exception:  # noqa: BLE001
+                # A diagnostic must never be able to report the database as down.
+                # This one did exactly that: it threw, the outer handler set
+                # db_ok=False, and the page announced "Database Unreachable" while
+                # the database was serving calls perfectly well.
+                logger.exception("RLS switch pre-flight failed")
+                blockers = ["pre-flight check itself failed — see logs"]
     except Exception:  # noqa: BLE001
         db_ok = False
     return SystemHealth(
@@ -617,12 +628,19 @@ async def _rls_switch_report(session) -> tuple[bool | None, list[str]]:
         )
 
     # Any table the app would suddenly be unable to read is a live outage.
+    # Join through pg_class and test the OID, not the name. Passing a name makes
+    # Postgres resolve it through search_path, and the planner is free to evaluate
+    # that before the schema filter — which it does, blowing up on the first
+    # information_schema table it meets ("relation sql_features does not exist").
     missing = (await session.execute(text(
         """
-        SELECT t.tablename FROM pg_tables t
-        WHERE t.schemaname = 'public'
-          AND NOT has_table_privilege('dentiva_app', quote_ident(t.tablename), 'SELECT')
-        ORDER BY t.tablename
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind = 'r'
+          AND NOT has_table_privilege('dentiva_app', c.oid, 'SELECT')
+        ORDER BY c.relname
         """
     ))).scalars().all()
     if missing:
