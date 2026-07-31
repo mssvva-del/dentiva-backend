@@ -148,3 +148,38 @@ async def test_at_most_two_slots_per_day_so_the_offer_spreads(monkeypatch):
     for s in slots:
         per_day[s.date] = per_day.get(s.date, 0) + 1
     assert max(per_day.values()) <= 2
+
+
+# ---------------------------------------------------------------------------
+# Retell substitutes ONLY the variables we send. A placeholder the prompt uses
+# and nobody fills is read out loud, verbatim, to a patient.
+# ---------------------------------------------------------------------------
+
+
+def test_every_placeholder_the_prompt_uses_is_supplied_somewhere():
+    """The prompt and the tool descriptions are the contract; dynamic_vars.py and
+    the outbound sender are the two places that fill it. Anything referenced in
+    the first and missing from both gets spoken as "{{today}}"."""
+    import re
+    from pathlib import Path
+
+    voice_repo = Path(__file__).resolve().parents[3] / "dentiva-voice"
+    agent_dir = voice_repo / "agents" / "front_desk_v1"
+    if not agent_dir.exists():  # the voice repo isn't checked out in CI
+        import pytest
+
+        pytest.skip("dentiva-voice not present")
+
+    text = (agent_dir / "system_prompt.md").read_text()
+    text += (agent_dir / "functions.yaml").read_text()
+    used = set(re.findall(r"\{\{(\w+)\}\}", text))
+    # Expanded by the sync script from the environment, never by Retell.
+    used.discard("BACKEND_URL")
+
+    backend = Path(__file__).resolve().parents[2] / "app"
+    supplied = set()
+    for module in ("services/llm/dynamic_vars.py", "services/reactivation/voice.py"):
+        supplied |= set(re.findall(r'"(\w+)":', (backend / module).read_text()))
+
+    missing = sorted(used - supplied)
+    assert not missing, f"spoken to a patient as literal text: {missing}"

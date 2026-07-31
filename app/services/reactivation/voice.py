@@ -31,6 +31,7 @@ from app.config import get_settings
 from app.db import set_tenant
 from app.models.patient import Patient
 from app.models.reactivation import ReactivationTarget, ReactivationTouch
+from app.services.llm.dynamic_vars import build_dynamic_variables
 from app.services.reactivation.messages import _REASON  # reuse the reason copy
 from app.services.reactivation.outreach import TouchResult
 from app.utils.resilience import make_timeout
@@ -107,6 +108,7 @@ async def make_voice_touch(
     *,
     client: RetellOutboundClient,
     campaign=None,          # ReactivationCampaign | None — custom-campaign context
+    practice=None,          # Practice | None — the clinic context the agent speaks
     practice_name: str = "",
     agent_name: str = "Alex",
     custom_greeting: str = "",
@@ -142,10 +144,19 @@ async def make_voice_touch(
             # The agent's OUTBOUND prompt section keys off these ({{direction}},
             # {{patient_first_name}}, {{practice_name}}, {{campaign_context}}).
             dynamic_variables={
+                # The clinic context the prompt reads all the way through —
+                # {{today}}, {{practice_hours}}, {{kb_context}}, {{office_status}}
+                # and the rest. Retell substitutes only the keys we send, so an
+                # outbound call used to say "Today is {{today}}" out loud and had
+                # no idea when the clinic was open. Inbound got these from the
+                # webhook; outbound never did.
+                **(build_dynamic_variables(practice) if practice is not None else {}),
                 "direction": "outbound",
                 "first_name": patient.first_name or "",
                 "patient_first_name": patient.first_name or "",
-                "practice_name": practice_name or "our dental office",
+                "practice_name": practice_name
+                or (practice.name if practice is not None else "")
+                or "our dental office",
                 "campaign_context": campaign_context,
                 "language": lang,
                 "reason": reason,
