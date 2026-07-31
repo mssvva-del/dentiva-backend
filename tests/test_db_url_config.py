@@ -55,3 +55,22 @@ def test_postgres_scheme_normalized_for_both():
     s = _settings(database_url="postgres://u:p@h:5432/db")
     assert s.database_url.startswith("postgresql+asyncpg://")
     assert s.database_url_sync.startswith("postgresql+psycopg2://")
+
+
+def test_platform_url_is_normalized_to_asyncpg():
+    """DATABASE_URL_PLATFORM is pasted straight from Railway, which hands out
+    `postgresql://`. The async engine requires asyncpg, so an un-normalized value
+    blows up on engine creation the first time an admin page is opened — long
+    after the person who pasted it has moved on."""
+    s = _settings(
+        database_url="postgresql+asyncpg://app:p@h:5432/db",
+        database_url_platform="postgresql://postgres:ownerpw@h:5432/db",
+    )
+    assert s.database_url_platform == "postgresql+asyncpg://postgres:ownerpw@h:5432/db"
+
+
+def test_platform_url_empty_stays_empty():
+    """Empty means "same connection as everything else" — it must not become a
+    bare driver prefix pointing nowhere."""
+    s = _settings(database_url="postgresql+asyncpg://app:p@h:5432/db")
+    assert s.database_url_platform == ""
