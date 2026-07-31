@@ -153,9 +153,10 @@ async def review_recent_failures(
 ) -> dict:
     """Pull recent FAILED calls, review each, and roll up the patterns.
 
-    Cross-clinic (coordinator improving the shared agent). Runs on the caller's
-    admin session — in prod that's the superuser role, which sees every tenant;
-    the endpoint gates this to super_admin.
+    Cross-clinic (coordinator improving the shared agent). The caller passes a
+    PLATFORM session — the one connection allowed to read across tenants — and the
+    endpoint gates this to super_admin. On a tenant-scoped session this returns
+    nothing rather than leaking: RLS fails closed.
     """
     # Scan EVERY recent call for promises we cannot keep — independent of outcome,
     # because a false "connecting you" usually ends as a perfectly normal call.
