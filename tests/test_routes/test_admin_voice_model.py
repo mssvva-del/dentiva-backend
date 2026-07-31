@@ -199,3 +199,19 @@ async def test_live_config_names_every_drift(client, db_session, monkeypatch):
     for expected in ("promises to connect", "emergency-room", "native transfer_call",
                      "interruption_sensitivity", "hours-aware"):
         assert expected in joined, f"drift must name {expected}: {joined}"
+
+
+async def test_bridge_wording_is_fine_once_a_native_transfer_exists(
+    client, db_session, monkeypatch
+):
+    """"Let me connect you" is only a lie when nothing can bridge the call."""
+    await _internal(db_session, clerk_id="eng_lc3", role="engineer")
+    practice, _ = await seed_practice(db_session, name="LCCo3",
+                                      clerk_org_id="o_lc3", clerk_user_id="u_lc3")
+    await _bind_agent(db_session, practice.id, agent_id="agent_lc_3")
+    _fake_live(monkeypatch, prompt=_GOOD_PROMPT + " " + _BAD_PROMPT, sensitivity=0.65,
+               tools=[{"name": "transfer_to_team", "type": "transfer_call"}])
+
+    r = await client.get("/api/admin/voice/live-config", headers=_h("eng_lc3"))
+    assert r.json()["promises_a_bridge_it_cannot_make"] is False
+    assert r.json()["drift"] == []
