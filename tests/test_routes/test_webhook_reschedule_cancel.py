@@ -180,3 +180,137 @@ async def test_lookup_patient_unknown_returns_not_found(client, db_session):
     )
     assert resp.status_code == 200
     assert resp.json()["found"] is False
+
+
+# ---------------------------------------------------------------------------
+# CROSS-TENANT PHONE COLLISION
+#
+# A phone number is not a unique key ACROSS practices — the same person (or a
+# shared family line) can be a patient at two different Dentovox clinics. Every
+# lookup here is scoped by (practice_id, phone), so a call bound to clinic A must
+# never surface or touch clinic B's same-number patient, even though the phone
+# digits collide exactly. This is the scenario the property-based RLS test
+# doesn't reach (that test asserts on raw table rows; this drives the actual
+# voice-tool code path — the phone_hmac lookup — end to end).
+# ---------------------------------------------------------------------------
+
+_SHARED_PHONE = "+15551119999"
+
+
+async def test_reschedule_cancel_lookup_never_cross_the_phone_collision(client, db_session):
+    practice_a, _ = await seed_practice(
+        db_session, name="Collide A", clerk_org_id="org_col_a", clerk_user_id="user_col_a"
+    )
+    practice_b, _ = await seed_practice(
+        db_session, name="Collide B", clerk_org_id="org_col_b", clerk_user_id="user_col_b"
+    )
+    practice_a.retell_agent_id = "agent_col_a"
+    practice_b.retell_agent_id = "agent_col_b"
+    await db_session.commit()
+
+    # Same phone number books at BOTH clinics, on different days.
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "col-call-a",
+        "call": {"agent_id": "agent_col_a", "from_number": _SHARED_PHONE,
+                 "to_number": "+15550000001"},
+    })
+    book_a = await client.post("/webhooks/retell", json={
+        "call": {"call_id": "col-call-a", "agent_id": "agent_col_a"},
+        "name": "book_appointment",
+        "args": {"patient_first_name": "Pat", "patient_last_name": "A",
+                 "patient_phone": _SHARED_PHONE, "procedure": "cleaning",
+                 "preferred_date": _FUTURE, "preferred_time_window": "morning"},
+    })
+    assert book_a.json()["booked"] is True
+
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "col-call-b",
+        "call": {"agent_id": "agent_col_b", "from_number": _SHARED_PHONE,
+                 "to_number": "+15550000002"},
+    })
+    book_b = await client.post("/webhooks/retell", json={
+        "call": {"call_id": "col-call-b", "agent_id": "agent_col_b"},
+        "name": "book_appointment",
+        "args": {"patient_first_name": "Pat", "patient_last_name": "B",
+                 "patient_phone": _SHARED_PHONE, "procedure": "cleaning",
+                 "preferred_date": _FUTURE_2, "preferred_time_window": "morning"},
+    })
+    assert book_b.json()["booked"] is True
+
+    # lookup_patient on clinic A's call must return A's own appointment, not B's.
+    lookup = await client.post("/webhooks/retell", json={
+        "call": {"call_id": "col-call-a", "agent_id": "agent_col_a"},
+        "name": "lookup_patient",
+        "args": {"patient_phone": _SHARED_PHONE},
+    })
+    assert lookup.json()["patient_first_name"] == "Pat"
+    assert lookup.json()["upcoming"]["date"] == _FUTURE, "must see A's slot, not B's"
+
+    # Reschedule on clinic A's call must move ONLY clinic A's booking.
+    resched = await client.post("/webhooks/retell", json={
+        "call": {"call_id": "col-call-a", "agent_id": "agent_col_a"},
+        "name": "reschedule_appointment",
+        "args": {"patient_phone": _SHARED_PHONE, "new_date": "2099-12-22",
+                  "new_time_window": "afternoon"},
+    })
+    assert resched.json()["rescheduled"] is True
+
+    await db_session.commit()
+    from app.db import set_tenant
+    from app.models.patient import Patient
+
+    await set_tenant(db_session, practice_a.id)
+    booking_a = (await db_session.execute(
+        select(Booking).where(Booking.practice_id == practice_a.id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert booking_a.appointment_at.date().isoformat() == "2099-12-22"
+
+    await set_tenant(db_session, practice_b.id)
+    booking_b = (await db_session.execute(
+        select(Booking).where(Booking.practice_id == practice_b.id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert booking_b.appointment_at.date().isoformat() == _FUTURE_2, (
+        "clinic B's booking must be untouched by a reschedule on clinic A's call"
+    )
+    assert booking_b.status == "confirmed"
+
+    # Cancel on clinic A's call must cancel ONLY clinic A's booking.
+    cancel = await client.post("/webhooks/retell", json={
+        "call": {"call_id": "col-call-a", "agent_id": "agent_col_a"},
+        "name": "cancel_appointment",
+        "args": {"patient_phone": _SHARED_PHONE, "reason": "reschedule test"},
+    })
+    assert cancel.json()["cancelled"] is True
+
+    await db_session.commit()
+    await set_tenant(db_session, practice_a.id)
+    booking_a = (await db_session.execute(
+        select(Booking).where(Booking.practice_id == practice_a.id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert booking_a.status == "cancelled"
+
+    await set_tenant(db_session, practice_b.id)
+    booking_b = (await db_session.execute(
+        select(Booking).where(Booking.practice_id == practice_b.id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert booking_b.status == "confirmed", (
+        "clinic B's booking must still be confirmed — clinic A's cancel must not reach it"
+    )
+
+    # And each clinic has exactly ONE patient row for this phone — no cross-tenant
+    # duplicate/merge happened during the upserts above.
+    await set_tenant(db_session, practice_a.id)
+    patients_a = (await db_session.execute(
+        select(Patient).where(Patient.practice_id == practice_a.id)
+    )).scalars().all()
+    assert len(patients_a) == 1 and patients_a[0].last_name == "A"
+
+    await set_tenant(db_session, practice_b.id)
+    patients_b = (await db_session.execute(
+        select(Patient).where(Patient.practice_id == practice_b.id)
+    )).scalars().all()
+    assert len(patients_b) == 1 and patients_b[0].last_name == "B"

@@ -211,9 +211,21 @@ async def health_detailed() -> JSONResponse:
 
     settings = get_settings()
     db_ok = True
+    # Is the tenant boundary actually ON? RLS FORCE is our isolation backstop, and
+    # a SUPERUSER/BYPASSRLS login role is exempt from every policy — the whole
+    # layer becomes a silent no-op, with no error and no failing test to show for
+    # it. verify_db_security refuses to boot in that state unless ALLOW_SUPERUSER_DB
+    # is set, which is exactly the pilot escape hatch that is easy to leave on. So
+    # report it continuously rather than only at boot.
+    rls_enforced = None
     try:
         async with app_db.async_session_factory() as session:
             await session.execute(_text("SELECT 1"))
+            row = (await session.execute(_text(
+                "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
+            ))).first()
+            if row is not None:
+                rls_enforced = not (bool(row[0]) or bool(row[1]))
     except Exception:  # noqa: BLE001
         db_ok = False
 
@@ -224,6 +236,8 @@ async def health_detailed() -> JSONResponse:
         "voice_configured": bool(settings.retell_api_key and settings.retell_agent_id),
         "sms_enabled": bool(settings.sms_enabled and settings.twilio_auth_token),
         "webhook_verified": bool(settings.retell_webhook_secret),
+        # None = couldn't determine (DB down / role not in pg_roles).
+        "rls_enforced": rls_enforced,
         "alerts": alerts,
     }
     code = 200 if body["status"] == "ok" else 503

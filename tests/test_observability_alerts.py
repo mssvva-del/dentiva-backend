@@ -57,3 +57,16 @@ async def test_health_detailed_degraded_when_alerts_fire(client):
     assert r.json()["status"] == "degraded"
     assert r.json()["alerts"]["count_last_hour"] >= 1
     alerts._RECENT.clear()
+
+
+async def test_health_reports_whether_rls_is_actually_enforced(client):
+    """RLS FORCE is the tenant boundary, and a SUPERUSER/BYPASSRLS login role is
+    exempt from every policy — silently, with nothing failing. The pilot escape
+    hatch (ALLOW_SUPERUSER_DB) makes that state bootable, so health has to keep
+    saying which state we are in, not just check it once at startup."""
+    r = await client.get("/health/detailed")
+    body = r.json()
+    assert "rls_enforced" in body
+    # Tests connect as dentiva_app (NOSUPERUSER NOBYPASSRLS) — the same role
+    # production is supposed to use.
+    assert body["rls_enforced"] is True
