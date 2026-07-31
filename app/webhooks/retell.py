@@ -1486,7 +1486,21 @@ async def _get_or_create_call(session, retell_call_id: str, agent_id: str | None
         status="in_progress",
     )
     session.add(call)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError:
+        # retell_call_id is UNIQUE, so we got here with a row that exists but was
+        # invisible: we bound the tenant from agent_id, and the row belongs to a
+        # different practice. Raising would 500 the tool mid-call. Roll back to the
+        # savepoint, alert, and let the caller carry on without a call row — the
+        # tool still answers the patient instead of dying.
+        await session.rollback()
+        record_alert("call_row_tenant_mismatch", f"call={retell_call_id}")
+        logger.warning(
+            "call row for %s exists under another practice — agent_id routing "
+            "disagreed with the stored call", retell_call_id,
+        )
+        return None
     return call
 
 
@@ -1761,6 +1775,32 @@ async def _dispatch_function(
 # ---------------------------------------------------------------------------
 
 
+# The agent is mid-conversation when it calls a tool. If our backend raises — a
+# DB blip, an exhausted pool, a bug — FastAPI answers 500 and what the caller
+# hears is decided by Retell, not by us: the pre-call path is already wrapped so a
+# broken lookup can never stop the phone being answered, and the same instinct
+# belongs here. Answer with something the agent can say out loud instead.
+_TOOL_FAILURE_REPLY = {
+    "error": "backend_unavailable",
+    "message": (
+        "Tell the caller our system just hiccuped, apologise briefly, take their "
+        "name and number, and say the team will call them right back. Do not claim "
+        "anything was booked, changed, or cancelled."
+    ),
+}
+
+
+async def _dispatch_guarded(
+    fn: str, retell_call_id: str, args: dict, agent_id: str | None = None
+) -> dict:
+    try:
+        return await _dispatch_function(fn, retell_call_id, args, agent_id)
+    except Exception:  # noqa: BLE001 — dead air is worse than a degraded answer
+        logger.exception("tool %s failed for call=%s", fn, retell_call_id)
+        record_alert("tool_call_failed", f"fn={fn} call={retell_call_id}")
+        return dict(_TOOL_FAILURE_REPLY)
+
+
 @router.post("/retell")
 async def retell_webhook(request: Request) -> dict:
     raw_body = await request.body()
@@ -1780,8 +1820,11 @@ async def retell_webhook(request: Request) -> dict:
         call_obj = payload.get("call", {}) or {}
         retell_call_id = call_obj.get("call_id") or payload.get("call_id", "")
         agent_id = call_obj.get("agent_id") or payload.get("agent_id")
-        await _ensure_call_row(retell_call_id, call_obj)
-        return await _dispatch_function(
+        try:
+            await _ensure_call_row(retell_call_id, call_obj)
+        except Exception:  # noqa: BLE001 — a missing call row must not kill the tool
+            logger.exception("ensure_call_row failed for call=%s", retell_call_id)
+        return await _dispatch_guarded(
             payload["name"], retell_call_id, payload.get("args", {}) or {}, agent_id
         )
 
@@ -1797,8 +1840,11 @@ async def retell_webhook(request: Request) -> dict:
     if event == "function_call":
         call_obj = payload.get("call", {}) or {}
         agent_id = call_obj.get("agent_id") or payload.get("agent_id")
-        await _ensure_call_row(payload.get("call_id", ""), call_obj)
-        return await _dispatch_function(
+        try:
+            await _ensure_call_row(payload.get("call_id", ""), call_obj)
+        except Exception:  # noqa: BLE001 — a missing call row must not kill the tool
+            logger.exception("ensure_call_row failed for call=%s", payload.get("call_id"))
+        return await _dispatch_guarded(
             payload.get("function_name"),
             payload.get("call_id", ""),
             payload.get("args", {}) or {},

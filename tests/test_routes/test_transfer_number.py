@@ -285,3 +285,37 @@ async def test_transfer_destination_is_published_to_the_agent(db_session):
     # No line at all → empty, so the prompt keeps the agent on the callback path.
     practice.phone_number = None
     assert build_dynamic_variables(practice)["clinic_transfer_number"] == ""
+
+
+async def test_a_backend_failure_mid_call_gives_the_agent_something_to_say(
+    client, db_session, monkeypatch
+):
+    """A DB blip during a tool call used to become a 500, and what the caller heard
+    was then Retell's business, not ours — the same dead air we just spent a week
+    removing. The agent must get a speakable answer that claims nothing."""
+    from app.webhooks import retell as retell_mod
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("connection pool exhausted")
+
+    monkeypatch.setattr(retell_mod, "_dispatch_function", _boom)
+    await seed_practice(
+        db_session, name="Blip Dental", clerk_org_id="org_blip", clerk_user_id="user_blip"
+    )
+
+    resp = await client.post(
+        "/webhooks/retell",
+        json={
+            "call": {"call_id": "tr-blip-1", "agent_id": "agent_blip"},
+            "name": "book_appointment",
+            "args": {"patient_first_name": "Ann", "patient_phone": "+15551110000",
+                     "procedure": "cleaning", "preferred_date": "2099-12-20",
+                     "preferred_time_window": "morning"},
+        },
+    )
+    assert resp.status_code == 200, "a 500 hands the caller experience to Retell"
+    body = resp.json()
+    assert body["error"] == "backend_unavailable"
+    # Whatever it says, it must not imply the booking happened.
+    assert "booked" not in body
+    assert "call them right back" in body["message"]
