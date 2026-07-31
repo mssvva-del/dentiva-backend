@@ -21,13 +21,25 @@ _RETELL_API = "https://api.retellai.com"
 # best budget quality first. Deliberately EXCLUDED: sonnet tier / gpt-5.5/5.4/5.2
 # (blow the per-minute budget) and the nano tier (the digit-mangling class we
 # already burned on). Retell $/min for the model component in comments.
+# Prices re-read from retellai.com/pricing on 2026-07-31 (standard tier; the fast
+# tier is roughly double). Ordered cheapest-capable first — the newer mini tiers
+# undercut what we run today, so "cheaper" no longer means "dumber".
 ALLOWED_VOICE_MODELS: tuple[str, ...] = (
-    "gpt-5.1",            # $0.040 — flagship-class at half sonnet price (default)
-    "gpt-4.1",            # $0.045 — proven, very instruction-obedient
+    "gpt-5.4-mini",       # $0.036 — newest mini generation, cheaper than gpt-4.1
+    "gpt-5.1",            # $0.040 — flagship-class at half sonnet price
+    "gpt-4.1",            # $0.045 — what we run today; proven, very obedient
     "claude-4.5-haiku",   # $0.025 — fastest latency, solid compliance
     "gemini-3.0-flash",   # $0.027 — cheap+fast, weaker on long rule sets
-    "gpt-5-mini",         # $0.012 — floor option, a tier above old gpt-4o-mini
+    "gpt-4.1-mini",       # $0.016 — same family as today, a quarter of the price
+    "gpt-5-mini",         # $0.012 — floor option we would still trust with digits
 )
+# Deliberately EXCLUDED and why:
+#   gpt-5.5 ($0.16), claude-4.6-sonnet / claude-4.5-sonnet ($0.08),
+#   gemini-3.5-flash ($0.081), gpt-5.4 ($0.080), gpt-5.2 ($0.056) — over the
+#     ~$0.05/min ceiling Sergio set on 2026-07-07.
+#   every *-nano tier (gpt-5-nano $0.003, gpt-4.1-nano $0.004, gpt-5.4-nano $0.01,
+#     gemini-2.5-flash-lite $0.006) — this is the class that mangled digits on a
+#     real call, and a wrong phone number costs more than the minute saved.
 
 
 class RetellError(Exception):

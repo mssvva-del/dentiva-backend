@@ -1675,9 +1675,15 @@ async def get_voice_live_config(
     prompt = llm.get("general_prompt") or ""
     tools = llm.get("general_tools") or []
     native = [t.get("name", "") for t in tools if t.get("type") == "transfer_call"]
-    # The exact wording that left callers listening to silence.
-    lying = bool(re.search(r"connect(ing)? you|transferr?ing you|put you through",
-                           prompt, re.IGNORECASE))
+    # The exact wording that left callers listening to silence — but promising a
+    # connection is only a lie when the agent has no way to make one. With a
+    # native transfer tool present the phrase is legitimate, and flagging it then
+    # trains everyone to ignore this list.
+    promises_bridge = bool(
+        re.search(r"connect(ing)? you|transferr?ing you|put you through",
+                  prompt, re.IGNORECASE)
+    )
+    lying = promises_bridge and not native
     has_er = "911" in prompt or "emergency room" in prompt.lower()
 
     drift: list[str] = []
