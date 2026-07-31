@@ -215,3 +215,21 @@ async def test_bridge_wording_is_fine_once_a_native_transfer_exists(
     r = await client.get("/api/admin/voice/live-config", headers=_h("eng_lc3"))
     assert r.json()["promises_a_bridge_it_cannot_make"] is False
     assert r.json()["drift"] == []
+
+
+async def test_admin_reads_go_through_the_platform_connection():
+    """Cross-clinic admin screens must use the one connection allowed to read
+    across tenants. If an admin route quietly goes back to the clinic-facing
+    session factory, it returns empty the moment production stops running as
+    superuser — and the fix would look like "RLS is broken" instead of a
+    mis-wired session."""
+    import re
+    from pathlib import Path
+
+    src = Path("app/routes/admin.py").read_text()
+    stray = re.findall(r"_app_db\.async_session_factory\(\)", src)
+    assert not stray, (
+        f"{len(stray)} admin queries use the tenant-scoped session factory; "
+        "cross-clinic reads belong on platform_session_factory"
+    )
+    assert "_app_db.platform_session_factory()" in src

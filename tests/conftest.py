@@ -116,6 +116,15 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
     app_db.engine = test_engine
     app_db.async_session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
     deps.async_session_factory = app_db.async_session_factory
+    # The platform connection (internal cross-clinic reads: admin area, QA review)
+    # is a SEPARATE factory in the app. Point it at the OWNER role, mirroring
+    # production's intent — the app role is RLS-enforced, and only this connection
+    # may read across tenants. Leaving it unbound would also hand the tests an
+    # engine attached to a different event loop.
+    app_db.platform_engine = create_async_engine(OWNER_TEST_DB_URL, poolclass=NullPool)
+    app_db.platform_session_factory = async_sessionmaker(
+        app_db.platform_engine, expire_on_commit=False
+    )
 
     # SEPARATE seeding session factory bound to the OWNER role (superuser →
     # bypasses RLS). The `db_session` fixture is a test harness for setup +
@@ -129,6 +138,7 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
 
     yield
 
+    await app_db.platform_engine.dispose()
     await test_engine.dispose()
     await _seed_engine.dispose()
 

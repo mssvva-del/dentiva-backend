@@ -99,7 +99,7 @@ class ClinicRow(BaseModel):
 async def list_clinics(
     ctx: AdminContext = Depends(require_admin_permission(VIEW_ALL_CLINICS)),
 ) -> list[ClinicRow]:
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         rows = (
             await session.execute(select(Practice).order_by(Practice.created_at.desc()))
         ).scalars().all()
@@ -180,7 +180,7 @@ async def clinic_detail(
     practice_id: uuid.UUID,
     ctx: AdminContext = Depends(require_admin_permission(VIEW_CLINIC_DETAIL)),
 ) -> ClinicDetail:
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         p = (
             await session.execute(select(Practice).where(Practice.id == practice_id))
         ).scalar_one_or_none()
@@ -254,7 +254,7 @@ async def clinic_baa_history(
     """Signed-BAA history for a clinic — the compliance record (who signed which
     version, when, from what IP). Read-only, audited."""
     from app.models.baa_acceptance import BaaAcceptance
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         rows = (await session.execute(
             select(BaaAcceptance).where(BaaAcceptance.practice_id == practice_id)
             .order_by(BaaAcceptance.created_at.desc())
@@ -277,7 +277,7 @@ async def edit_clinic(
 ) -> ClinicDetail:
     """Admin edit of a clinic profile (support ops). Only provided fields change;
     agent persona is merged into agent_settings. Audited with the changed keys."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         p = (await session.execute(
             select(Practice).where(Practice.id == practice_id)
         )).scalar_one_or_none()
@@ -324,7 +324,7 @@ async def impersonate(
     """Begin impersonating a clinic (audited). Returns the target context the UI
     uses to show a persistent 'Viewing as <clinic>' banner. The actual data view
     is read-only and every impersonation start is logged for HIPAA."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         p = (
             await session.execute(select(Practice).where(Practice.id == practice_id))
         ).scalar_one_or_none()
@@ -358,7 +358,7 @@ class SubscriptionRow(BaseModel):
 async def list_subscriptions(
     ctx: AdminContext = Depends(require_admin_permission(VIEW_USAGE_METRICS)),
 ) -> list[SubscriptionRow]:
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         subs = (await session.execute(select(Subscription))).scalars().all()
         names = {
             p.id: p.name for p in (await session.execute(select(Practice))).scalars().all()
@@ -390,7 +390,7 @@ async def override_subscription(
 ) -> SubscriptionRow:
     """Per-client override of plan/price/minutes/status (custom deals + pilots).
     Creates a subscription if none exists. Fully audited."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         p = (
             await session.execute(select(Practice).where(Practice.id == practice_id))
         ).scalar_one_or_none()
@@ -459,7 +459,7 @@ class RevenueSummary(BaseModel):
 async def revenue(
     ctx: AdminContext = Depends(require_admin_permission(VIEW_REVENUE)),
 ) -> RevenueSummary:
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         subs = (await session.execute(select(Subscription))).scalars().all()
         practices = (await session.execute(select(Practice))).scalars().all()
         minutes = (await session.execute(
@@ -492,7 +492,7 @@ class StaffRow(BaseModel):
 async def list_staff(
     ctx: AdminContext = Depends(require_admin_permission(MANAGE_DENTIVA_STAFF)),
 ) -> list[StaffRow]:
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         staff = (await session.execute(select(DentivaStaff))).scalars().all()
         users = {
             u.id: u for u in (await session.execute(select(User))).scalars().all()
@@ -517,7 +517,7 @@ async def update_staff_role(
     from app.auth.permissions import ADMIN_ROLE_PERMISSIONS
     if payload.role not in ADMIN_ROLE_PERMISSIONS:
         raise HTTPException(status_code=422, detail="Unknown Dentiva role.")
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         staff = (
             await session.execute(select(DentivaStaff).where(DentivaStaff.user_id == user_id))
         ).scalar_one_or_none()
@@ -566,7 +566,7 @@ async def system_health(
     db_ok = True
     clinics = staff = 0
     try:
-        async with _app_db.async_session_factory() as session:
+        async with _app_db.platform_session_factory() as session:
             clinics = (await session.execute(
                 select(func.count()).select_from(Practice)
             )).scalar_one()
@@ -628,7 +628,7 @@ async def qa_call_review(
     """
     from app.services.qa.call_review import review_recent_failures
     limit = max(1, min(limit, 50))
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         result = await review_recent_failures(session, limit=limit)
     return QaReview(**result)
 
@@ -655,7 +655,7 @@ class FlagUpsert(BaseModel):
 async def list_flags(
     ctx: AdminContext = Depends(require_admin_permission(MANAGE_FEATURE_FLAGS)),
 ) -> list[FlagRow]:
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         flags = (
             await session.execute(select(FeatureFlag).order_by(FeatureFlag.flag_key))
         ).scalars().all()
@@ -672,7 +672,7 @@ async def upsert_flag(
     ctx: AdminContext = Depends(require_admin_permission(MANAGE_FEATURE_FLAGS)),
 ) -> FlagRow:
     pid = uuid.UUID(payload.practice_id) if payload.practice_id else None
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         q = select(FeatureFlag).where(FeatureFlag.flag_key == payload.flag_key)
         q = q.where(FeatureFlag.practice_id == pid) if pid else q.where(
             FeatureFlag.practice_id.is_(None))
@@ -713,7 +713,7 @@ async def audit_logs(
     ctx: AdminContext = Depends(require_admin_permission(VIEW_AUDIT_LOGS)),
 ) -> list[AuditRow]:
     limit = max(1, min(limit, 500))
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         rows = (
             await session.execute(
                 select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
@@ -771,7 +771,7 @@ async def list_leads(
     ctx: AdminContext = Depends(require_admin_permission(MANAGE_LEADS)),
 ) -> list[LeadRow]:
     """Sales lead inbox — newest first, optionally filtered by status."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         q = select(Lead)
         if status:
             q = q.where(Lead.status == status)
@@ -790,7 +790,7 @@ async def update_lead(
     """Move a lead through the pipeline / add sales notes."""
     if payload.status is not None and payload.status not in _LEAD_STATUSES:
         raise HTTPException(status_code=422, detail="Unknown lead status.")
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         lead = (await session.execute(
             select(Lead).where(Lead.id == lead_id)
         )).scalar_one_or_none()
@@ -898,7 +898,7 @@ async def admin_create_coupon(
         )
     except (BillingNotConfigured, StripeError) as exc:
         raise _stripe_http(exc) from exc
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         await _audit(session, ctx, "admin_create_coupon",
                      meta={"coupon": coupon.get("id"), "name": payload.name})
         await session.commit()
@@ -914,7 +914,7 @@ async def admin_delete_coupon(
         await delete_coupon(coupon_id)
     except (BillingNotConfigured, StripeError) as exc:
         raise _stripe_http(exc) from exc
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         await _audit(session, ctx, "admin_delete_coupon", meta={"coupon": coupon_id})
         await session.commit()
     return {"ok": True}
@@ -933,7 +933,7 @@ async def admin_apply_coupon(
     """Attach a Stripe coupon to the clinic's subscription (discount from the next
     invoice). Clinics without a Stripe subscription (trials/pilots) get a clear 409 —
     use the existing subscription override for custom pricing there."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         sub = (await session.execute(
             select(Subscription).where(Subscription.practice_id == practice_id)
         )).scalar_one_or_none()
@@ -974,7 +974,7 @@ async def admin_list_invoices(
     ctx: AdminContext = Depends(require_admin_permission(VIEW_BILLING_ALL)),
 ) -> list[InvoiceRow]:
     """A clinic's invoices (local mirror of Stripe's) — pick one to refund."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         rows = (await session.execute(
             select(Invoice).where(Invoice.practice_id == practice_id)
             .order_by(Invoice.created_at.desc()).limit(100)
@@ -1007,7 +1007,7 @@ async def admin_refund_invoice(
     same refund collapses into one money movement on Stripe's side too."""
     if payload.amount_cents is not None and payload.amount_cents <= 0:
         raise HTTPException(status_code=422, detail="amount_cents must be > 0.")
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         inv = (await session.execute(
             select(Invoice).where(Invoice.id == invoice_id).with_for_update()
         )).scalar_one_or_none()
@@ -1123,7 +1123,7 @@ async def admin_get_pricing(
 ) -> AdminPricing:
     """Full editable grid (incl. inactive plans) + referral/annual config."""
     from app.services.pricing import get_all_plans, get_or_create_settings
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         plans = await get_all_plans(session)
         s = await get_or_create_settings(session)
         await session.commit()
@@ -1160,7 +1160,7 @@ async def admin_update_plan(
             status_code=422,
             detail=f"reactivation_level must be one of {_REACTIVATION_LEVELS}.",
         )
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         plan = (await session.execute(
             select(PricingPlan).where(PricingPlan.plan_key == plan_key).with_for_update()
         )).scalar_one_or_none()
@@ -1192,7 +1192,7 @@ async def admin_update_pricing_config(
     for pct in ("invitee_discount_percent", "annual_discount_percent"):
         if pct in fields and not (0 <= fields[pct] <= 100):
             raise HTTPException(status_code=422, detail=f"{pct} must be 0–100.")
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         s = await get_or_create_settings(session)
         before = {
             "referrer_reward_months": s.referrer_reward_months,
@@ -1247,7 +1247,7 @@ async def admin_cancel_subscription(
     if payload.mode not in ("at_period_end", "immediately"):
         raise HTTPException(status_code=422,
                             detail="mode must be 'at_period_end' or 'immediately'.")
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         sub = (await session.execute(
             select(Subscription).where(Subscription.practice_id == practice_id)
             .with_for_update()
@@ -1295,7 +1295,7 @@ async def admin_resume_subscription(
     ctx: AdminContext = Depends(require_admin_permission(MANAGE_SUBSCRIPTIONS)),
 ) -> CancelStateRow:
     """Undo a scheduled at-period-end cancellation (before the period ends)."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         sub = (await session.execute(
             select(Subscription).where(Subscription.practice_id == practice_id)
             .with_for_update()
@@ -1358,7 +1358,7 @@ async def admin_invite_staff(
             status_code=422,
             detail=f"role must be one of {sorted(ADMIN_ROLE_PERMISSIONS)}.",
         )
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         existing = (await session.execute(
             select(User).where(func.lower(User.email) == email)
         )).scalar_one_or_none()
@@ -1442,7 +1442,7 @@ async def admin_deactivate_staff(
     (they may still be a clinic user); safe and reversible via a fresh invite."""
     if user_id == ctx.user.id:
         raise HTTPException(status_code=409, detail="You cannot deactivate yourself.")
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         staff = (await session.execute(
             select(DentivaStaff).where(DentivaStaff.user_id == user_id)
         )).scalar_one_or_none()
@@ -1501,7 +1501,7 @@ async def list_clinic_notes(
     ctx: AdminContext = Depends(require_admin_permission(VIEW_CLINIC_DETAIL)),
 ) -> list[ClinicNoteRow]:
     """Account notes, newest first."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         rows = (await session.execute(
             select(ClinicNote).where(ClinicNote.practice_id == practice_id)
             .order_by(ClinicNote.created_at.desc()).limit(200)
@@ -1520,7 +1520,7 @@ async def add_clinic_note(
         raise HTTPException(status_code=422, detail="Note body is empty.")
     if len(body) > 5000:
         raise HTTPException(status_code=422, detail="Note too long (max 5000).")
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         exists = (await session.execute(
             select(func.count()).select_from(Practice).where(Practice.id == practice_id)
         )).scalar_one()
@@ -1549,7 +1549,7 @@ async def delete_clinic_note(
     can't erase someone else's account history. Scoped under the clinic path
     (reviewer): the note must belong to {practice_id}, mirroring GET/POST so a
     note id can't be operated on outside its clinic context."""
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         note = (await session.execute(
             select(ClinicNote).where(
                 ClinicNote.id == note_id, ClinicNote.practice_id == practice_id
@@ -1603,7 +1603,7 @@ async def _live_agent_id() -> str:
     env_id = get_settings().retell_agent_id
     if env_id:
         return env_id
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         agent_id = (await session.execute(
             select(Practice.retell_agent_id)
             .where(Practice.retell_agent_id.isnot(None)).limit(1)
@@ -1750,7 +1750,7 @@ async def set_voice_model(
         await publish_agent(agent_id)
     except (RetellNotConfigured, RetellError) as exc:
         raise _retell_http(exc) from exc
-    async with _app_db.async_session_factory() as session:
+    async with _app_db.platform_session_factory() as session:
         await _audit(session, ctx, "admin_set_voice_model",
                      meta={"before": before, "after": payload.model,
                            "agent": agent_id[:24]})

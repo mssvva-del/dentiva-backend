@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     # backend URL in production (a localhost value there means the number would
     # answer with no clinic context).
     public_base_url: str = "http://localhost:8000"
+    # Connection used ONLY by internal cross-clinic code (admin area, QA review).
+    # May point at a role that bypasses RLS. Empty = same connection as everything
+    # else, which is the current state and the reason production cannot yet switch
+    # its main connection to the RLS-enforced role.
+    database_url_platform: str = ""
     # Stripe Price IDs per tier × cycle (ADM7 grid). Created by
     # scripts/sync_stripe_catalog.py; paste its output into these env vars.
     stripe_price_after_hours_monthly: str = ""
