@@ -33,11 +33,13 @@ from app.models.reactivation import (
     ReactivationTarget,
     ReactivationTouch,
 )
+from app.observability.alerts import record_alert
 from app.services.reactivation.campaign import select_due_targets
 from app.services.reactivation.compliance import (
     PromoContentBlocked,
     assert_treatment_only,
     frequency_block_reason,
+    practice_daily_ceiling_reached,
 )
 from app.services.reactivation.messages import (
     custom_sms_body,
@@ -156,6 +158,20 @@ async def process_due_targets(
             target.next_touch_at = None
             summary["opted_out"] += 1
             summary["processed"] += 1
+            continue
+
+        # Blast radius for the whole practice, counted in the DB so it survives a
+        # second instance and a deploy. The per-patient caps below stop us
+        # pestering one person; this is what stops a runaway campaign or a bad
+        # import from dialling an entire list — every attempt is real money and a
+        # TCPA exposure. Defer rather than drop: the list is still there tomorrow.
+        if await practice_daily_ceiling_reached(session, practice.id, now=now):
+            record_alert("outbound_daily_ceiling", f"practice={practice.id}")
+            target.next_touch_at = next_allowed_time(
+                now + timedelta(days=1),
+                practice.timezone, config.quiet_start_hour, config.quiet_end_hour,
+            )
+            summary["deferred"] += 1
             continue
 
         # TCPA frequency caps (FCC 20-186): ≤1/day, ≤3/week per patient ACROSS

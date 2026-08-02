@@ -29,7 +29,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.db as _app_db
-from app.auth.admin import AdminContext, require_admin_permission
+from app.auth.admin import AdminContext, require_admin_permission, require_internal
 from app.auth.permissions import (
     IMPERSONATE_CLINIC,
     MANAGE_BILLING_ALL,
@@ -562,6 +562,28 @@ class SystemHealth(BaseModel):
     # Is the tenant boundary actually on, and if not, can it be switched on safely?
     rls_enforced: bool | None = None
     rls_switch_blockers: list[str] = []
+
+
+class AdminMe(BaseModel):
+    role: str
+    permissions: list[str]
+
+
+@router.get("/me", response_model=AdminMe)
+async def admin_me(ctx: AdminContext = Depends(require_internal())) -> AdminMe:
+    """Who the internal caller is and what they may do.
+
+    The server is and stays the boundary — every admin route re-checks its own
+    permission. This exists so the UI can stop advertising doors that will not
+    open: a support user was shown Revenue, Pricing and Feature flags and got a
+    generic error on each, which reads like a broken product rather than a role.
+    """
+    from app.auth.permissions import admin_permissions_for
+
+    return AdminMe(
+        role=ctx.staff_role,
+        permissions=sorted(admin_permissions_for(ctx.staff_role)),
+    )
 
 
 @router.get("/system-health", response_model=SystemHealth)

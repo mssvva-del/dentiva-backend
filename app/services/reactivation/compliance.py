@@ -87,6 +87,20 @@ def assert_treatment_only(text: str) -> None:
 MAX_TOUCHES_PER_DAY = 1
 MAX_TOUCHES_PER_WEEK = 3
 
+# A ceiling on what one practice can send in a day, counted in the DATABASE.
+#
+# The per-patient caps above stop us pestering one person; nothing stopped a
+# runaway campaign or a bad patient import from dialling a whole list. The HTTP
+# rate limiter can't help: it lives in process memory, so it multiplies by the
+# number of instances and resets on every deploy — and the outbound worker
+# doesn't go through HTTP at all. Every outbound call is real money and, in the
+# US, a TCPA exposure per attempt.
+#
+# Counted from reactivation_touches, so the ceiling holds across instances,
+# restarts and deploys. Deliberately generous: it is a blast radius, not a
+# business rule. A practice legitimately working a recall list will not see it.
+PRACTICE_MAX_TOUCHES_PER_DAY = 300
+
 # Touches that count against the caps: anything that plausibly REACHED the
 # patient. Failures/skips don't consume the allowance.
 _COUNTED_STATUSES = ("sent", "queued")
@@ -118,3 +132,27 @@ async def frequency_block_reason(
     if await _count(now - timedelta(days=7)) >= MAX_TOUCHES_PER_WEEK:
         return "weekly_limit"
     return None
+
+
+async def practice_daily_ceiling_reached(
+    session: AsyncSession, practice_id: uuid.UUID, *, now: datetime | None = None
+) -> bool:
+    """Has this practice already sent its day's worth of outbound touches?
+
+    Counted in the database rather than in memory: the limit has to survive a
+    second instance, a restart and a deploy, because the thing it bounds is money
+    leaving the account and calls landing on real phones.
+    """
+    now = now or datetime.now(tz=UTC)
+    sent_today = (
+        await session.execute(
+            select(func.count())
+            .select_from(ReactivationTouch)
+            .where(
+                ReactivationTouch.practice_id == practice_id,
+                ReactivationTouch.status.in_(_COUNTED_STATUSES),
+                ReactivationTouch.created_at >= now - timedelta(days=1),
+            )
+        )
+    ).scalar_one()
+    return sent_today >= PRACTICE_MAX_TOUCHES_PER_DAY
