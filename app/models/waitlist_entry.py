@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 from app.models.mixins import TimestampMixin, UUIDPKMixin
+from app.models.types import EncryptedString
 
 
 class WaitlistEntry(UUIDPKMixin, TimestampMixin, Base):
@@ -43,7 +44,10 @@ class WaitlistEntry(UUIDPKMixin, TimestampMixin, Base):
     procedure_type: Mapped[str | None] = mapped_column(Text)
     preferred_date: Mapped[str | None] = mapped_column(Text)
     preferred_time_window: Mapped[str | None] = mapped_column(Text)
-    notes: Mapped[str | None] = mapped_column(Text)
+    # Encrypted for the same reason as the callback reason: this is free text a
+    # patient dictated, and it lands here as symptoms and circumstances far more
+    # often than as scheduling preferences.
+    notes: Mapped[str | None] = mapped_column(EncryptedString)
     # waiting | notified | booked | removed
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="waiting", default="waiting"

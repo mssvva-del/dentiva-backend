@@ -144,7 +144,19 @@ def _verify_signature(
 # Deterministic keyword scan. Substring patterns (not \b word boundaries) so
 # inflections match: bleed/bleeding/bleeds, swell/swelling, breath/breathing/
 # breathe, knocked out / knocked-out / knockedout, uncontrolled/uncontrollable.
+# The prompt promises Spanish and switches to it on the caller's first words, so
+# an English-only safety net protects only half the callers it exists for. A
+# patient describing an airway in Spanish must trip the same deterministic lock.
 _EMERGENCY_PATTERNS = (
+    r"sangr",              # sangrado, sangrando, sangra
+    r"hinchaz",            # hinchazón
+    r"hinchad",            # hinchado/hinchada
+    r"inflamaci",          # inflamación
+    r"dolor\s+(muy\s+)?(fuerte|intenso|severo|insoportable)",
+    r"respir",             # respirar, respiración, respiro
+    r"traga",              # tragar
+    r"emergencia",
+    r"urgen",              # urgente, urgencia
     r"bleed",
     r"swell",
     r"swollen",
@@ -164,6 +176,17 @@ _EMERGENCY_RE = re.compile("|".join(_EMERGENCY_PATTERNS), re.IGNORECASE)
 # after hours a callback promise is actively dangerous ("the team will call you
 # back" at 11pm = wait until morning).
 _MEDICAL_ER_PATTERNS = (
+    # Spanish first — same tier-1 signs, same consequence.
+    r"no\s+puedo\s+respirar",
+    r"(dificultad|problemas?)\s+(para|al)\s+(respirar|tragar)",
+    r"me\s+(cuesta|falta)\s+(respirar|el\s+aire)",
+    r"no\s+para\s+de\s+sangrar",
+    r"sangr\w*\s+que\s+no\s+(para|se\s+detiene)",
+    r"(cara|garganta|cuello|lengua|labio)\s+(muy\s+)?hinchad",
+    r"hinchaz[oó]n\s+(en|de)\s+(la\s+)?(cara|garganta|cuello|lengua)",
+    r"se\s+desmay",         # se desmayó
+    r"perdi[oó]\s+el\s+conocimiento",
+    r"inconsciente",
     r"(can'?t|cannot|hard\s+to|trouble|difficulty)\s+(breath|swallow)",
     r"(breath|swallow)\w*\s+(is\s+)?(hard|difficult)",
     r"airway",
@@ -239,8 +262,10 @@ _ENUM_ARG_KEYS = frozenset({
 # it as one is the failure direction that gets someone hurt.
 _NEGATION_RE = re.compile(
     r"\b(no|not|none|without|denies|denied|isn'?t|aren'?t|doesn'?t|don'?t|"
-    r"nothing|never|negative\s+for)\b"
-    r"(?:(?!\b(?:but|however|though|although|yet|except)\b)[^.!?;]){0,40}$",
+    r"nothing|never|negative\s+for|"
+    # Spanish: "sin hinchazón", "ninguna fiebre", "tampoco sangra"
+    r"sin|ninguna?|nada\s+de|tampoco)\b"
+    r"(?:(?!\b(?:but|however|though|although|yet|except|pero|aunque|sin\s+embargo)\b)[^.!?;]){0,40}$",
     re.IGNORECASE,
 )
 
@@ -260,6 +285,25 @@ def _args_to_text(args: dict) -> str:
     return " ".join(parts)
 
 
+# A negation that is part of the symptom, not a denial of it. Spanish is where
+# this bites hardest: "no puedo respirar" is I CANNOT BREATHE, and reading the
+# leading "no" as a denial silences the most urgent sentence a caller can say.
+# English has the same shape in "won't stop bleeding".
+_SYMPTOM_NEGATIONS = (
+    r"no\s+pued\w*",           # no puedo / no puede respirar, tragar
+    r"no\s+para\s+de",         # no para de sangrar
+    r"no\s+se\s+detiene",
+    r"no\s+me\s+deja",         # no me deja respirar
+    r"no\s+le\s+llega",        # no le llega el aire
+    r"(wo|does)?n'?t\s+stop",
+    r"can'?t\s+(stop|breath|swallow)",
+    r"cannot\s+(stop|breath|swallow)",
+)
+_SYMPTOM_NEGATION_RE = re.compile(
+    "(?:" + "|".join(_SYMPTOM_NEGATIONS) + r")[^.!?;]{0,20}$", re.IGNORECASE
+)
+
+
 def _matched_and_not_negated(pattern: re.Pattern, text: str) -> bool:
     """True when the pattern matches somewhere it isn't being DENIED.
 
@@ -268,13 +312,22 @@ def _matched_and_not_negated(pattern: re.Pattern, text: str) -> bool:
     the second half. Under-triggering here is the dangerous direction.
     """
     for match in pattern.finditer(text):
-        if not _NEGATION_RE.search(text[: match.start()]):
+        before = text[: match.start()]
+        if _SYMPTOM_NEGATION_RE.search(before):
+            return True  # the "no" belongs to the symptom
+        if not _NEGATION_RE.search(before):
             return True
     return False
 
 
 def _contains_emergency_keywords(args: dict) -> bool:
-    return _matched_and_not_negated(_EMERGENCY_RE, _args_to_text(args))
+    text = _args_to_text(args)
+    # Anything severe enough for an emergency room must also stop scheduling. The
+    # two scans were independent, so a sign we route to 911 ("se desmayó") could
+    # still leave booking allowed if the wider keyword list happened to miss it.
+    return _matched_and_not_negated(_MEDICAL_ER_RE, text) or _matched_and_not_negated(
+        _EMERGENCY_RE, text
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1350,7 +1403,11 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
                 audit_metadata={
                     "retell_call_id": retell_call_id,
                     "appointment_at": booking.appointment_at.isoformat(),
-                    "reason": reason,
+                    # NOT the reason itself. Audit metadata is plain JSONB, read
+                    # by internal screens and included in any database dump — and
+                    # a cancellation reason is whatever the patient said, which
+                    # is routinely clinical ("the swelling got worse").
+                    "reason_given": bool(reason),
                     "patient_phone_last4": phone[-4:] if len(phone) >= 4 else "****",
                 },
             )

@@ -21,6 +21,7 @@ def _prod_settings(**overrides) -> Settings:
         auth_dev_bypass=False,
         retell_webhook_secret="whsec_test",
         clerk_secret_key="sk_test",
+        clerk_webhook_secret="whsec_clerk_test",
         encryption_key="enc_test",
         twilio_validate_signature=True,  # required in prod (inbound SMS webhook auth)
         twilio_auth_token="tw_test",     # required so signatures can actually verify
@@ -165,3 +166,14 @@ async def test_db_security_superuser_allowed_with_pilot_flag(db_session):
         environment="production", auth_dev_bypass=False, allow_superuser_db=True
     )
     await verify_db_security(db_session, pilot)  # must not raise
+
+
+def test_raises_when_clerk_webhook_secret_missing_in_production():
+    """The webhook route rejects unsigned events one request at a time, quietly.
+    Without the secret the app boots healthy while every signup, organisation
+    change and deprovision is refused — and the first to notice is a clinic that
+    cannot create an account."""
+    import pytest
+
+    with pytest.raises(RuntimeError, match="CLERK_WEBHOOK_SECRET"):
+        verify_security_config(_prod_settings(clerk_webhook_secret=""))

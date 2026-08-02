@@ -9,6 +9,7 @@ an ``X-Dev-*`` header set of claims is honored. Never enable in production.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -18,6 +19,8 @@ from jose import jwt
 from jose.exceptions import JWTError
 
 from app.config import get_settings
+
+logger = logging.getLogger("dentiva.auth")
 
 _JWKS_TTL_SECONDS = 3600
 _jwks_keys: dict | None = None
@@ -71,6 +74,49 @@ async def _get_jwks(jwks_url: str, *, force: bool = False) -> dict:
 
 def _find_signing_key(jwks: dict, kid: str | None) -> dict | None:
     return next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+
+
+
+def _expected_issuer(settings) -> str:
+    """The issuer this deployment accepts, derived from the JWKS URL.
+
+    Clerk publishes its keyset at ``<issuer>/.well-known/jwks.json``, so the
+    issuer is already configured — there is nothing new for anyone to set, and
+    nothing to drift out of sync with the key source.
+    """
+    if settings.clerk_issuer:
+        return settings.clerk_issuer.rstrip("/")
+    url = (settings.clerk_jwks_url or "").strip()
+    marker = "/.well-known/"
+    if marker in url:
+        return url.split(marker, 1)[0].rstrip("/")
+    return ""
+
+
+def _verify_token_origin(claims: dict, settings) -> None:
+    """Reject a validly-signed token that was not minted for this deployment.
+
+    Signature verification proves a token came from a Clerk keyset. It does not
+    prove which Clerk application or environment issued it, so without this a
+    token from a different instance — a staging tenant, another product sharing
+    an issuer domain, a developer's own Clerk app — is accepted as ours.
+    """
+    expected = _expected_issuer(settings)
+    if expected:
+        issuer = str(claims.get("iss") or "").rstrip("/")
+        if issuer != expected:
+            logger.warning("token rejected: issuer %r is not this deployment", issuer)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token was not issued for this application.",
+            )
+    party = settings.clerk_authorized_party
+    if party and str(claims.get("azp") or "") != party:
+        logger.warning("token rejected: azp mismatch")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token was not issued for this application.",
+        )
 
 
 def _extract_org_id(claims: dict) -> str | None:
@@ -144,6 +190,10 @@ async def authenticate(
             token,
             key,
             algorithms=["RS256"],
+            # Clerk session tokens carry no "aud", so audience verification would
+            # reject every real token. The claim that actually binds a token to
+            # this deployment is the issuer, checked below — a valid signature
+            # only proves the token came from SOME Clerk keyset.
             options={"verify_aud": False},
         )
     except HTTPException:
@@ -153,6 +203,8 @@ async def authenticate(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token.",
         ) from exc
+
+    _verify_token_origin(claims, settings)
 
     sub = claims.get("sub")
     if not sub:

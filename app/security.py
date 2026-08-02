@@ -50,6 +50,7 @@ def verify_security_config(settings: Settings) -> None:
     - DEMO_OPEN_ACCESS=True in production          → all users see same clinic
     - RETELL_WEBHOOK_SECRET missing in production  → forgeable webhooks
     - CLERK_SECRET_KEY missing in production       → broken auth
+    - CLERK_WEBHOOK_SECRET missing in production   → signup/provisioning dead
     - ENCRYPTION_KEY missing in production         → PHI stored in plaintext
     - TWILIO_VALIDATE_SIGNATURE False / no token   → forgeable inbound SMS
     - RATE_LIMIT_ENABLED False in production        → no abuse backstop
@@ -90,6 +91,12 @@ def verify_security_config(settings: Settings) -> None:
             "RETELL_WEBHOOK_SECRET": settings.retell_webhook_secret,
             "CLERK_SECRET_KEY":      settings.clerk_secret_key,
             "ENCRYPTION_KEY":        settings.encryption_key,
+            # The Clerk webhook route already refuses unsigned events in
+            # production — but silently, one request at a time. Without the
+            # secret the app boots "healthy" while every signup, organisation
+            # change and deprovision is being rejected, and the first person to
+            # notice is a clinic that cannot create an account.
+            "CLERK_WEBHOOK_SECRET":  settings.clerk_webhook_secret,
         }
         missing = [k for k, v in required.items() if not v]
         if missing:

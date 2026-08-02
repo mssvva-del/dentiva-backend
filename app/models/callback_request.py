@@ -18,7 +18,7 @@ class CallbackRequest(UUIDPKMixin, TimestampMixin, Base):
     scheduling-adjacent action allowed during an active emergency). Persisted so
     the practice sees pending callbacks on the dashboard — urgent ones first.
     Patient identifiers are encrypted at rest like the patients table; the
-    callback reason is operational free text kept in plaintext within the
+    callback reason is what the patient said and is encrypted at rest like the
     tenant.
     """
 
@@ -38,7 +38,10 @@ class CallbackRequest(UUIDPKMixin, TimestampMixin, Base):
     patient_first_name: Mapped[str | None] = mapped_column(EncryptedString)
     phone: Mapped[str | None] = mapped_column(EncryptedString)
     # Operational free text (why the patient should be called back).
-    reason: Mapped[str | None] = mapped_column(Text)
+    # Encrypted: this is the patient describing why they need a call back, in
+    # their own words — "bleeding since the extraction", "my crown fell out".
+    # It was plaintext because it reads like an operational note; it is not.
+    reason: Mapped[str | None] = mapped_column(EncryptedString)
     # True when the caller described an emergency / urgent situation.
     urgent: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false", default=False
