@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     clerk_publishable_key: str = ""
     clerk_secret_key: str = ""
     clerk_jwks_url: str = ""
+    # Who the token must say issued it. Normally derived from CLERK_JWKS_URL
+    # (Clerk publishes JWKS at <issuer>/.well-known/jwks.json), so nothing to set;
+    # override only if Clerk changes that shape. A signature proves the token came
+    # from a keyset — not that it was minted for THIS environment.
+    clerk_issuer: str = ""
+    # Optional: the "azp" claim Clerk stamps with the front-end origin that
+    # requested the token. Set it to the dashboard origin to reject a valid Clerk
+    # token that was minted for some other application.
+    clerk_authorized_party: str = ""
     # svix signing secret for Clerk webhooks (Dashboard → Webhooks → Signing
     # Secret, format "whsec_..."). Verifies user.created / organization.* events.
     # When empty: allowed in dev (logged), but REJECTED in production so an

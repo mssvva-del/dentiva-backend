@@ -1025,3 +1025,87 @@ async def test_a_denial_does_not_swallow_a_real_symptom_after_it(client, db_sess
         },
     )
     assert r.json().get("blocked") is True, "scheduling must be refused"
+
+
+# ---------------------------------------------------------------------------
+# The safety net has to speak both languages the product speaks.
+#
+# The prompt switches to Spanish on the caller's first words, so an English-only
+# deterministic lock protects half the callers it exists for. Spanish also has a
+# trap English mostly lacks: "no puedo respirar" is I CANNOT BREATHE — the
+# leading "no" is part of the symptom, not a denial of it.
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("said", "blocks_scheduling", "sends_to_er"),
+    [
+        ("no puedo respirar y se me hinchó la cara", True, True),
+        ("sangrado que no para desde la extracción", True, True),
+        ("se desmayó después del golpe", True, True),
+        ("dolor muy fuerte en una muela", True, False),   # urgent dental, ours
+        ("sin hinchazón, sin fiebre, limpieza normal", False, False),
+        ("sin fiebre pero no puedo respirar", True, True),  # denial then a real sign
+        ("the bleeding won't stop", True, True),
+    ],
+)
+def test_the_emergency_scan_reads_spanish(said, blocks_scheduling, sends_to_er):
+    from app.webhooks.retell import (
+        _contains_emergency_keywords,
+        _needs_emergency_room,
+    )
+
+    args = {"reason": said}
+    assert _contains_emergency_keywords(args) is blocks_scheduling
+    assert _needs_emergency_room(args) is sends_to_er
+
+
+def test_anything_bound_for_an_emergency_room_also_stops_scheduling():
+    """The two scans used to be independent, so a sign we route to 911 could
+    leave booking allowed if the wider keyword list happened to miss it."""
+    from app.webhooks.retell import (
+        _contains_emergency_keywords,
+        _needs_emergency_room,
+    )
+
+    for said in ("se desmayó", "lost consciousness", "no puedo tragar"):
+        args = {"reason": said}
+        if _needs_emergency_room(args):
+            assert _contains_emergency_keywords(args), said
+
+
+async def test_a_cancellation_reason_never_lands_in_plain_audit_metadata(
+    client, db_session
+):
+    """Audit metadata is plain JSONB — read by internal screens and present in
+    any database dump. A cancellation reason is whatever the patient said, and
+    that is routinely clinical."""
+    practice, _ = await seed_practice(
+        db_session, name="Audit Dental", clerk_org_id="org_aud1", clerk_user_id="user_aud1"
+    )
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "aud-1",
+        "call": {"from_number": "+15557778888", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "aud-1",
+        "function_name": "book_appointment",
+        "args": {"patient_first_name": "Nina", "patient_last_name": "Ray",
+                 "patient_phone": "+15557778888", "procedure": "cleaning",
+                 "preferred_date": "2099-11-10", "preferred_time_window": "morning"},
+    })
+    secret = "the swelling in my jaw got worse overnight"
+    await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "aud-1",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": "+15557778888", "reason": secret},
+    })
+
+    await db_session.commit()
+    rows = (await db_session.execute(select(AuditLog.audit_metadata))).scalars().all()
+    assert rows, "the cancellation should have been audited at all"
+    assert secret not in str(rows)
+    assert any((r or {}).get("reason_given") is True for r in rows)

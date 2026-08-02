@@ -35,15 +35,15 @@ class WebCallResponse(BaseModel):
 
 @router.get("/status")
 async def voice_status() -> dict:
-    """Public diagnostic: is the voice demo configured? Exposes only booleans
-    (no secrets) so config can be verified remotely without auth."""
+    """Public diagnostic: can the browser demo start a call?
+
+    One coarse boolean on purpose. It used to also report which half of the
+    configuration was missing and whether the demo was open without auth — a free
+    map of the deployment for anyone who asks, in exchange for telling us nothing
+    the single flag doesn't. Detail lives in the authenticated admin view.
+    """
     settings = get_settings()
-    return {
-        "configured": bool(settings.retell_api_key and settings.retell_agent_id),
-        "has_key": bool(settings.retell_api_key),
-        "has_agent": bool(settings.retell_agent_id),
-        "demo_open_access": settings.demo_open_access,
-    }
+    return {"configured": bool(settings.retell_api_key and settings.retell_agent_id)}
 
 
 @router.post("/web-call", response_model=WebCallResponse)
