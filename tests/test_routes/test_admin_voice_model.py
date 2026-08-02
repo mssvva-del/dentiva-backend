@@ -266,3 +266,35 @@ async def test_the_preflight_cannot_report_the_database_as_down(client, db_sessi
     assert body["db_ok"] is True, "the pre-flight must not be able to flip this"
     # And it must have actually run rather than silently reporting nothing.
     assert body["rls_enforced"] is not None
+
+
+async def test_admin_me_reports_the_callers_own_permissions(client, db_session):
+    """The UI needs this to stop advertising doors that will not open — a support
+    user was shown Revenue, Pricing and Feature flags and got a generic error on
+    each, which reads like a broken product rather than a role."""
+    await _internal(db_session, clerk_id="sup_me1", role="support")
+    r = await client.get("/api/admin/me", headers=_h("sup_me1"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["role"] == "support"
+    assert isinstance(body["permissions"], list) and body["permissions"]
+
+
+async def test_a_super_admin_sees_more_than_support(client, db_session):
+    await _internal(db_session, clerk_id="sa_me2", role="super_admin")
+    await _internal(db_session, clerk_id="sup_me2", role="support")
+    sa = (await client.get("/api/admin/me", headers=_h("sa_me2"))).json()["permissions"]
+    sup = (await client.get("/api/admin/me", headers=_h("sup_me2"))).json()["permissions"]
+    assert set(sup) < set(sa), "support must be a strict subset of super_admin"
+
+
+async def test_a_clinic_user_is_not_internal_staff(client, db_session):
+    """Nothing about the internal role map may leak to a clinic account."""
+    practice, _ = await seed_practice(
+        db_session, name="Outside Co", clerk_org_id="org_out1", clerk_user_id="user_out1"
+    )
+    r = await client.get(
+        "/api/admin/me",
+        headers={"X-Dev-Clerk-User-Id": "user_out1", "X-Dev-Clerk-Org-Id": "org_out1"},
+    )
+    assert r.status_code == 403

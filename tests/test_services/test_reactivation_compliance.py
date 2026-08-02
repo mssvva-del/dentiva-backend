@@ -219,3 +219,99 @@ async def test_same_patient_in_two_campaigns_gets_one_sms_per_tick(db_session, m
     )).all()
     assert rows, "expected at least one sent touch"
     assert all(count == 1 for _pid, count in rows), rows  # never 2 texts same day
+
+
+# ---------------------------------------------------------------------------
+# A ceiling for the whole practice, not just per patient.
+#
+# The caps above stop us pestering one person. Nothing stopped a runaway campaign
+# or a mis-parsed import from dialling an entire list — and the HTTP rate limiter
+# cannot help: it lives in process memory, so it multiplies by the instance count
+# and resets on deploy, and the outbound worker never goes through HTTP anyway.
+# Every attempt is real money leaving the account and, in the US, a TCPA exposure.
+# ---------------------------------------------------------------------------
+
+
+async def _practice_with_touches(db_session, count: int, *, status: str = "sent"):
+    import uuid as _uuid
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from app.models.patient import Patient
+    from app.models.reactivation import (
+        ReactivationCampaign,
+        ReactivationTarget,
+        ReactivationTouch,
+    )
+    from tests.conftest import seed_practice
+
+    practice, _ = await seed_practice(
+        db_session, name=f"CeilCo-{_uuid.uuid4().hex[:6]}",
+        clerk_org_id=f"o_{_uuid.uuid4().hex[:8]}", clerk_user_id=f"u_{_uuid.uuid4().hex[:8]}",
+    )
+    patient = Patient(id=_uuid.uuid4(), practice_id=practice.id,
+                      pms_external_id=f"ext-{_uuid.uuid4().hex[:8]}",
+                      first_name="Ceil", last_name="Test", phone="+15551239999")
+    campaign = ReactivationCampaign(id=_uuid.uuid4(), practice_id=practice.id,
+                                    name="c", segment="overdue_recall", status="active")
+    db_session.add_all([patient, campaign])
+    await db_session.flush()
+    target = ReactivationTarget(id=_uuid.uuid4(), practice_id=practice.id,
+                                campaign_id=campaign.id, patient_id=patient.id,
+                                segment="overdue_recall", status="active")
+    db_session.add(target)
+    await db_session.flush()
+    for _ in range(count):
+        t = ReactivationTouch(id=_uuid.uuid4(), practice_id=practice.id,
+                              target_id=target.id, channel="voice", status=status)
+        db_session.add(t)
+        await db_session.flush()
+        t.created_at = _dt.now(tz=_UTC) - timedelta(hours=1)
+    await db_session.commit()
+    return practice
+
+
+async def test_a_practice_under_the_ceiling_keeps_dialling(db_session):
+    from app.services.reactivation.compliance import (
+        PRACTICE_MAX_TOUCHES_PER_DAY,
+        practice_daily_ceiling_reached,
+    )
+
+    practice = await _practice_with_touches(db_session, PRACTICE_MAX_TOUCHES_PER_DAY - 1)
+    assert await practice_daily_ceiling_reached(db_session, practice.id) is False
+
+
+async def test_the_ceiling_stops_a_runaway_campaign(db_session):
+    from app.services.reactivation.compliance import (
+        PRACTICE_MAX_TOUCHES_PER_DAY,
+        practice_daily_ceiling_reached,
+    )
+
+    practice = await _practice_with_touches(db_session, PRACTICE_MAX_TOUCHES_PER_DAY)
+    assert await practice_daily_ceiling_reached(db_session, practice.id) is True
+
+
+async def test_attempts_that_never_left_do_not_count_against_the_ceiling(db_session):
+    """A skipped or failed touch cost nothing and reached nobody. Counting it
+    would throttle a practice for our own errors."""
+    from app.services.reactivation.compliance import (
+        PRACTICE_MAX_TOUCHES_PER_DAY,
+        practice_daily_ceiling_reached,
+    )
+
+    practice = await _practice_with_touches(
+        db_session, PRACTICE_MAX_TOUCHES_PER_DAY, status="failed"
+    )
+    assert await practice_daily_ceiling_reached(db_session, practice.id) is False
+
+
+async def test_one_practice_hitting_the_ceiling_does_not_stop_another(db_session):
+    from app.services.reactivation.compliance import (
+        PRACTICE_MAX_TOUCHES_PER_DAY,
+        practice_daily_ceiling_reached,
+    )
+
+    loud = await _practice_with_touches(db_session, PRACTICE_MAX_TOUCHES_PER_DAY)
+    quiet = await _practice_with_touches(db_session, 0)
+    assert await practice_daily_ceiling_reached(db_session, loud.id) is True
+    assert await practice_daily_ceiling_reached(db_session, quiet.id) is False
