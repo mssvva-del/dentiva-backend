@@ -9,6 +9,7 @@ import pytest
 
 from app.models.call import Call
 from app.services.qa import call_review as qa
+from app.services.qa.call_review import find_broken_promises
 from tests.conftest import seed_practice
 
 
@@ -155,3 +156,122 @@ async def test_review_ignores_successful_outcomes(monkeypatch, db_session):
     monkeypatch.setattr(qa, "_llm_json", _fake)
     result = await qa.review_recent_failures(db_session, limit=15)
     assert result["reviewed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The scan is the only detector of its class: a false "let me connect you" ends
+# the call as a perfectly normal callback, so the outcome review never looks at
+# it. Silence is indistinguishable from success — which is exactly why the scan
+# being blind was invisible for as long as it was.
+#
+# It was blind. Retell sends BOTH a flat "transcript" string and a
+# "transcript_object" list with real roles; the webhook took the string and
+# stored it as [{"role": "raw", ...}], and the scan keeps agent turns by role.
+# "raw" is not "agent", so every production call scanned as clean.
+#
+# These tests therefore start from the payload RETELL ACTUALLY SENDS rather than
+# from a hand-built [{"role": "agent"}] — building the input in the shape the
+# code expects is what hid this.
+# ---------------------------------------------------------------------------
+
+_LIE = "Sure, let me connect you to the office manager, one moment."
+
+_RETELL_CALL_ENDED = {
+    "event": "call_ended",
+    "call_id": "scan-1",
+    "call": {
+        "call_id": "scan-1",
+        "start_timestamp": 1748563200000,
+        "end_timestamp": 1748563320000,
+        "transcript": f"User: Can I speak to a person?\nAgent: {_LIE}\n",
+        "transcript_object": [
+            {"role": "user", "content": "Can I speak to a person?"},
+            {"role": "agent", "content": _LIE},
+        ],
+    },
+}
+
+
+async def test_the_scan_sees_a_call_stored_the_way_the_webhook_stores_it(
+    client, db_session
+):
+    from sqlalchemy import select
+
+    await seed_practice(
+        db_session, name="Scan Dental", clerk_org_id="org_scan", clerk_user_id="user_scan"
+    )
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "scan-1",
+        "call": {"from_number": "+15551230000", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    await client.post("/webhooks/retell", json=_RETELL_CALL_ENDED)
+
+    await db_session.commit()
+    db_session.expire_all()
+    stored = (await db_session.execute(
+        select(Call.transcript_jsonb).where(Call.retell_call_id == "scan-1")
+    )).scalar_one()
+
+    assert [t["role"] for t in stored] == ["user", "agent"], "roles were dropped"
+    assert find_broken_promises(stored) == [
+        "promised to connect the caller — no live bridge exists"
+    ]
+
+
+def test_a_transcript_stored_before_roles_were_kept_is_still_scanned():
+    """Calls already in the database hold one entry with the whole conversation
+    as flat text. The fix must reach them too, or the history stays unaudited."""
+    legacy = [{"role": "raw", "content": f"User: Can I speak to a person?\nAgent: {_LIE}\n"}]
+    assert find_broken_promises(legacy) == [
+        "promised to connect the caller — no live bridge exists"
+    ]
+
+
+def test_the_caller_asking_for_a_person_is_not_a_broken_promise():
+    """In flat text the speaker labels are the only thing separating a request
+    from a promise. Treating the whole blob as agent speech would flag every call
+    where a patient says "can you connect me to a person"."""
+    legacy = [{"role": "raw", "content": "User: Can you connect me to a human please?\n"}]
+    assert find_broken_promises(legacy) == []
+    assert find_broken_promises([{"role": "user", "content": "connect me to a person"}]) == []
+
+
+def test_the_phrasings_a_model_actually_reaches_for():
+    """The pattern list was written from one recording and required the -ing
+    form, so "I'll transfer you" — the commonest phrasing of all — walked past."""
+    for line in (
+        "I'll transfer you to the front desk now.",
+        "Let me connect you with someone who can help.",
+        "I'm going to put you through to the office.",
+        "Let me get someone for you.",
+        "Hold on the line and I'll find out.",
+        "One moment while I check with the doctor.",
+        "I'll hand you over to my colleague.",
+        "Let me patch you through.",
+    ):
+        assert find_broken_promises([{"role": "agent", "content": line}]), line
+
+
+def test_spanish_counts_too():
+    """The agent has been officially bilingual since v20. A promise it cannot
+    keep is not less broken for being made in Spanish."""
+    for line in (
+        "Claro, le comunico con la oficina.",
+        "Un momento, por favor, mientras le paso con el gerente.",
+        "No cuelgue, por favor.",
+        "Permitame conectar con alguien.",
+        "Quedese en la linea, ya le transfiero.",
+    ):
+        assert find_broken_promises([{"role": "agent", "content": line}]), line
+
+
+def test_ordinary_speech_is_not_flagged():
+    """A scan that fires on normal sentences gets switched off."""
+    for line in (
+        "Your appointment is confirmed for Tuesday at ten.",
+        "We're connected to your insurance, so that's covered.",
+        "I can transfer your records to the new office if you'd like.",
+        "Le confirmo su cita para el martes a las diez.",
+    ):
+        assert find_broken_promises([{"role": "agent", "content": line}]) == [], line

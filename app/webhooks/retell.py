@@ -49,6 +49,7 @@ from app.services.availability import (
     slot_to_utc,
 )
 from app.services.call_outcome import BOOKED, classify_outcome
+from app.services.call_sync import slim_transcript
 from app.services.sms import (
     page_clinic_new_booking,
     page_clinic_urgent_callback,
@@ -639,14 +640,11 @@ async def _handle_call_ended(payload: dict) -> dict:
         if isinstance(end_ts, (int, float)) and isinstance(start_ts, (int, float)):
             duration_seconds = int((end_ts - start_ts) / 1000)
 
-    # Retell transcript format: list of dicts with role + content.
-    transcript_raw = call_data.get("transcript") or payload.get("transcript")
-    transcript_jsonb: list | None = None
-    if isinstance(transcript_raw, list):
-        transcript_jsonb = transcript_raw
-    elif isinstance(transcript_raw, str) and transcript_raw.strip():
-        # Sometimes Retell returns a plain string; store as-is inside a list.
-        transcript_jsonb = [{"role": "raw", "content": transcript_raw}]
+    # Retell sends BOTH a flat "transcript" string and a "transcript_object" list
+    # carrying real agent/user roles. Take the roles when they are there — every
+    # reader downstream (the broken-promise scan above all) works by role, and a
+    # transcript stored with role "raw" is invisible to all of them.
+    transcript_jsonb = slim_transcript(call_data) or slim_transcript(payload)
 
     disconnection_reason = (
         call_data.get("disconnection_reason") or payload.get("disconnection_reason", "")
