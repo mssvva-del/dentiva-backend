@@ -116,14 +116,40 @@ async def analyze_call(transcript: dict | list | None, outcome: str | None) -> d
 # outcome dependency, no PHI leaving the box.
 # ---------------------------------------------------------------------------
 
+_CONNECT = "promised to connect the caller — no live bridge exists"
+_TRANSFER = "promised a transfer — no live bridge exists"
+_HOLD = "asked the caller to hold for a person"
+_COMING = "implied someone is coming on"
+
 _BROKEN_PROMISES = (
-    (r"connect(ing)?\s+you", "promised to connect the caller — no live bridge exists"),
-    (r"transferr?ing\s+you", "promised a transfer — no live bridge exists"),
-    (r"put\s+you\s+through", "promised to put the caller through — no live bridge exists"),
-    (r"stay\s+on\s+the\s+line\s+while", "asked the caller to hold for a person"),
-    (r"one\s+moment\s+while\s+i\s+(get|connect|transfer)", "implied someone is coming on"),
+    # English. The verb is what matters, and it appears in every tense a model
+    # reaches for: "I'll connect you", "let me connect you", "connecting you now".
+    (r"\bconnect(ing|s|ed)?\s+(you|u)\b", _CONNECT),
+    (r"\btransferr?(ing|s|ed)?\s+(you|u)\b", _TRANSFER),
+    (r"\bput(ting)?\s+you\s+through\b", _CONNECT),
+    (r"\bget(ting)?\s+(you\s+)?(someone|somebody|a\s+(person|human|staff|team)\w*)", _COMING),
+    (r"\b(hold|stay)\s+on\s+(the\s+line|a\s+(second|moment|minute))", _HOLD),
+    (r"\bone\s+(moment|second|sec|minute)\s+(while|and)\s+i\b", _COMING),
+    (r"\bhand(ing)?\s+you\s+(over|off)\b", _TRANSFER),
+    (r"\bpatch(ing)?\s+you\s+(through|in)\b", _CONNECT),
+    (r"\bbring(ing)?\s+(someone|somebody|a\s+\w+)\s+on\b", _COMING),
+    (r"\blet\s+me\s+(grab|find|check\s+with)\s+(someone|somebody)", _COMING),
+    # Spanish. The agent has been officially bilingual since v20 and the whole
+    # scan was English-only, so half the live language was unwatched.
+    (r"\ble\s+(comunico|conecto|transfiero|paso)\b", _CONNECT),
+    (r"\b(comunicar|conectar|transferir|pasar)(le|lo|la)\b", _TRANSFER),
+    (r"\bno\s+cuelgue\b", _HOLD),
+    (r"\b(un\s+momento|espere)\s*,?\s*(por\s+favor\s*,?\s*)?(mientras|y)\s+", _COMING),
+    (r"\bpermitame\s+(comunicar|conectar|pasar|transferir)", _CONNECT),
+    (r"\bqued(e|ese)\s+en\s+la\s+l[ií]nea\b", _HOLD),
 )
 _BROKEN_PROMISE_RES = tuple((re.compile(p, re.I), why) for p, why in _BROKEN_PROMISES)
+
+
+def _agent_lines(flat: str) -> list[str]:
+    """Agent turns out of "Agent: ...\nUser: ..." text."""
+    return [ln.split(":", 1)[1] for ln in flat.splitlines()
+            if ln.lower().startswith("agent:") and ":" in ln]
 
 
 def find_broken_promises(transcript: dict | list | None) -> list[str]:
@@ -136,10 +162,14 @@ def find_broken_promises(transcript: dict | list | None) -> list[str]:
     if isinstance(transcript, list):
         turns = [str(x.get("content") or "") for x in transcript
                  if isinstance(x, dict) and x.get("role") == "agent"]
+        # A transcript stored before the roles were kept is one entry holding the
+        # whole conversation as flat text. Reading it as an agent turn would count
+        # the CALLER asking for a person; parse the speaker labels instead.
+        for x in transcript:
+            if isinstance(x, dict) and x.get("role") not in ("agent", "user"):
+                turns += _agent_lines(str(x.get("content") or ""))
     elif isinstance(transcript, str):
-        # Flat transcripts are "Agent: ...\nUser: ..." — keep the agent lines.
-        turns = [ln.split(":", 1)[1] for ln in transcript.splitlines()
-                 if ln.lower().startswith("agent:") and ":" in ln]
+        turns = _agent_lines(transcript)
     hits: list[str] = []
     for text in turns:
         for rx, why in _BROKEN_PROMISE_RES:

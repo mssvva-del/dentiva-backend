@@ -21,7 +21,7 @@ def test_ts_to_dt_handles_none_and_ms():
     assert dt is not None and dt.year == 2023
 
 
-def test_slim_transcript_prefers_object_then_string():
+def testslim_transcript_prefers_object_then_string():
     call = {
         "transcript_object": [
             {"role": "agent", "content": "Hi", "words": [{"word": "Hi"}]},
@@ -29,16 +29,16 @@ def test_slim_transcript_prefers_object_then_string():
             {"role": "user", "content": "I need a cleaning"},
         ]
     }
-    slim = call_sync._slim_transcript(call)
+    slim = call_sync.slim_transcript(call)
     assert slim == [
         {"role": "agent", "content": "Hi"},
         {"role": "user", "content": "I need a cleaning"},
     ]
 
-    assert call_sync._slim_transcript({"transcript": "raw text"}) == [
+    assert call_sync.slim_transcript({"transcript": "raw text"}) == [
         {"role": "raw", "content": "raw text"}
     ]
-    assert call_sync._slim_transcript({}) is None
+    assert call_sync.slim_transcript({}) is None
 
 
 def test_status_and_sentiment():

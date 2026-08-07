@@ -45,9 +45,12 @@ def _ts_to_dt(ms: int | float | None) -> datetime | None:
     return datetime.fromtimestamp(ms / 1000, tz=UTC)
 
 
-def _slim_transcript(call: dict) -> list[dict] | None:
+def slim_transcript(call: dict) -> list[dict] | None:
     """Keep role + content only (drop word-level timing to stay lean)."""
-    to = call.get("transcript_object")
+    # transcript_object is the roled form; "transcript" is normally the flat
+    # string, but accept a list there too — the old webhook did, and quietly
+    # narrowing what we accept is how a transcript goes missing.
+    to = call.get("transcript_object") or call.get("transcript")
     if isinstance(to, list) and to:
         slim = [
             {"role": t.get("role"), "content": t.get("content", "")}
@@ -115,7 +118,7 @@ async def fetch_recent_calls(
 async def _upsert_call(session, practice_id, call: dict) -> str | None:
     """Insert or update one call. Returns 'inserted' | 'updated' | None (skip)."""
     cid = call.get("call_id")
-    transcript = _slim_transcript(call)
+    transcript = slim_transcript(call)
     # Skip empty/errored calls with no conversation — not worth surfacing.
     if not cid or call.get("call_status") == "error" or not transcript:
         return None
