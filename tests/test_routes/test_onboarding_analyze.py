@@ -106,10 +106,30 @@ def test_ssrf_guard_blocks_private_hosts():
     assert ai._is_public_host("10.0.0.5") is False
 
 
-@pytest.mark.parametrize("bad", ["ftp://example.com", "javascript:alert(1)", ""])
+@pytest.mark.parametrize("bad", [
+    "ftp://example.com",
+    "javascript:alert(1)",     # a scheme with no "//" — read as a bare hostname
+    "data:text/html,<b>hi</b>",
+    "https://example.com:notaport",  # crashed httpx instead of being refused
+    "",
+])
 async def test_fetch_rejects_bad_schemes(bad):
+    """Every rejection must be a ValueError the route turns into a message. An
+    exception from deeper down is a 500 on user input, in the guard that exists
+    to handle user input."""
     with pytest.raises(ValueError):
         await ai.fetch_website_text(bad)
+
+
+async def test_a_bare_hostname_still_means_https():
+    """The clinic types "smiledental.com" — tightening the scheme check must not
+    take that away."""
+    from unittest.mock import patch
+
+    with patch.object(ai.httpx, "AsyncClient") as client:
+        client.side_effect = AssertionError("stop after the guard")
+        with pytest.raises(AssertionError):
+            await ai.fetch_website_text("smiledental.com")
 
 
 def test_strip_html_keeps_footer_and_nav():

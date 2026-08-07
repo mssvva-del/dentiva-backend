@@ -129,7 +129,19 @@ def _strip_html(html: str) -> str:
 async def fetch_website_text(url: str) -> str:
     """Fetch the homepage + a few likely subpages as plain text. Raises ValueError
     on an unusable/unsafe URL."""
-    parsed = urlparse(url if "://" in url else f"https://{url}")
+    # A clinic types "smiledental.com", so a missing scheme means https. But
+    # "javascript:alert(1)" HAS a scheme — it simply has no "//" — and testing for
+    # "://" mistook it for a bare hostname, prefixed https:// and produced
+    # "https://javascript:alert(1)". That passed the scheme check, then blew up
+    # inside httpx parsing "alert(1)" as a port: a 500 on user input, in the guard
+    # whose job is to reject user input safely.
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{url}")
+    try:
+        _ = parsed.port  # a non-numeric port raises here rather than inside httpx
+    except ValueError:
+        raise ValueError("Please enter a valid website address.") from None
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError("Please enter a valid website address.")
     if not _is_public_host(parsed.hostname):
