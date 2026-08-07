@@ -298,3 +298,71 @@ async def test_a_clinic_user_is_not_internal_staff(client, db_session):
         headers={"X-Dev-Clerk-User-Id": "user_out1", "X-Dev-Clerk-Org-Id": "org_out1"},
     )
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# A published version that no phone number points at is not deployed.
+#
+# A Retell number pins an agent VERSION, and publishing does not move that pin.
+# Ours sat on v14 — no native transfer, no hours-aware callback, no identity
+# check — while v20 was published and every screen, review and sync reported the
+# new one. Nothing we looked at looked at the NUMBER.
+# ---------------------------------------------------------------------------
+
+
+def _fake_numbers(monkeypatch, *, pinned_version: int, published: int = 20):
+    async def _versions(agent_id, **_kw):
+        return [
+            {"version": v, "is_published": v <= published}
+            for v in range(1, published + 2)
+        ]
+
+    async def _numbers(**_kw):
+        return [
+            {"phone_number": "+16204559562",
+             "inbound_agents": [{"agent_id": "agent_lc_1",
+                                 "agent_version": pinned_version}]},
+            # Another product's number in the same account — must be ignored.
+            {"phone_number": "+12016334122",
+             "inbound_agents": [{"agent_id": "agent_someone_else",
+                                 "agent_version": 3}]},
+        ]
+
+    monkeypatch.setattr(admin_mod, "get_agent_versions", _versions)
+    monkeypatch.setattr(admin_mod, "list_phone_numbers", _numbers)
+
+
+async def test_a_number_left_on_an_old_version_is_reported(client, db_session, monkeypatch):
+    await _internal(db_session, clerk_id="eng_pin1", role="engineer")
+    practice, _ = await seed_practice(db_session, name="PinCo",
+                                      clerk_org_id="o_pin1", clerk_user_id="u_pin1")
+    await _bind_agent(db_session, practice.id, agent_id="agent_lc_1")
+    _fake_live(monkeypatch, prompt=_GOOD_PROMPT, sensitivity=0.65, tools=[
+        {"name": "transfer_to_team", "type": "transfer_call"},
+    ])
+    _fake_numbers(monkeypatch, pinned_version=14, published=20)
+
+    body = (await client.get("/api/admin/voice/live-config",
+                             headers=_h("eng_pin1"))).json()
+    joined = " | ".join(body["drift"])
+    assert "OLD agent version" in joined
+    assert "+16204559562" in joined and "v14" in joined
+    assert body["published_version"] == 20
+    assert body["phone_numbers"] == ["+16204559562"], "another product's number is not ours"
+
+
+async def test_a_number_on_the_published_version_is_not_flagged(
+    client, db_session, monkeypatch
+):
+    await _internal(db_session, clerk_id="eng_pin2", role="engineer")
+    practice, _ = await seed_practice(db_session, name="PinCo2",
+                                      clerk_org_id="o_pin2", clerk_user_id="u_pin2")
+    await _bind_agent(db_session, practice.id, agent_id="agent_lc_1")
+    _fake_live(monkeypatch, prompt=_GOOD_PROMPT, sensitivity=0.65, tools=[
+        {"name": "transfer_to_team", "type": "transfer_call"},
+    ])
+    _fake_numbers(monkeypatch, pinned_version=20, published=20)
+
+    body = (await client.get("/api/admin/voice/live-config",
+                             headers=_h("eng_pin2"))).json()
+    assert body["drift"] == []
