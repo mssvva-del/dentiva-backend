@@ -239,6 +239,24 @@ async def health_detailed() -> JSONResponse:
         # None = couldn't determine (DB down / role not in pg_roles).
         "rls_enforced": rls_enforced,
         "alerts": alerts,
+        # Which capabilities have credentials, so "what are we still missing?" is
+        # answerable from outside the box. Booleans only — never a value, never a
+        # prefix. Each one is a whole feature that is silently inert without it:
+        # nobody can subscribe, no reactivation call dials, no PMS is reachable.
+        "capabilities": {
+            "take_payment": bool(
+                settings.stripe_secret_key and settings.stripe_price_growth_monthly
+            ),
+            "billing_webhook": bool(settings.stripe_webhook_secret),
+            "identity_webhook": bool(settings.clerk_webhook_secret),
+            "outbound_calls": bool(
+                settings.retell_outbound_agent_id and settings.retell_from_number
+            ),
+            "pms_nexhealth": bool(settings.nexhealth_api_key),
+            "pms_open_dental": bool(settings.open_dental_dev_key),
+            "call_review": bool(settings.anthropic_api_key),
+            "error_tracking": bool(settings.sentry_dsn),
+        },
     }
     code = 200 if body["status"] == "ok" else 503
     return JSONResponse(status_code=code, content=body)
