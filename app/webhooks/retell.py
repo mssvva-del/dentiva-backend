@@ -149,8 +149,10 @@ def _verify_signature(
 # patient describing an airway in Spanish must trip the same deterministic lock.
 _EMERGENCY_PATTERNS = (
     r"sangr",              # sangrado, sangrando, sangra
-    r"hinchaz",            # hinchazón
-    r"hinchad",            # hinchado/hinchada
+    # "hinch" catches the whole family — hinchazón, hinchado, and the VERB a
+    # patient actually uses: "se me hincha la cara", "se me está hinchando".
+    # Matching only the noun missed the most natural way to say it.
+    r"hinch",
     r"inflamaci",          # inflamación
     r"dolor\s+(muy\s+)?(fuerte|intenso|severo|insoportable)",
     r"respir",             # respirar, respiración, respiro
@@ -158,12 +160,15 @@ _EMERGENCY_PATTERNS = (
     r"emergencia",
     r"urgen",              # urgente, urgencia
     r"bleed",
+    r"blood",              # "a lot of blood" — the noun was missing entirely
     r"swell",
     r"swollen",
     r"severe\s+pain",
     r"uncontroll",
     r"breath",
     r"knocked[\s-]?out",
+    r"se\s+me\s+cay[oó]\s+un\s+diente",   # tooth knocked out
+    r"golpe\s+en\s+(la\s+)?(cara|boca|diente)",
     r"emergency",
     r"urgent",
 )
@@ -177,13 +182,19 @@ _EMERGENCY_RE = re.compile("|".join(_EMERGENCY_PATTERNS), re.IGNORECASE)
 # back" at 11pm = wait until morning).
 _MEDICAL_ER_PATTERNS = (
     # Spanish first — same tier-1 signs, same consequence.
-    r"no\s+puedo\s+respirar",
+    r"no\s+puedo\s+(respirar|tragar)",
     r"(dificultad|problemas?)\s+(para|al)\s+(respirar|tragar)",
     r"me\s+(cuesta|falta)\s+(respirar|el\s+aire)",
     r"no\s+para\s+de\s+sangrar",
+    r"(mucha\s+)?sangre\b[^.!?;]{0,30}\bno\s+para",   # "sangre … y no para"
+    r"(a\s+lot\s+of\s+)?blood[^.!?;]{0,30}(wo|does)?n'?t\s+stop",
     r"sangr\w*\s+que\s+no\s+(para|se\s+detiene)",
-    r"(cara|garganta|cuello|lengua|labio)\s+(muy\s+)?hinchad",
-    r"hinchaz[oó]n\s+(en|de)\s+(la\s+)?(cara|garganta|cuello|lengua)",
+    # Either order, because Spanish puts the verb first as readily as the
+    # adjective: "se me hincha la cara" and "cara hinchada" are the same
+    # emergency. Matching only the adjective form missed the sentence a patient
+    # actually says out loud.
+    r"hinch\w*[^.!?;]{0,15}(cara|garganta|cuello|lengua|labio|ojo)",
+    r"(cara|garganta|cuello|lengua|labio|ojo)[^.!?;]{0,15}hinch",
     r"se\s+desmay",         # se desmayó
     r"perdi[oó]\s+el\s+conocimiento",
     r"inconsciente",
@@ -291,7 +302,7 @@ def _args_to_text(args: dict) -> str:
 # English has the same shape in "won't stop bleeding".
 _SYMPTOM_NEGATIONS = (
     r"no\s+pued\w*",           # no puedo / no puede respirar, tragar
-    r"no\s+para\s+de",         # no para de sangrar
+    r"no\s+para\b",            # "no para de sangrar" AND "…y no para"
     r"no\s+se\s+detiene",
     r"no\s+me\s+deja",         # no me deja respirar
     r"no\s+le\s+llega",        # no le llega el aire
