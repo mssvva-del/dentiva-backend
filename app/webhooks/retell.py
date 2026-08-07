@@ -458,10 +458,20 @@ async def _find_patient_by_phone(
 
 
 async def _find_upcoming_booking(
-    session, practice_id: uuid.UUID, patient_id: uuid.UUID
+    session, practice_id: uuid.UUID, patient_id: uuid.UUID,
+    only_ids: set[uuid.UUID] | None = None,
 ) -> Booking | None:
-    """Return the soonest upcoming confirmed booking for a patient, if any."""
+    """The soonest upcoming confirmed booking for a patient, if any.
+
+    ``only_ids`` narrows the search to specific bookings. A caller who has proved
+    nothing beyond creating an appointment on this call may act on that
+    appointment — not on the earlier one the same patient record already had,
+    which is the soonest and therefore what an unrestricted search would return.
+    """
     now = datetime.now(tz=UTC)
+    scope = (
+        [Booking.id.in_(only_ids)] if only_ids else []
+    )
     result = await session.execute(
         select(Booking)
         .where(
@@ -469,6 +479,7 @@ async def _find_upcoming_booking(
             Booking.patient_id == patient_id,
             Booking.status == "confirmed",
             Booking.appointment_at >= now,
+            *scope,
         )
         .order_by(Booking.appointment_at.asc())
         .limit(1)
@@ -1234,11 +1245,14 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
         call_row = (await session.execute(
             select(Call).where(Call.retell_call_id == retell_call_id)
         )).scalar_one_or_none()
-        if not await _caller_is_verified(session, call_row, patient, args):
+        allowed = await _caller_is_verified(session, call_row, patient, args)
+        if allowed is None:
             record_alert("identity_challenge", f"call={retell_call_id} tool=reschedule")
             return {"rescheduled": False, "verify_identity": True,
                     "message": _IDENTITY_CHALLENGE}
-        booking = await _find_upcoming_booking(session, practice_id, patient.id)
+        booking = await _find_upcoming_booking(
+            session, practice_id, patient.id, only_ids=allowed
+        )
         if booking is None:
             return {
                 "rescheduled": False,
@@ -1381,11 +1395,14 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
         call_row = (await session.execute(
             select(Call).where(Call.retell_call_id == retell_call_id)
         )).scalar_one_or_none()
-        if not await _caller_is_verified(session, call_row, patient, args):
+        allowed = await _caller_is_verified(session, call_row, patient, args)
+        if allowed is None:
             record_alert("identity_challenge", f"call={retell_call_id} tool=cancel")
             return {"cancelled": False, "verify_identity": True,
                     "message": _IDENTITY_CHALLENGE}
-        booking = await _find_upcoming_booking(session, practice_id, patient.id)
+        booking = await _find_upcoming_booking(
+            session, practice_id, patient.id, only_ids=allowed
+        )
         if booking is None:
             return {
                 "cancelled": False,
@@ -1680,13 +1697,33 @@ def _dob_matches(stored: str | None, offered: str | None) -> bool:
 
 async def _caller_is_verified(
     session, call: Call | None, patient: Patient, args: dict
-) -> bool:
+) -> set[uuid.UUID] | None:
+    """What this caller may act on: None = nothing, empty set = everything.
+
+    A non-empty set is a LIMITED grant — only the bookings this call created.
+    That distinction is the whole point:
+
+    Booking is deliberately unauthenticated, because a first-time patient must be
+    able to make one. But _upsert_patient matches on phone number alone, so
+    "booking as a patient" attaches to whatever record already holds that number.
+    An attacker who knows only a phone number could therefore book, be recognised
+    as "the person who booked on this call", and then cancel or move the
+    appointment that person really had — the tool cancels the SOONEST upcoming
+    one, which is the victim's, not the decoy.
+
+    The rule was written from the honest case (booked, then changed their mind)
+    and passes it. It also passes an attacker performing the same steps, because
+    the qualifying fact is one the attacker produces themselves.
+
+    So proving ownership still returns full access; creating something in this
+    call now returns access to exactly that, and nothing else.
+    """
     requested = normalize_phone(args.get("patient_phone") or "")
     from_number = normalize_phone((call.from_number if call else "") or "")
     if requested and from_number and requested == from_number:
-        return True
+        return set()  # calling from the number on the record — full access
     if _dob_matches(patient.date_of_birth, args.get("patient_dob")):
-        return True
+        return set()  # knows the date of birth — full access
     # Same conversation: this caller already booked as this patient on THIS call,
     # so they are demonstrably the person the record belongs to. Without this, a
     # patient who books and then changes their mind two sentences later gets
@@ -1697,11 +1734,11 @@ async def _caller_is_verified(
             select(Booking.id).where(
                 Booking.source_call_id == call.id,
                 Booking.patient_id == patient.id,
-            ).limit(1)
-        )).first()
-        if booked_here is not None:
-            return True
-    return False
+            )
+        )).scalars().all()
+        if booked_here:
+            return set(booked_here)
+    return None
 
 
 async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
@@ -1729,7 +1766,12 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
         call_row = (await session.execute(
             select(Call).where(Call.retell_call_id == retell_call_id)
         )).scalar_one_or_none()
-        if not await _caller_is_verified(session, call_row, patient, args):
+        allowed = await _caller_is_verified(session, call_row, patient, args)
+        # This tool only DISCLOSES — a name, a date, a time. Having created a
+        # booking on this call proves nothing about who the record belongs to, so
+        # a limited grant (a non-empty set) is not enough here; ownership must be
+        # proved by the calling line or the date of birth.
+        if allowed is None or allowed:
             # Deliberately reveals nothing — not even that the record exists.
             record_alert("identity_challenge", f"call={retell_call_id} tool=lookup")
             return {"found": False, "verify_identity": True,
