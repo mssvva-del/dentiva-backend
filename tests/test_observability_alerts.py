@@ -70,3 +70,22 @@ async def test_health_reports_whether_rls_is_actually_enforced(client):
     # Tests connect as dentiva_app (NOSUPERUSER NOBYPASSRLS) — the same role
     # production is supposed to use.
     assert body["rls_enforced"] is True
+
+
+async def test_capabilities_report_never_leaks_a_value(client):
+    """This block sits on an unauthenticated endpoint, which is the whole point —
+    "what are we still missing?" should be answerable without a login. Booleans
+    only: a key prefix or an "sk_live_…" hint here would put a credential on a
+    public URL."""
+    caps = (await client.get("/health/detailed")).json()["capabilities"]
+    assert caps and all(isinstance(v, bool) for v in caps.values())
+
+
+async def test_the_features_that_fail_quietly_are_listed(client):
+    """Each of these is a whole feature that goes inert rather than loud when its
+    credential is absent: no subscription can be started, no reactivation call
+    dials, no PMS answers. Missing access looks exactly like a quiet system."""
+    caps = (await client.get("/health/detailed")).json()["capabilities"]
+    for name in ("take_payment", "billing_webhook", "identity_webhook",
+                 "outbound_calls", "pms_open_dental", "call_review"):
+        assert name in caps
