@@ -65,7 +65,14 @@ def normalize_phone(phone: str | None) -> str | None:
     digits = re.sub(r"\D", "", phone)
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
-    return digits or None
+    # A US number has ten digits. Anything shorter is not a phone number, it is
+    # what a speech model produced when it could not hear one — "555-1234", or a
+    # bare "5". Those used to become valid keys, so two unrelated callers whose
+    # fragments normalized alike landed on ONE patient record and shared a chart.
+    # None means "no usable key": the caller is treated as someone we don't know,
+    # which is the honest answer. Ten-digit numbers hash exactly as before, so
+    # every correctly-stored record keeps matching.
+    return digits if len(digits) == 10 else None
 
 
 def phone_hmac(phone: str | None) -> str | None:
