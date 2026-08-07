@@ -1109,3 +1109,56 @@ async def test_a_cancellation_reason_never_lands_in_plain_audit_metadata(
     assert rows, "the cancellation should have been audited at all"
     assert secret not in str(rows)
     assert any((r or {}).get("reason_given") is True for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Phrases a patient actually says, both languages.
+#
+# The scan was written from symptom words and then tested with those same words,
+# which is how it kept passing while missing sentences. An adversarial pass over
+# real phrasings found seven gaps at once — including "a lot of blood", where the
+# noun was absent from the ENGLISH list entirely while Spanish covered it, since
+# "sangr" is one morpheme for both blood and bleeding.
+#
+# Negative cases carry equal weight here: widening a symptom scan is exactly how
+# the emergency lock once latched onto a routine call and refused every booking
+# for the rest of it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("said", "blocks_scheduling", "sends_to_er"),
+    [
+        # Spanish states swelling as a VERB at least as often as an adjective.
+        ("se me hincha la cara", True, True),
+        ("se me está hinchando la cara", True, True),
+        ("no tengo fiebre pero se me hincha la cara", True, True),
+        ("cara hinchada", True, True),
+        ("hinchazón en la garganta", True, True),
+        # English: the noun "blood" was missing while "bleed" was covered.
+        ("there's a lot of blood and it won't stop", True, True),
+        ("my face is swelling", True, True),
+        # "y no para" — the negation belongs to the bleeding, not to a denial.
+        ("tengo mucha sangre en la boca y no para", True, True),
+        ("no puedo tragar", True, True),
+        # Trauma, Spanish. Urgent dental, ours to call back about — not an ER.
+        ("se me cayó un diente por un golpe", True, False),
+        # And the routine calls that must stay routine.
+        ("no tengo hinchazón ni fiebre", False, False),
+        ("sin hinchazón, sin fiebre", False, False),
+        ("quiero una limpieza dental", False, False),
+        ("no swelling, no fever", False, False),
+        ("no bleeding at all", False, False),
+        ("my tooth hurts a little", False, False),
+        ("just a cleaning please", False, False),
+    ],
+)
+def test_real_phrasings_in_both_languages(said, blocks_scheduling, sends_to_er):
+    from app.webhooks.retell import (
+        _contains_emergency_keywords,
+        _needs_emergency_room,
+    )
+
+    args = {"reason": said}
+    assert _contains_emergency_keywords(args) is blocks_scheduling, said
+    assert _needs_emergency_room(args) is sends_to_er, said
