@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
+from app.db import set_tenant
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from tests.conftest import seed_practice
@@ -147,9 +148,21 @@ async def test_cancel_unknown_phone_is_graceful(client, db_session):
 
 
 async def test_lookup_patient_recognizes_returning(client, db_session):
+    """A returning patient calling from their own number is greeted by name.
+
+    The caller ID is what makes this safe, and it is the ordinary case: someone
+    ringing the practice from the phone their record was created with. Booking on
+    this call is deliberately NOT enough here — lookup only discloses, and
+    creating an appointment proves nothing about whose record it is.
+    """
     await seed_practice(
         db_session, name="Returning Dental", clerk_org_id="org_rc5", clerk_user_id="user_rc5"
     )
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "rc-call-1",
+        "call": {"from_number": _PHONE, "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
     book_resp = await _book(client)
     assert book_resp.status_code == 200 and book_resp.json()["booked"] is True
 
@@ -451,3 +464,168 @@ async def test_a_stranger_cannot_cancel_someone_elses_appointment(client, db_ses
     db_session.expire_all()
     statuses = (await db_session.execute(select(Booking.status))).scalars().all()
     assert statuses == ["confirmed"], "a refused identity check must change nothing"
+
+
+# ---------------------------------------------------------------------------
+# THE COMPOSITION ATTACK
+#
+# Booking is deliberately unauthenticated — a first-time patient must be able to
+# make one. But _upsert_patient matches on phone number alone, so "booking as a
+# patient" attaches to whatever record already holds that number.
+#
+# An attacker who knows only a phone number could therefore: book (attaching to
+# the victim's record), be recognised as "the person who booked on this call",
+# and then cancel — because cancel takes the SOONEST upcoming appointment, which
+# is the victim's real one, not the decoy just created.
+#
+# The rule was written from the honest case (booked, then changed their mind) and
+# passes it. It also passed an attacker performing exactly those steps, because
+# the qualifying fact is one the attacker manufactures.
+# ---------------------------------------------------------------------------
+
+VICTIM_PHONE = "+15558881234"
+
+
+async def _victim_with_appointment(db_session, practice_id):
+    from app.models.patient import Patient
+    from app.utils.crypto import phone_hmac
+
+    victim = Patient(
+        id=uuid.uuid4(), practice_id=practice_id, pms_external_id="EXT-VICTIM",
+        first_name="Maria", last_name="Vega", phone=VICTIM_PHONE,
+        phone_hmac=phone_hmac(VICTIM_PHONE), date_of_birth="1984-03-07",
+    )
+    db_session.add(victim)
+    await db_session.flush()
+    real = Booking(
+        id=uuid.uuid4(), practice_id=practice_id, patient_id=victim.id,
+        appointment_at=datetime.now(tz=UTC) + timedelta(days=2),
+        status="confirmed", procedure_type="cleaning", provider_name="Dr. Smith",
+        source="ai_call",
+    )
+    db_session.add(real)
+    await db_session.commit()
+    return real.id
+
+
+async def _attacker_books_as_victim(client, call_id: str):
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": call_id,
+        "call": {"from_number": "+15559990000", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": call_id,
+        "function_name": "book_appointment",
+        "args": {"patient_first_name": "Whoever", "patient_last_name": "Attacker",
+                 "patient_phone": VICTIM_PHONE, "procedure": "cleaning",
+                 "preferred_date": "2099-12-20", "preferred_time_window": "morning"},
+    })
+    assert r.json().get("booked") is True, "booking is unauthenticated by design"
+
+
+async def test_booking_on_this_call_does_not_unlock_an_earlier_appointment(
+    client, db_session
+):
+    practice, _ = await seed_practice(
+        db_session, name="Attack Dental", clerk_org_id="org_atk1", clerk_user_id="user_atk1"
+    )
+    practice_id = practice.id
+    real_id = await _victim_with_appointment(db_session, practice_id)
+
+    await _attacker_books_as_victim(client, "atk-1")
+    await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "atk-1",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": VICTIM_PHONE, "reason": "changed my mind"},
+    })
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    status = (await db_session.execute(
+        select(Booking.status).where(Booking.id == real_id)
+    )).scalar_one()
+    assert status == "confirmed", "a stranger cancelled someone else's appointment"
+
+
+async def test_the_same_applies_to_rescheduling(client, db_session):
+    practice, _ = await seed_practice(
+        db_session, name="Attack Dental 2", clerk_org_id="org_atk2", clerk_user_id="user_atk2"
+    )
+    practice_id = practice.id
+    real_id = await _victim_with_appointment(db_session, practice_id)
+    before = (await db_session.execute(
+        select(Booking.appointment_at).where(Booking.id == real_id)
+    )).scalar_one()
+
+    await _attacker_books_as_victim(client, "atk-2")
+    await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "atk-2",
+        "function_name": "reschedule_appointment",
+        "args": {"patient_phone": VICTIM_PHONE, "new_date": "2099-12-28"},
+    })
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    after = (await db_session.execute(
+        select(Booking.appointment_at).where(Booking.id == real_id)
+    )).scalar_one()
+    assert after == before, "a stranger moved someone else's appointment"
+
+
+async def test_a_lookup_needs_more_than_a_booking_made_on_this_call(client, db_session):
+    """lookup_patient only discloses. Creating an appointment proves nothing about
+    who the record belongs to, so it must not open the record."""
+    practice, _ = await seed_practice(
+        db_session, name="Attack Dental 3", clerk_org_id="org_atk3", clerk_user_id="user_atk3"
+    )
+    await _victim_with_appointment(db_session, practice.id)
+    await _attacker_books_as_victim(client, "atk-3")
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "atk-3",
+        "function_name": "lookup_patient",
+        "args": {"patient_phone": VICTIM_PHONE},
+    })
+    body = r.json()
+    assert body["found"] is False
+    assert "Maria" not in str(body), "the victim's name must not leak"
+
+
+async def test_the_honest_caller_can_still_undo_what_they_just_booked(
+    client, db_session
+):
+    """The case the rule exists for: a patient books and changes their mind two
+    sentences later, from a phone we have never seen, with no date of birth on
+    file. Narrowing the grant must not take that away."""
+    practice, _ = await seed_practice(
+        db_session, name="Honest Dental", clerk_org_id="org_hon1", clerk_user_id="user_hon1"
+    )
+    practice_id = practice.id
+
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "hon-1",
+        "call": {"from_number": "+15551110000", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "hon-1",
+        "function_name": "book_appointment",
+        "args": {"patient_first_name": "Dana", "patient_last_name": "Reed",
+                 "patient_phone": "+15552223333", "procedure": "cleaning",
+                 "preferred_date": "2099-11-10", "preferred_time_window": "morning"},
+    })
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "hon-1",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": "+15552223333", "reason": "actually I can't make it"},
+    })
+    assert r.json()["cancelled"] is True
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    statuses = (await db_session.execute(select(Booking.status))).scalars().all()
+    assert statuses == ["cancelled"]
