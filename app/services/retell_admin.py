@@ -89,6 +89,23 @@ async def set_llm_model(llm_id: str, model: str, *, transport=None) -> dict:
                           {"model": model}, transport=transport)
 
 
+async def list_phone_numbers(*, transport=None) -> list[dict]:
+    """Every number on the account, with the agent VERSION each one is pinned to.
+
+    This is the only view that shows what a patient actually reaches. A Retell
+    number pins a version; publishing a new one does not move the pin, so a
+    number can serve a months-old configuration while every other screen reports
+    the newest. Ours did exactly that.
+    """
+    return await _request("GET", "/list-phone-numbers", transport=transport)
+
+
+async def get_agent_versions(agent_id: str, *, transport=None) -> list[dict]:
+    return await _request(
+        "GET", f"/get-agent-versions/{agent_id}", transport=transport
+    )
+
+
 async def publish_agent(agent_id: str, *, transport=None) -> dict:
     return await _request("POST", f"/publish-agent/{agent_id}", {},
                           transport=transport)

@@ -1673,7 +1673,9 @@ from app.services.retell_admin import (  # noqa: E402 — grouped with its secti
     RetellError,
     RetellNotConfigured,
     get_agent,
+    get_agent_versions,
     get_llm,
+    list_phone_numbers,
     publish_agent,
     set_llm_model,
 )
@@ -1733,6 +1735,11 @@ async def get_voice_model(
 
 class VoiceLiveConfig(BaseModel):
     agent_id: str
+    # What a patient dialling the clinic actually reaches. A Retell number pins an
+    # agent VERSION and publishing does not move that pin, so these two can differ
+    # by months — ours did, silently.
+    published_version: int | None = None
+    phone_numbers: list[str] = []
     voice_id: str | None
     voice_model: str | None
     interruption_sensitivity: float | None
@@ -1765,6 +1772,31 @@ async def get_voice_live_config(
     except (RetellNotConfigured, RetellError) as exc:
         raise _retell_http(exc) from exc
 
+    # What the NUMBER serves — the only view that matches what a caller hears.
+    published_version: int | None = None
+    stale_numbers: list[str] = []
+    numbers: list[str] = []
+    try:
+        versions = await get_agent_versions(agent_id)
+        published_version = max(
+            (v["version"] for v in versions if v.get("is_published")), default=None
+        )
+        for number in await list_phone_numbers():
+            bound = [
+                a for a in (number.get("inbound_agents") or [])
+                if a.get("agent_id") == agent_id
+            ]
+            if not bound:
+                continue
+            numbers.append(number["phone_number"])
+            if published_version is not None and any(
+                a.get("agent_version") != published_version for a in bound
+            ):
+                served = ", ".join(str(a.get("agent_version")) for a in bound)
+                stale_numbers.append(f"{number['phone_number']} (v{served})")
+    except (RetellNotConfigured, RetellError):
+        pass  # the checks below still work; this one is extra
+
     prompt = llm.get("general_prompt") or ""
     tools = llm.get("general_tools") or []
     native = [t.get("name", "") for t in tools if t.get("type") == "transfer_call"]
@@ -1780,6 +1812,13 @@ async def get_voice_live_config(
     has_er = "911" in prompt or "emergency room" in prompt.lower()
 
     drift: list[str] = []
+    if stale_numbers:
+        drift.append(
+            "a phone number is answering with an OLD agent version — publishing "
+            "does not move the number's pin: "
+            + "; ".join(stale_numbers)
+            + f" while v{published_version} is published"
+        )
     if lying:
         drift.append(
             "prompt still promises to connect the caller — a custom tool cannot "
@@ -1806,6 +1845,8 @@ async def get_voice_live_config(
 
     return VoiceLiveConfig(
         agent_id=agent_id,
+        published_version=published_version,
+        phone_numbers=numbers,
         voice_id=agent.get("voice_id"),
         voice_model=agent.get("voice_model"),
         interruption_sensitivity=sens,
