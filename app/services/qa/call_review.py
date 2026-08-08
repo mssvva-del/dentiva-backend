@@ -15,7 +15,15 @@ KB: no auto-write without a person). Analysis focuses on AGENT behaviour; the LL
 is told never to echo patient PII.
 
 ⚠️ Transcripts are PHI. The reviewing LLM must be BAA-covered before real
-patients (Anthropic/Bedrock BAA); fine for the pre-launch pilot with test calls.
+patients, so the LLM half is OFF unless QA_LLM_REVIEW_ENABLED says otherwise.
+This used to be a warning in this docstring, which is a comment where a gate
+belongs: nothing would have stopped it the day the first real patient called,
+and "fine for the pilot with test calls" describes a state that turns into
+production without anyone deciding to.
+
+The deterministic broken-promise scan below does NOT go through a model and is
+unaffected. That is deliberate — it is the detector that catches the failure
+nothing else sees, and it must not depend on a paperwork gate.
 """
 
 from __future__ import annotations
@@ -44,6 +52,8 @@ async def _llm_json(prompt: str) -> dict:
     vendor. (Anthropic needs a signed BAA before real patients regardless.)
     """
     settings = get_settings()
+    if not settings.qa_llm_review_enabled:
+        raise RuntimeError("qa_llm_review_disabled")
     if not settings.anthropic_api_key:
         raise RuntimeError("qa_review_requires_anthropic")
     text = await _anthropic_json(prompt, settings.anthropic_api_key)
@@ -240,6 +250,12 @@ async def review_recent_failures(
     return {
         "reviewed": len(findings),
         "lost_callers": sum(1 for f in findings if f["lost_caller"]),
+        # Say so out loud. With the LLM half gated off, findings and patterns come
+        # back empty, and "we are not allowed to look" reads exactly like "we
+        # looked and everything was fine" — the failure mode this whole module
+        # exists to prevent.
+        "llm_review": "on" if get_settings().qa_llm_review_enabled else
+                      "off — transcripts are PHI and no BAA covers the reviewer",
         # Non-empty here means the agent is promising something we don't deliver —
         # treat as a release blocker, not a nice-to-have.
         "broken_promises": broken_promises,

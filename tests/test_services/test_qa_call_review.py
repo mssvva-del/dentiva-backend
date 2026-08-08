@@ -275,3 +275,48 @@ def test_ordinary_speech_is_not_flagged():
         "Le confirmo su cita para el martes a las diez.",
     ):
         assert find_broken_promises([{"role": "agent", "content": line}]) == [], line
+
+
+# ---------------------------------------------------------------------------
+# Sending a transcript to a model means sending PHI to a vendor. That was a
+# warning in a docstring — a comment where a gate belongs. Nothing would have
+# stopped it the day the first real patient called.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_transcript_does_not_reach_a_model_by_default(monkeypatch):
+    """Default off. The pilot-with-test-calls state is the one that turns into
+    production without anyone deciding to."""
+    sent = []
+
+    async def _spy(prompt, key):
+        sent.append(prompt)
+        return "{}"
+
+    monkeypatch.setattr(qa, "_anthropic_json", _spy)
+    with pytest.raises(RuntimeError, match="qa_llm_review_disabled"):
+        await qa._llm_json("anything")
+    assert sent == [], "a transcript left the box while the gate was shut"
+
+
+async def test_the_promise_scan_does_not_depend_on_that_gate(client, db_session):
+    """The deterministic scan is the detector nothing else replaces: a false
+    "let me connect you" ends as an ordinary call. It must keep running when the
+    LLM half is switched off for reasons that have nothing to do with it."""
+    from app.services.qa.call_review import review_recent_failures
+
+    await seed_practice(
+        db_session, name="Gate Dental", clerk_org_id="org_gate", clerk_user_id="user_gate"
+    )
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "gate-1",
+        "call": {"from_number": "+15551230000", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    await client.post("/webhooks/retell", json=_RETELL_CALL_ENDED | {"call_id": "gate-1",
+        "call": _RETELL_CALL_ENDED["call"] | {"call_id": "gate-1"}})
+    await db_session.commit()
+
+    result = await review_recent_failures(db_session, limit=5)
+    assert result["broken_promises"], "the scan stopped when the LLM gate closed"
+    assert result["llm_review"].startswith("off"), "silence must not read as clean"
