@@ -16,6 +16,7 @@ from sqlalchemy import select
 from app.db import set_tenant
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
+from app.models.patient import Patient
 from tests.conftest import seed_practice
 
 # Clearly-future WEEKDAYS (native availability only offers open business days —
@@ -345,7 +346,6 @@ async def test_reschedule_cancel_lookup_never_cross_the_phone_collision(client, 
 
 async def _seed_patient_with_booking(db_session, practice_id, *, phone, dob, when):
     from app.models.booking import Booking
-    from app.models.patient import Patient
     from app.utils.crypto import phone_hmac
 
     patient = Patient(
@@ -487,7 +487,6 @@ VICTIM_PHONE = "+15558881234"
 
 
 async def _victim_with_appointment(db_session, practice_id):
-    from app.models.patient import Patient
     from app.utils.crypto import phone_hmac
 
     victim = Patient(
@@ -629,3 +628,162 @@ async def test_the_honest_caller_can_still_undo_what_they_just_booked(
     await set_tenant(db_session, practice_id)
     statuses = (await db_session.execute(select(Booking.status))).scalars().all()
     assert statuses == ["cancelled"]
+
+
+# ---------------------------------------------------------------------------
+# One phone, several people. This is not an edge case in dentistry — a household
+# line, a couple, parents and children all sit on one number, and the practice
+# registers them over years. Taking the OLDEST match meant the family's
+# first-registered patient absorbed everyone else's calls.
+# ---------------------------------------------------------------------------
+
+_FAMILY = "+15557778888"
+
+
+async def _household(db_session, practice_id, *people):
+    """people: (first_name, dob) — created in order, so the first is the oldest
+    record and the one the old code would always have returned."""
+    from app.utils.crypto import phone_hmac
+
+    ids = {}
+    for first, dob in people:
+        patient = Patient(
+            id=uuid.uuid4(), practice_id=practice_id,
+            pms_external_id=f"EXT-{first.upper()}",
+            first_name=first, last_name="Vega", phone=_FAMILY,
+            phone_hmac=phone_hmac(_FAMILY), date_of_birth=dob,
+        )
+        db_session.add(patient)
+        ids[first] = patient.id
+    await db_session.flush()
+    return ids
+
+
+async def test_a_second_family_member_gets_their_own_record(client, db_session):
+    """The wife registered years ago. The husband calls the same practice from
+    the same phone and books. He must not land on her chart."""
+    practice, _ = await seed_practice(
+        db_session, name="Family Dental", clerk_org_id="org_fam1", clerk_user_id="user_fam1"
+    )
+    practice_id = practice.id
+    await _household(db_session, practice_id, ("Maria", "1984-03-07"))
+    await db_session.commit()
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "fam-1",
+        "function_name": "book_appointment",
+        "args": {"patient_first_name": "Diego", "patient_last_name": "Vega",
+                 "patient_phone": _FAMILY, "procedure": "cleaning",
+                 "preferred_date": "2099-11-10", "preferred_time_window": "morning"},
+    })
+    assert r.json().get("booked") is True
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    names = sorted((await db_session.execute(select(Patient.first_name))).scalars().all())
+    assert names == ["Diego", "Maria"], "the husband was filed under his wife"
+
+
+async def test_cancelling_from_a_shared_number_asks_instead_of_guessing(
+    client, db_session
+):
+    """Two people, one number, no way to tell them apart. Silently taking either
+    one's appointment is not a wrong record — it is the wrong person's medical
+    appointment."""
+    practice, _ = await seed_practice(
+        db_session, name="Family Dental 2", clerk_org_id="org_fam2", clerk_user_id="user_fam2"
+    )
+    practice_id = practice.id
+    ids = await _household(
+        db_session, practice_id, ("Maria", "1984-03-07"), ("Diego", "1981-09-14")
+    )
+    for first in ("Maria", "Diego"):
+        db_session.add(Booking(
+            id=uuid.uuid4(), practice_id=practice_id, patient_id=ids[first],
+            appointment_at=datetime.now(tz=UTC) + timedelta(days=2 if first == "Maria" else 5),
+            status="confirmed", procedure_type="cleaning", provider_name="Dr. Smith",
+            source="ai_call",
+        ))
+    await db_session.commit()
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "fam-2",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": _FAMILY, "reason": "can't make it"},
+    })
+    body = r.json()
+    assert body["cancelled"] is False
+    assert "date of birth" in body["message"]
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    statuses = (await db_session.execute(select(Booking.status))).scalars().all()
+    assert statuses == ["confirmed", "confirmed"], "someone's appointment was cancelled"
+
+
+async def test_the_date_of_birth_resolves_the_household(client, db_session):
+    """Having asked, the answer must actually work — otherwise the caller is in a
+    loop and the front desk gets the call anyway."""
+    practice, _ = await seed_practice(
+        db_session, name="Family Dental 3", clerk_org_id="org_fam3", clerk_user_id="user_fam3"
+    )
+    practice_id = practice.id
+    ids = await _household(
+        db_session, practice_id, ("Maria", "1984-03-07"), ("Diego", "1981-09-14")
+    )
+    diego_booking = uuid.uuid4()
+    db_session.add(Booking(
+        id=diego_booking, practice_id=practice_id, patient_id=ids["Diego"],
+        appointment_at=datetime.now(tz=UTC) + timedelta(days=5),
+        status="confirmed", procedure_type="cleaning", provider_name="Dr. Smith",
+        source="ai_call",
+    ))
+    db_session.add(Booking(
+        id=uuid.uuid4(), practice_id=practice_id, patient_id=ids["Maria"],
+        appointment_at=datetime.now(tz=UTC) + timedelta(days=2),
+        status="confirmed", procedure_type="cleaning", provider_name="Dr. Smith",
+        source="ai_call",
+    ))
+    await db_session.commit()
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "fam-3",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": _FAMILY, "patient_dob": "1981-09-14",
+                 "reason": "can't make it"},
+    })
+    assert r.json()["cancelled"] is True
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    status = (await db_session.execute(
+        select(Booking.status).where(Booking.id == diego_booking)
+    )).scalar_one()
+    assert status == "cancelled", "the wrong household member's appointment moved"
+
+
+async def test_a_lone_patient_on_their_number_is_untouched(client, db_session):
+    """The common case must not pay for the rare one: one person, one number, no
+    extra question."""
+    practice, _ = await seed_practice(
+        db_session, name="Family Dental 4", clerk_org_id="org_fam4", clerk_user_id="user_fam4"
+    )
+    ids = await _household(db_session, practice.id, ("Maria", "1984-03-07"))
+    db_session.add(Booking(
+        id=uuid.uuid4(), practice_id=practice.id, patient_id=ids["Maria"],
+        appointment_at=datetime.now(tz=UTC) + timedelta(days=2),
+        status="confirmed", procedure_type="cleaning", provider_name="Dr. Smith",
+        source="ai_call",
+    ))
+    await db_session.commit()
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "fam-4",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": _FAMILY, "patient_dob": "1984-03-07",
+                 "reason": "can't make it"},
+    })
+    assert r.json()["cancelled"] is True
