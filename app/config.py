@@ -228,6 +228,11 @@ class Settings(BaseSettings):
     llm_model_fast: str = "llama-3.1-8b-instant"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    # Sending a call transcript to a model means sending PHI to a vendor. Off
+    # until a BAA covers that vendor — a comment saying "sign one first" is not a
+    # mechanism, and the pre-launch pilot is exactly the state that quietly
+    # becomes production.
+    qa_llm_review_enabled: bool = False
 
     # CORS — comma-separated list of EXACT allowed origins (no wildcards). The
     # browser sends credentials, so wildcards are unsafe and disallowed by the
