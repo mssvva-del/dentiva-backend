@@ -395,6 +395,13 @@ async def _resolve_practice(agent_id: str | None) -> Practice | None:
 # ---------------------------------------------------------------------------
 
 
+AMBIGUOUS = "ambiguous"
+ASK_WHICH_PATIENT = (
+    "There are a couple of people at this number in our records. Could you tell "
+    "me your date of birth so I pull up the right one?"
+)
+
+
 async def _upsert_patient(
     session,
     practice_id: uuid.UUID,
@@ -402,7 +409,7 @@ async def _upsert_patient(
     last_name: str,
     phone: str,
     language: str | None = None,
-) -> Patient:
+) -> Patient | str:
     """Return existing patient by phone or create a stub for this call.
 
     ``language`` is the language this call was conducted in. For a NEW patient we
@@ -410,7 +417,14 @@ async def _upsert_patient(
     language. We do NOT overwrite an existing patient's stored preference (a
     relative may call in a different language)."""
     # Indexed lookup by the deterministic phone hash — no full-table scan / decrypt.
-    existing = await _find_patient_by_phone(session, practice_id, phone)
+    existing = await _find_patient_by_phone(
+        session, practice_id, phone, first_name=first_name
+    )
+    if existing is AMBIGUOUS:
+        # Two people on this number already answer to this name — a junior and a
+        # senior, most often. Attaching to either is a coin flip on whose chart
+        # the appointment lands in, so the caller answers it, not us.
+        return AMBIGUOUS
     if existing is not None:
         return existing
 
@@ -431,14 +445,27 @@ async def _upsert_patient(
 
 
 async def _find_patient_by_phone(
-    session, practice_id: uuid.UUID, phone: str
-) -> Patient | None:
-    """Read-only lookup of a patient by phone within a practice — indexed via the
-    deterministic phone hash (no scan/decrypt).
+    session,
+    practice_id: uuid.UUID,
+    phone: str,
+    *,
+    first_name: str | None = None,
+    dob: str | None = None,
+) -> Patient | str | None:
+    """The patient this number belongs to, ``AMBIGUOUS``, or None.
 
-    Deterministic on collision: family members can share one phone in a practice.
-    We return the OLDEST match (stable) and log when more than one exists so the
-    ambiguity is visible rather than silently picking a random row."""
+    A dental practice's records are full of shared numbers: one household line,
+    parents and children, a couple. Picking the OLDEST match, as this used to,
+    means the family's first-registered patient absorbs everyone else's calls —
+    the husband rings from the family phone and reaches his wife's chart, passes
+    the caller-ID check on it, and can move her appointment believing it is his.
+
+    So we disambiguate by whatever the caller has given us. A first name is what
+    booking always has; a date of birth is what the identity challenge asks for.
+    When several people share the number and nothing separates them, the answer
+    is AMBIGUOUS — the agent must ask rather than the code guess. Guessing here
+    is not a wrong record, it is the wrong person's medical appointment.
+    """
     h = phone_hmac(phone)
     if not h:
         return None
@@ -447,15 +474,39 @@ async def _find_patient_by_phone(
             select(Patient)
             .where(Patient.practice_id == practice_id, Patient.phone_hmac == h)
             .order_by(Patient.created_at.asc())
-            .limit(2)
         )
     ).scalars().all()
-    if len(rows) > 1:
-        logger.warning(
-            "phone lookup: %d patients share this number in practice %s — using oldest",
-            len(rows), practice_id,
-        )
-    return rows[0] if rows else None
+    if not rows:
+        return None
+
+    # Narrow by whatever the caller gave us. The date of birth is what the
+    # identity challenge asks for and is the stronger of the two; the first name
+    # is what booking always has.
+    if dob:
+        rows = [p for p in rows if _dob_matches(p.date_of_birth, dob)]
+    elif first_name:
+        wanted = first_name.strip().casefold()
+        rows = [p for p in rows if (p.first_name or "").strip().casefold() == wanted]
+
+    if len(rows) == 1:
+        return rows[0]
+    if not rows:
+        # Nobody at this number answers to that name or that birthday. For a
+        # booking this is the ordinary case — a new family member joining the
+        # household line — so it is "not found", not "which one of you?".
+        #
+        # It also means a returning patient who gives a nickname ("Mike" for a
+        # record reading "Michael") gets a second stub rather than the first one.
+        # That is the side to err on: a duplicate record is something the front
+        # desk merges, whereas attaching to the wrong person is a stranger's
+        # appointment in someone's chart.
+        return None
+
+    logger.warning(
+        "phone lookup: %d patients share this number in practice %s — asking, not guessing",
+        len(rows), practice_id,
+    )
+    return AMBIGUOUS
 
 
 async def _find_upcoming_booking(
@@ -1018,6 +1069,8 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         patient = await _upsert_patient(
             session, practice_id, first_name, last_name, phone, language=call_language
         )
+        if patient is AMBIGUOUS:
+            return {"booked": False, "message": ASK_WHICH_PATIENT}
         patient_opted_out = patient.sms_opt_out
 
         # REAL openings from the clinic's own hours minus booked slots (same source
@@ -1231,7 +1284,11 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
             }
         await set_tenant(session, practice_id)
 
-        patient = await _find_patient_by_phone(session, practice_id, phone)
+        patient = await _find_patient_by_phone(
+            session, practice_id, phone, dob=args.get("patient_dob")
+        )
+        if patient is AMBIGUOUS:
+            return {"rescheduled": False, "message": ASK_WHICH_PATIENT}
         if patient is None:
             return {
                 "rescheduled": False,
@@ -1384,7 +1441,11 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
             }
         await set_tenant(session, practice_id)
 
-        patient = await _find_patient_by_phone(session, practice_id, phone)
+        patient = await _find_patient_by_phone(
+            session, practice_id, phone, dob=args.get("patient_dob")
+        )
+        if patient is AMBIGUOUS:
+            return {"cancelled": False, "message": ASK_WHICH_PATIENT}
         if patient is None:
             return {
                 "cancelled": False,
@@ -1530,6 +1591,8 @@ async def _handle_join_waitlist(retell_call_id: str, args: dict) -> dict:
 
         await set_tenant(session, practice_id)
         patient = await _upsert_patient(session, practice_id, first_name, last_name, phone)
+        if patient is AMBIGUOUS:
+            return {"added": False, "message": ASK_WHICH_PATIENT}
 
         entry = WaitlistEntry(
             id=uuid.uuid4(),
@@ -1758,8 +1821,10 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
             return not_found
         await set_tenant(session, practice_id)
 
-        patient = await _find_patient_by_phone(session, practice_id, phone)
-        if patient is None:
+        patient = await _find_patient_by_phone(
+            session, practice_id, phone, dob=args.get("patient_dob")
+        )
+        if patient is None or patient is AMBIGUOUS:
             return not_found
         call_row = (await session.execute(
             select(Call).where(Call.retell_call_id == retell_call_id)

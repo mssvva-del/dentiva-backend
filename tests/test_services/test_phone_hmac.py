@@ -118,20 +118,43 @@ async def test_cross_practice_isolation(db_session):
     assert (await _find_patient_by_phone(db_session, pb.id, "5553334444")).id == b.id
 
 
-async def test_same_phone_collision_returns_oldest_deterministically(db_session):
+async def test_a_shared_phone_asks_rather_than_picking_the_oldest(db_session):
+    """This used to return the oldest record "deterministically". Deterministic
+    it was — deterministically the mother, whoever was actually calling. The
+    family's first-registered patient absorbed every other member's calls, and
+    since they all pass the caller-ID check on that shared line, each of them
+    could act on her appointments believing they were their own.
+
+    Stable and wrong is still wrong. With nothing to tell two people apart, the
+    answer is a question, not a guess."""
+    from app.webhooks.retell import AMBIGUOUS
+
     practice, _ = await seed_practice(
         db_session, name="Ph6", clerk_org_id="o_ph6", clerk_user_id="u_ph6"
     )
     await set_tenant(db_session, practice.id)
-    # Two family members share one phone; oldest must win, every time.
-    first = Patient(id=uuid.uuid4(), practice_id=practice.id, pms_external_id="PH-C1",
-                    first_name="Mom", last_name="X", phone="+15556667777")
-    db_session.add(first)
+    mother = Patient(id=uuid.uuid4(), practice_id=practice.id, pms_external_id="PH-C1",
+                     first_name="Mom", last_name="X", phone="+15556667777",
+                     date_of_birth="1979-02-11")
+    db_session.add(mother)
     await db_session.commit()
-    second = Patient(id=uuid.uuid4(), practice_id=practice.id, pms_external_id="PH-C2",
-                     first_name="Kid", last_name="X", phone="+15556667777")
-    db_session.add(second)
+    child = Patient(id=uuid.uuid4(), practice_id=practice.id, pms_external_id="PH-C2",
+                    first_name="Kid", last_name="X", phone="+15556667777",
+                    date_of_birth="2011-06-30")
+    db_session.add(child)
     await db_session.commit()
-    for _ in range(3):
-        got = await _find_patient_by_phone(db_session, practice.id, "5556667777")
-        assert got.id == first.id  # oldest, stable across calls
+
+    for _ in range(3):  # stable, as before — just no longer a guess
+        assert await _find_patient_by_phone(
+            db_session, practice.id, "5556667777"
+        ) is AMBIGUOUS
+
+    # And each detail the caller can offer resolves it.
+    by_dob = await _find_patient_by_phone(
+        db_session, practice.id, "5556667777", dob="2011-06-30"
+    )
+    assert by_dob.id == child.id
+    by_name = await _find_patient_by_phone(
+        db_session, practice.id, "5556667777", first_name="Mom"
+    )
+    assert by_name.id == mother.id
