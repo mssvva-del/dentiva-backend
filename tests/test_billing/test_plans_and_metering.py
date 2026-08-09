@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -10,6 +11,7 @@ from sqlalchemy import select
 from app.billing.metering import _month_bounds, record_call_usage, record_sms_usage
 from app.billing.plans import PLANS, compute_overage_cents, get_plan
 from app.models.usage_record import UsageRecord
+from app.observability import alerts
 from tests.conftest import seed_practice
 
 
@@ -92,3 +94,53 @@ async def test_record_sms_usage_increments(db_session):
         )
     ).scalar_one()
     assert row.sms_count == 2
+
+
+# ── the moment the plan runs out ─────────────────────────────────────────────
+#
+# Passing the included minutes breaks nothing. Calls keep being answered, the
+# dashboard looks normal, and the first sign is the invoice — for us a margin
+# we did not price, for the clinic a bill nobody warned them about.
+
+
+async def _subscribed(db_session, practice_id, included_minutes):
+    from app.models.subscription import Subscription
+
+    db_session.add(Subscription(
+        id=uuid.uuid4(), practice_id=practice_id, plan="after_hours",
+        status="active", included_minutes=included_minutes,
+    ))
+    await db_session.flush()
+
+
+async def test_passing_the_included_minutes_raises_one_alert(db_session):
+    practice, _ = await seed_practice(
+        db_session, name="Cap", clerk_org_id="org_cap1", clerk_user_id="u_cap1"
+    )
+    await _subscribed(db_session, practice.id, included_minutes=2)
+    now = datetime(2026, 6, 15, 12, tzinfo=UTC)
+
+    alerts._RECENT.clear()
+    await record_call_usage(db_session, practice.id, 60, now=now)   # 1 min, under
+    assert alerts.recent_alerts()["count_last_hour"] == 0
+
+    await record_call_usage(db_session, practice.id, 90, now=now)   # 2.5 min, over
+    fired = alerts.recent_alerts()
+    assert fired["by_kind"] == {"usage_cap_exceeded": 1}
+
+    # Every later call is also over the cap. Alerting on each would make the
+    # signal worthless by the end of the day; the crossing happens once.
+    await record_call_usage(db_session, practice.id, 600, now=now)
+    assert alerts.recent_alerts()["by_kind"] == {"usage_cap_exceeded": 1}
+
+
+async def test_a_practice_with_no_subscription_is_not_alerted(db_session):
+    """The pilot clinics have no plan. Nothing to exceed, nothing to say."""
+    practice, _ = await seed_practice(
+        db_session, name="Cap2", clerk_org_id="org_cap2", clerk_user_id="u_cap2"
+    )
+    alerts._RECENT.clear()
+    await record_call_usage(
+        db_session, practice.id, 60_000, now=datetime(2026, 6, 15, 12, tzinfo=UTC)
+    )
+    assert alerts.recent_alerts()["count_last_hour"] == 0
