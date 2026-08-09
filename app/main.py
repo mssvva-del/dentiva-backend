@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, Request
@@ -52,6 +53,9 @@ _log_settings = get_settings()
 setup_logging(_log_settings.log_level, json_logs=_log_settings.json_logs)
 # Initialise Sentry BEFORE the app/middleware so its integrations hook in.
 init_sentry(_log_settings)
+# Railway sets this on every build; empty when running locally or from a tarball.
+_REVISION = (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]
+
 logger = logging.getLogger(__name__)
 
 
@@ -233,6 +237,14 @@ async def health_detailed() -> JSONResponse:
     body = {
         "status": "ok" if (db_ok and alerts["count_last_hour"] == 0) else "degraded",
         "db": "ok" if db_ok else "down",
+        # Which commit is actually answering. Nine merged pull requests once sat
+        # in main for a week while production served a build from before any of
+        # them — two of those were security fixes. Nobody was careless: every
+        # merge was followed by a health check that returned "ok", and "ok" means
+        # the box is alive, not that the box is current. Without this field the
+        # only way to notice was for a change to happen to be visible from
+        # outside, which is luck, not verification.
+        "revision": _REVISION,
         "voice_configured": bool(settings.retell_api_key and settings.retell_agent_id),
         "sms_enabled": bool(settings.sms_enabled and settings.twilio_auth_token),
         "webhook_verified": bool(settings.retell_webhook_secret),

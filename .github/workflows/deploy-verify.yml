@@ -1,0 +1,63 @@
+# Did the merge actually reach production?
+#
+# Nine merged pull requests once sat in main for a week while production served a
+# build from before any of them — two were security fixes. Every merge had been
+# followed by a health check that returned "ok", and "ok" means the box is alive,
+# not that the box is current. The drift was found by accident, because one change
+# happened to be visible from outside.
+#
+# So the check is a machine's job now. This waits for production to report the
+# commit that was just merged, and turns main red if it never does.
+name: deploy-verify
+
+on:
+  push:
+    branches: [main]
+
+# A newer merge supersedes this one — no point waiting for a commit that is
+# already being replaced.
+concurrency:
+  group: deploy-verify
+  cancel-in-progress: true
+
+jobs:
+  reached-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Wait for production to report this commit
+        env:
+          HEALTH: https://dentiva-backend-production.up.railway.app/health/detailed
+        run: |
+          want="${GITHUB_SHA:0:7}"
+          echo "waiting for production to report $want"
+          for attempt in $(seq 1 40); do
+            got=$(curl -fsS --max-time 20 "$HEALTH" | jq -r '.revision // "absent"')
+            if [ "$got" = "$want" ]; then
+              echo "production is running $got"
+              exit 0
+            fi
+            echo "  attempt $attempt: production reports $got"
+            sleep 30
+          done
+          cat <<EOF
+
+          Production never reported $want.
+
+          It is still serving $got, so everything merged since then is in main and
+          not in front of a patient. This is not a flaky check — treat a red here
+          exactly like a failing test.
+
+          Where to look, in order:
+            1. Railway → the backend service → Deployments. Is the newest one
+               failed, stuck, or simply absent?
+            2. Absent means the GitHub connection dropped: Settings → Source,
+               reconnect the repository and the main branch.
+            3. Failed means read the build or deploy log — start.sh runs the
+               migrations before uvicorn binds, so a migration error looks like a
+               service that never becomes healthy and gets rolled back.
+
+          If "$got" is "absent" rather than a commit, production predates the
+          revision field itself, which means it is older than 2026-08-09.
+          EOF
+          exit 1
