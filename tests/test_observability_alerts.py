@@ -89,3 +89,16 @@ async def test_the_features_that_fail_quietly_are_listed(client):
     for name in ("take_payment", "billing_webhook", "identity_webhook",
                  "outbound_calls", "pms_open_dental", "call_review"):
         assert name in caps
+
+
+async def test_health_names_the_commit_it_is_running(client):
+    """Nine merged pull requests once sat in main for a week while production
+    served a build from before any of them, two of them security fixes. Every
+    merge had been followed by a health check returning "ok" — which means the
+    box is alive, not that the box is current.
+
+    With no revision in the response the only way to notice was for a change to
+    happen to be visible from outside. That is luck, not verification."""
+    body = (await client.get("/health/detailed")).json()
+    assert "revision" in body
+    assert isinstance(body["revision"], str) and body["revision"]
