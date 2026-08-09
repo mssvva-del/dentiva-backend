@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import set_tenant
 from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
+from app.observability.alerts import record_alert
 
 
 def _month_bounds(now: datetime) -> tuple[datetime, datetime]:
@@ -95,7 +96,24 @@ async def record_call_usage(
             },
         )
     )
-    await session.execute(stmt)
+    total = (await session.execute(
+        stmt.returning(UsageRecord.minutes_used)
+    )).scalar_one()
+
+    # Crossing the included minutes is the moment somebody needs to know, and it
+    # is invisible otherwise: nothing breaks, calls keep being answered, and the
+    # first sign is the invoice. Alert on the crossing itself — comparing the
+    # total before and after this call means exactly one alert per period, with
+    # no state to keep and nothing to reset when the period rolls over.
+    sub = (await session.execute(
+        select(Subscription).where(Subscription.practice_id == practice_id)
+    )).scalar_one_or_none()
+    cap = sub.included_minutes if sub else None
+    if cap and (total - minutes) < cap <= total:
+        record_alert(
+            "usage_cap_exceeded",
+            f"practice {practice_id} passed {cap} included minutes this period",
+        )
 
 
 async def record_sms_usage(
