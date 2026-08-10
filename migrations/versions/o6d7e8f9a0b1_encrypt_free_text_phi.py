@@ -53,7 +53,11 @@ def _migrate(encrypting: bool) -> None:
     # deploy's health-check window expires, the platform rolls back, and the next
     # deploy repeats it — the failure reads as "health-check failure" and says
     # nothing about a lock. Ten seconds turns that into a legible error.
-    conn.execute(sa.text("SET lock_timeout = '10s'"))
+    # Short on purpose. A lock REQUEST queues every new query on the table behind
+    # it, so waiting here does not merely delay the deploy — it stalls the live
+    # clinic still being served by the previous release. Give up quickly and let
+    # scripts/migrate.sh try again in the next gap.
+    conn.execute(sa.text("SET lock_timeout = '3s'"))
 
     for table, column in _COLUMNS:
         tmp = f"{column}_enc"
