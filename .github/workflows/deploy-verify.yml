@@ -23,7 +23,12 @@ concurrency:
 jobs:
   reached-production:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Must exceed the polling window below with room to spare. When the job's
+    # own timeout kills the step, the run is reported CANCELLED — which reads
+    # like "superseded by a newer merge", i.e. harmless — and the explicit
+    # failure below never registers. The first version of this file got that
+    # wrong and reported two real deployment failures as cancellations.
+    timeout-minutes: 15
     steps:
       - name: Wait for production to report this commit
         env:
@@ -31,7 +36,7 @@ jobs:
         run: |
           want="${GITHUB_SHA:0:7}"
           echo "waiting for production to report $want"
-          for attempt in $(seq 1 40); do
+          for attempt in $(seq 1 20); do   # 20 x 30s = 10 minutes
             got=$(curl -fsS --max-time 20 "$HEALTH" | jq -r '.revision // "absent"')
             if [ "$got" = "$want" ]; then
               echo "production is running $got"
