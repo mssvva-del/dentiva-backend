@@ -10,7 +10,7 @@ dockerfilePath = "Dockerfile"
 # previous release is still live and holding locks — burns the health-check
 # window, the platform rolls back, and the next deploy does the same thing. That
 # loop cost a week, and the only symptom was "health-check failure".
-preDeployCommand = "alembic upgrade head"
+preDeployCommand = "bash scripts/migrate.sh"
 startCommand = "bash start.sh"
 healthcheckPath = "/health"
 # Migrations no longer run here, so uvicorn answers within seconds. The window
