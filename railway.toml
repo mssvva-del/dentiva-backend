@@ -4,9 +4,16 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 # Use the same entrypoint as the Docker image so cloud + local behave identically.
-# start.sh runs migrations then binds ${PORT:-8000}; never hardcode the port.
+# start.sh binds ${PORT:-8000}; never hardcode the port.
+# Migrations run BEFORE the new container has to answer a health check. In the
+# start command they shared a deadline with it: a migration that blocks — the
+# previous release is still live and holding locks — burns the health-check
+# window, the platform rolls back, and the next deploy does the same thing. That
+# loop cost a week, and the only symptom was "health-check failure".
+preDeployCommand = "alembic upgrade head"
 startCommand = "bash start.sh"
 healthcheckPath = "/health"
-# Generous window: first boot runs migrations before uvicorn answers /health.
+# Migrations no longer run here, so uvicorn answers within seconds. The window
+# stays generous because shrinking it buys nothing and costs a false rollback.
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
