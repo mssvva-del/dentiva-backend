@@ -37,11 +37,33 @@ _COLUMNS = (
 )
 
 
+def _column_exists(conn, table: str, column: str) -> bool:
+    return bool(conn.execute(sa.text(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = :t AND column_name = :c"
+    ), {"t": table, "c": column}).first())
+
+
 def _migrate(encrypting: bool) -> None:
     conn = op.get_bind()
+
+    # Fail fast instead of hanging. Every step here needs ACCESS EXCLUSIVE, and
+    # on a zero-downtime platform the PREVIOUS release is still serving traffic
+    # while this runs. Without a bound, a blocked ALTER waits silently until the
+    # deploy's health-check window expires, the platform rolls back, and the next
+    # deploy repeats it — the failure reads as "health-check failure" and says
+    # nothing about a lock. Ten seconds turns that into a legible error.
+    conn.execute(sa.text("SET lock_timeout = '10s'"))
+
     for table, column in _COLUMNS:
         tmp = f"{column}_enc"
         new_type = sa.LargeBinary() if encrypting else sa.Text()
+        # A previous attempt may have died between adding this column and
+        # dropping the original — mid-migration DDL is not rolled back on every
+        # platform. Starting over from a clean slate is safe because nothing has
+        # read from the temporary column yet.
+        if _column_exists(conn, table, tmp):
+            op.drop_column(table, tmp)
         op.add_column(table, sa.Column(tmp, new_type, nullable=True))
 
         rows = conn.execute(

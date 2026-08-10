@@ -3,7 +3,9 @@
 #
 # Single source of truth for how the backend boots in the cloud:
 #   1. Apply DB migrations (fail loudly if they error — better than a silently
-#      broken app serving against an unmigrated schema).
+#      broken app serving against an unmigrated schema). On Railway these have
+#      already run as the pre-deploy step, so this is a no-op that returns at
+#      once; it stays here so `docker run` alone still produces a working app.
 #   2. Launch uvicorn bound to the platform-provided $PORT, falling back to 8000
 #      for local Docker. Railway injects $PORT and health-checks exactly that
 #      port; binding anything else makes the health-check hang forever.
