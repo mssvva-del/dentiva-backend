@@ -451,7 +451,14 @@ async def _resolve_practice(
                 return None
 
         # No match: only safe to guess in the unambiguous single-practice case.
-        rows = (await session.execute(select(Practice).limit(2))).scalars().all()
+        #
+        # The canary is excluded from that count. It is a real row with a real
+        # number, so it would make a pilot clinic look like two practices and
+        # stop the fallback that clinic depends on — a monitoring tenant taking
+        # the phones down for the customer it exists to protect.
+        rows = (await session.execute(
+            select(Practice).where(Practice.is_canary.is_(False)).limit(2)
+        )).scalars().all()
         if len(rows) == 1:
             return rows[0]
         if not rows:

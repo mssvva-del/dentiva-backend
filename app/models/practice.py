@@ -42,6 +42,15 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     )
     business_hours: Mapped[dict] = mapped_column(JSONB, nullable=False)
     retell_agent_id: Mapped[str | None] = mapped_column(Text)
+    # A clinic that exists only to be tested against. Monitoring can watch health
+    # endpoints from outside and learn a lot, but it cannot answer "does a call
+    # still end in a booking?" without making one — and a synthetic appointment
+    # in a live practice's calendar is worse than no monitoring, because a
+    # receptionist has to explain a patient who does not exist. Anything that
+    # counts, bills or reports on clinics must skip this row.
+    is_canary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     # The Dentovox number THIS clinic forwards its own line to. Provisioned per
     # practice (Retell buys it in the clinic's area code) — inbound routing keys
     # off it, so it must be unique. NULL until provisioned; the global

@@ -96,6 +96,10 @@ class ClinicRow(BaseModel):
     mrr_cents: int
     onboarding_step: int
     created_at: datetime
+    # Staff still see the canary — its calls are how you debug the monitor — but
+    # they see that it is one. A monitoring tenant counted as a customer is a
+    # number somebody eventually reports to someone else.
+    is_canary: bool = False
 
 
 @router.get("/clinics", response_model=list[ClinicRow])
@@ -116,6 +120,7 @@ async def list_clinics(
             plan=subs[p.id].plan if p.id in subs else None,
             mrr_cents=subs[p.id].mrr_cents if p.id in subs else 0,
             onboarding_step=p.onboarding_step, created_at=p.created_at,
+            is_canary=p.is_canary,
         )
         for p in rows
     ]
@@ -599,6 +604,7 @@ async def system_health(
         async with _app_db.platform_session_factory() as session:
             clinics = (await session.execute(
                 select(func.count()).select_from(Practice)
+                .where(Practice.is_canary.is_(False))
             )).scalar_one()
             staff = (await session.execute(
                 select(func.count()).select_from(DentivaStaff)
