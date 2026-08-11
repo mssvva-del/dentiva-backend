@@ -138,7 +138,21 @@ def _signed_post(body: dict, secret: str) -> tuple[int, dict]:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
             return response.status, json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as exc:
-        raise Failure(f"signed webhook rejected with {exc.code}: {exc.read()[:200]!r}") from exc
+        detail = exc.read()[:200]
+        if exc.code == 401:
+            # Name WHICH secret we are holding, so "the signature is wrong" and
+            # "the secret is wrong" stop looking identical. A short digest of a
+            # 32-character secret gives away nothing usable, and it turns a
+            # guessing game into a comparison — the value in the deployment can
+            # be fingerprinted the same way.
+            raise Failure(
+                f"production rejected a correctly-formed signature. The monitor "
+                f"holds a secret of {len(secret)} characters, fingerprint "
+                f"{hashlib.sha256(secret.encode()).hexdigest()[:8]}. If that does "
+                f"not match the deployment's, the wrong value was copied. "
+                f"Response: {detail!r}"
+            ) from exc
+        raise Failure(f"signed webhook rejected with {exc.code}: {detail!r}") from exc
     except Exception as exc:  # noqa: BLE001
         raise Failure(f"signed webhook failed: {type(exc).__name__}: {exc}") from exc
 

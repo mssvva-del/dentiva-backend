@@ -138,3 +138,19 @@ def test_the_canary_number_matches_what_the_backend_provisions():
     from app.services.canary import CANARY_NUMBER as backend_number
 
     assert monitor.CANARY_NUMBER == backend_number
+
+
+def test_a_rejected_signature_names_the_secret_it_used():
+    """"The signature is wrong" and "the secret is wrong" look identical from a
+    401, and only one of them is a code bug. A short digest turns the guessing
+    game into a comparison; it gives away nothing usable about a 32-character
+    secret."""
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "monitor_production.py"
+    ).read_text()
+    assert "fingerprint" in source
+    # The secret itself must never reach a log. Only its length and a digest.
+    start = source.index("if exc.code == 401:")
+    block = source[start:start + 900]
+    assert "sha256" in block
+    assert "{secret}" not in block
