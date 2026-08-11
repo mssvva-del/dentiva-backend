@@ -74,14 +74,29 @@ class Settings(BaseSettings):
         # Accept a single plain DATABASE_URL (Railway/Render style) and derive the
         # async driver URL from it.
         self.database_url = _to_async_url(self.database_url)
-        # DATABASE_URL_SYNC (Alembic) is normally derived from DATABASE_URL — but
-        # when it's set EXPLICITLY, honor it. This lets the app connect as a
-        # restricted RLS role (DATABASE_URL=dentiva_app) while migrations still run
-        # as the superuser (DATABASE_URL_SYNC=postgresql://dentiva:...). Without
-        # this, deriving sync from async would run Alembic as the unprivileged role
-        # and break DDL migrations on deploy.
+        # Which connection Alembic uses, in order of preference.
+        #
+        # DATABASE_URL is the RLS-restricted application role, and it is
+        # deliberately NOT the owner of any table — that is what makes tenant
+        # isolation real. It also means it cannot ALTER anything. Deriving the
+        # migration URL from it produces, on the first schema change after the
+        # role switch:
+        #
+        #     must be owner of table callback_requests
+        #
+        # Which is exactly what happened: production ran a build from 2 August
+        # for nine days because the PHI-encryption migration merged one day after
+        # the role switch and could never apply. The comment that used to live
+        # here predicted this precisely and prevented nothing.
+        #
+        # DATABASE_URL_PLATFORM is already the owner connection — the one the
+        # admin pages use to read across tenants. Migrations want the same
+        # privileges, so they default to it rather than needing a third copy of
+        # the same credential in a variable somebody has to remember to set.
         if "database_url_sync" in self.model_fields_set:
             self.database_url_sync = _to_sync_url(self.database_url_sync)
+        elif self.database_url_platform:
+            self.database_url_sync = _to_sync_url(self.database_url_platform)
         else:
             self.database_url_sync = _to_sync_url(self.database_url)
         # The platform URL arrives the same way and needs the same treatment:
