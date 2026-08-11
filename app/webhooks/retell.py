@@ -71,8 +71,30 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 _bg_sms_tasks: set = set()
 
 
-def _fire_sms(coro) -> None:
-    task = asyncio.create_task(coro)
+def _fire_sms(coro, *, critical: str = "") -> None:
+    """Send without making the caller wait. Optionally, notice when it did not.
+
+    Nothing looked at the result. send_sms returns {"skipped": ...} when SMS is
+    switched off or Twilio is not configured, and those two branches log at INFO
+    and alert nobody — so the whole mechanism could be inert and every call would
+    still sound perfect.
+
+    That is survivable for a confirmation text. It is not survivable for the page
+    that tells a clinic someone is bleeding, because the agent has already said
+    the team has been notified. ``critical`` names the promise so a page that
+    never left raises an alert with the right words on it.
+    """
+    async def _watched() -> None:
+        result = await coro
+        if critical and isinstance(result, dict) and not result.get("sid"):
+            reason = result.get("skipped") or result.get("error") or "unknown"
+            record_alert(f"page_not_delivered_{critical}", f"reason={reason}")
+            logger.error(
+                "PAGE NOT DELIVERED (%s): %s — the caller was told the clinic "
+                "had been notified", critical, reason,
+            )
+
+    task = asyncio.create_task(_watched() if critical else coro)
     _bg_sms_tasks.add(task)
     task.add_done_callback(_bg_sms_tasks.discard)
 
@@ -1312,7 +1334,11 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     # And tell the CLINIC — an AI booking they never see is a double-booking
     # waiting to happen while there's no PMS sync. Name + time only.
     if clinic_alert_line:
-        _fire_sms(page_clinic_new_booking(
+        # Named too: while no PMS sync exists this text is the only thing between
+        # our booking and the front desk writing someone else into the same
+        # chair. Quieter than the urgent page; a silent failure still costs a
+        # real slot and an argument with a patient standing at the desk.
+        _fire_sms(critical="new_booking", coro=page_clinic_new_booking(
             to=clinic_alert_line,
             practice_name=practice_name,
             first_name=first_name,
@@ -2083,7 +2109,7 @@ async def _page_clinic_urgent_callback(
     if not dest:
         record_alert("urgent_callback_unpageable", f"practice={practice_id}")
         return
-    _fire_sms(page_clinic_urgent_callback(
+    _fire_sms(critical="urgent_callback", coro=page_clinic_urgent_callback(
         to=dest,
         practice_name=name or "Dentovox",
         first_name=first_name,
