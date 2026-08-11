@@ -1003,7 +1003,7 @@ async def _sync_booking_change_to_pms(booking_id, practice_id, action: str) -> N
     # no_pms: this clinic has no calendar but ours. no_pms_record: the booking
     # never reached the PMS, so there is nothing there to change. Neither is a
     # failure, and alerting on them would bury the two that are.
-    if status not in ("cancelled", "moved", "no_pms", "no_pms_record"):
+    if status not in ("cancelled", "moved", "no_pms", "no_pms_record", "write_disabled"):
         record_alert(f"pms_{action}_{status}", f"booking={booking_id}")
     logger.info("PMS %s %s for booking %s", action, status, booking_id)
 
@@ -1040,7 +1040,7 @@ async def _write_booking_to_pms(
         record_alert("pms_write_crashed", f"booking={booking_id}")
         return
 
-    if status not in ("written", "no_pms"):
+    if status not in ("written", "no_pms", "write_disabled"):
         # 'conflict' is the one that needs a human NOW: the clinic's calendar took
         # that time while we were on the phone, so the patient is holding a slot
         # the practice no longer has.

@@ -223,14 +223,23 @@ async def test_the_write_carries_an_end_time_because_kolla_requires_one(db_sessi
     assert client.created["end_time"] > client.created["start_time"]
 
 
-async def test_a_clinic_with_no_bridge_is_not_an_error(db_session):
+async def test_a_clinic_with_no_bridge_is_not_an_error(db_session, monkeypatch):
     """A practice with no PMS connected has its whole calendar in our book.
     Reporting that as a failed write would alert on every booking it ever takes
-    and bury the statuses that mean something."""
-    from app.services.reactivation.writeback import write_back_booking
+    and bury the statuses that mean something.
 
+    Writes are turned ON here deliberately: otherwise this asserts the safety
+    switch rather than the case it was written for, and would keep passing after
+    the behaviour it describes had gone.
+    """
+    from app.services.reactivation import writeback
+
+    monkeypatch.setattr(
+        writeback, "get_settings",
+        lambda: type("S", (), {"pms_write_enabled": True})(),
+    )
     practice, booking = await _clinic_with_a_booking(db_session)
-    status = await write_back_booking(
+    status = await writeback.write_back_booking(
         db_session, practice.id, booking, patient_pms_id="1", provider_id="p",
     )
     assert status == "no_pms"
@@ -247,3 +256,64 @@ async def _clinic_with_a_booking(db_session):
         clerk_org_id=f"org_{suffix}", clerk_user_id=f"u_{suffix}",
     )
     return practice, await _seed_booking(db_session, practice)
+
+
+# ---------------------------------------------------------------------------
+# Reading a clinic's calendar and writing to it are separate risks, so they are
+# separate decisions. A new practice connects read-only: the agent offers its
+# real openings straight away, which is most of the value, while every write
+# stays in our book until somebody has compared the two calendars by eye.
+# ---------------------------------------------------------------------------
+
+
+async def test_writes_are_off_until_somebody_turns_them_on(db_session, monkeypatch):
+    """The default. A wrong write is a patient shown a time the clinic cannot
+    honour, or a chair held empty — and the front desk finds out before we do."""
+    from app.services.reactivation import writeback
+
+    practice, booking = await _clinic_with_a_booking(db_session)
+    monkeypatch.setattr(
+        writeback, "get_settings",
+        lambda: type("S", (), {"pms_write_enabled": False})(),
+    )
+    status = await writeback.write_back_booking(
+        db_session, practice.id, booking, patient_pms_id="1", provider_id="p",
+    )
+    assert status == "write_disabled"
+    assert booking.pms_external_id is None
+
+
+async def test_cancel_and_move_are_off_by_the_same_switch(db_session, monkeypatch):
+    """One switch, or somebody turns on two thirds of it and finds out which
+    third they missed from a clinic."""
+    from app.services.reactivation import writeback
+
+    practice, booking = await _clinic_with_a_booking(db_session)
+    booking.pms_external_id = "appointments/1"
+    await db_session.commit()
+    monkeypatch.setattr(
+        writeback, "get_settings",
+        lambda: type("S", (), {"pms_write_enabled": False})(),
+    )
+    assert await writeback.cancel_in_pms(db_session, practice.id, booking) == "write_disabled"
+    assert await writeback.move_in_pms(db_session, practice.id, booking) == "write_disabled"
+
+
+async def test_an_explicit_client_still_writes(db_session, monkeypatch):
+    """The switch governs production wiring, not the tests and not a deliberate
+    call with a client in hand — otherwise every write test would be testing the
+    switch instead of the write."""
+    from app.services.reactivation import writeback
+
+    practice, booking = await _clinic_with_a_booking(db_session)
+    start = booking.appointment_at.isoformat()
+    client = _RecordingClient([_slot(start, provider="prov-1")])
+    monkeypatch.setattr(
+        writeback, "get_settings",
+        lambda: type("S", (), {"pms_write_enabled": False})(),
+    )
+    status = await writeback.write_back_booking(
+        db_session, practice.id, booking,
+        patient_pms_id="1", provider_id="prov-1", client=client,
+    )
+    assert status == "written"
