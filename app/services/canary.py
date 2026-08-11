@@ -36,6 +36,18 @@ logger = logging.getLogger("dentiva.canary")
 CANARY_ORG_ID = "org_dentovox_canary"
 CANARY_NAME = "Dentovox Monitoring"
 
+# The number the monitor "dials". Routing matches practices.ai_phone_number
+# exactly, so this is what makes a synthetic call land on the canary and nowhere
+# else — and that has to be deterministic, because the fallback it would
+# otherwise hit picks the only real clinic in the database. A monitoring booking
+# in a live practice's calendar is precisely what the canary exists to prevent,
+# and getting there by accident would be worse than not monitoring at all.
+#
+# Deliberately undialable: +1 000 is not an assignable area code, so no human
+# reaches it and no carrier routes it. It is a routing key wearing the shape of
+# a phone number.
+CANARY_NUMBER = "+10000000000"
+
 # Monday to Friday, a normal day. The monitor books against these, so they have
 # to be hours a slot can actually fall inside.
 _HOURS = {
@@ -56,6 +68,13 @@ async def ensure_canary_practice(session) -> uuid.UUID | None:
         select(Practice).where(Practice.is_canary.is_(True))
     )).scalars().first()
     if existing is not None:
+        # Repair rather than assume: a canary created before it had a routing
+        # number would send every synthetic call down the fallback path, into
+        # whichever real clinic is the only one in the database.
+        if existing.ai_phone_number != CANARY_NUMBER:
+            existing.ai_phone_number = CANARY_NUMBER
+            await session.commit()
+            logger.info("canary practice given its routing number")
         return existing.id
 
     practice = Practice(
@@ -65,6 +84,7 @@ async def ensure_canary_practice(session) -> uuid.UUID | None:
         timezone="America/New_York",
         # No PMS. This is the property everything else rests on.
         pms_system="none",
+        ai_phone_number=CANARY_NUMBER,
         languages_enabled=["en"],
         business_hours=_HOURS,
         is_canary=True,

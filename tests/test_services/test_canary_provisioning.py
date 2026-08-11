@@ -76,3 +76,38 @@ async def test_a_renamed_canary_is_still_the_canary(db_session):
     await db_session.commit()
 
     assert await ensure_canary_practice(db_session) == canary_id
+
+
+async def test_the_canary_owns_the_number_the_monitor_dials(db_session):
+    """Routing matches ai_phone_number exactly, so this is what makes a synthetic
+    call land on the canary and nowhere else.
+
+    Without it the call falls through to "the only practice in the database" —
+    and that practice is a real clinic. A monitoring booking in a live calendar
+    is the precise thing the canary exists to prevent, and arriving there by
+    accident would be worse than not monitoring at all.
+    """
+    from app.services.canary import CANARY_NUMBER
+
+    canary_id = await ensure_canary_practice(db_session)
+    practice = (await db_session.execute(
+        select(Practice).where(Practice.id == canary_id)
+    )).scalar_one()
+    assert practice.ai_phone_number == CANARY_NUMBER
+
+
+async def test_a_canary_missing_its_number_is_repaired(db_session):
+    """One already exists in production, created before this number did. Assuming
+    otherwise would leave synthetic bookings pointed at a real clinic."""
+    from app.services.canary import CANARY_NUMBER
+
+    canary_id = await ensure_canary_practice(db_session)
+    practice = (await db_session.execute(
+        select(Practice).where(Practice.id == canary_id)
+    )).scalar_one()
+    practice.ai_phone_number = None
+    await db_session.commit()
+
+    assert await ensure_canary_practice(db_session) == canary_id
+    await db_session.refresh(practice)
+    assert practice.ai_phone_number == CANARY_NUMBER

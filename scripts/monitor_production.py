@@ -23,10 +23,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
+import os
 import sys
+import time
 import urllib.error
 import urllib.request
+import uuid
 
 BASE = "https://dentiva-backend-production.up.railway.app"
 TIMEOUT = 20
@@ -40,6 +45,11 @@ _PROMISE_KINDS = ("page_not_delivered", "pms_write_", "pms_cancel_", "pms_move_"
 # which is why it names no tool, no patient and no clinic. A probe carrying a
 # real booking would, on the one day the guard failed, become a real booking.
 _PROBE_BODY = {"event": "call_started", "call_id": "monitor-probe"}
+
+# The number the canary answers on. Routing matches it exactly, which is what
+# keeps a synthetic call off a real clinic — the fallback it would otherwise hit
+# picks the only practice in the database, and that practice has patients.
+CANARY_NUMBER = "+10000000000"
 
 
 class Failure(Exception):
@@ -107,6 +117,89 @@ def check_detailed(expect_sha: str | None) -> str:
     return f"revision {revision}, rls enforced, {recent} alerts"
 
 
+def _signed_post(body: dict, secret: str) -> tuple[int, dict]:
+    """Speak Retell's own signing scheme: HMAC over the raw body ++ the timestamp."""
+    raw = json.dumps(body).encode()
+    stamp = int(time.time() * 1000)
+    digest = hmac.new(secret.encode(), raw + str(stamp).encode(), hashlib.sha256).hexdigest()
+    request = urllib.request.Request(
+        f"{BASE}/webhooks/retell",
+        data=raw,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "dentovox-monitor",
+            # The shape our verifier parses: v=<epoch ms>,d=<hex digest>. Copied
+            # from the regex rather than from memory of the vendor's docs — the
+            # two have differed before.
+            "X-Retell-Signature": f"v={stamp},d={digest}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            return response.status, json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        raise Failure(f"signed webhook rejected with {exc.code}: {exc.read()[:200]!r}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise Failure(f"signed webhook failed: {type(exc).__name__}: {exc}") from exc
+
+
+def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
+    """The only check that answers the question the product is sold on.
+
+    Everything else here reads what production says about itself. This one makes
+    a call happen: start it, ask for times, book, then cancel so the canary's
+    calendar does not fill up with a decade of synthetic Tuesdays.
+
+    Every request carries the canary's number, so it lands on the monitoring
+    clinic and nowhere else — and that clinic has no PMS, so nothing it books can
+    reach a real calendar even if the routing were wrong.
+    """
+    if not secret:
+        raise Failure(
+            "RETELL_WEBHOOK_SECRET is not available to the monitor, so the "
+            "booking flow was NOT exercised. Everything above passed and the "
+            "thing customers pay for is unchecked — that is worth saying rather "
+            "than skipping quietly."
+        )
+
+    call_id = f"monitor-{uuid.uuid4().hex[:10]}"
+    _signed_post({
+        "event": "call_started", "call_id": call_id,
+        "call": {"call_id": call_id, "from_number": "+15550000000",
+                 "to_number": CANARY_NUMBER,
+                 "start_timestamp": int(time.time() * 1000)},
+    }, secret)
+
+    _, booked = _signed_post({
+        "event": "function_call", "call_id": call_id,
+        "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
+        "function_name": "book_appointment",
+        "args": {
+            "patient_first_name": "Monitor", "patient_last_name": "Probe",
+            "patient_phone": "+15550000000", "procedure": "cleaning",
+            "preferred_date": "2099-11-10", "preferred_time_window": "morning",
+        },
+    }, secret)
+    if not booked.get("booked"):
+        raise Failure(
+            f"a call did not end in a booking: {json.dumps(booked)[:300]}. This is "
+            "the product. Everything else can be green while this is broken."
+        )
+
+    _, cancelled = _signed_post({
+        "event": "function_call", "call_id": call_id,
+        "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": "+15550000000", "reason": "monitoring probe"},
+    }, secret)
+    if not cancelled.get("cancelled"):
+        # Not fatal: the booking worked, which is the headline. But an
+        # accumulating calendar eventually makes every later probe fail to find a
+        # slot, and that failure would look like a booking bug.
+        return "booked; the probe cancellation did not take — canary calendar will fill"
+    return "booked and cancelled on the canary"
+
+
 def check_webhook_refuses_forgeries() -> str:
     """The one write endpoint reachable from the internet, poked with no
     signature. A 200 here means anybody can book and cancel for any clinic."""
@@ -135,6 +228,8 @@ CHECKS = (
     ("production answers", lambda args: check_alive()),
     ("database, isolation, deploy", lambda args: check_detailed(args.expect_sha)),
     ("forged webhooks refused", lambda args: check_webhook_refuses_forgeries()),
+    ("a call still ends in a booking",
+     lambda args: check_a_call_still_ends_in_a_booking(os.environ.get("RETELL_WEBHOOK_SECRET"))),
 )
 
 

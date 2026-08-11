@@ -35,4 +35,9 @@ jobs:
         run: echo "sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Probe
+        env:
+          # Lets the monitor sign a webhook, which is the only way to exercise a
+          # real booking. Without it the booking check FAILS rather than skipping:
+          # every other check can pass while the thing customers pay for is broken.
+          RETELL_WEBHOOK_SECRET: ${{ secrets.RETELL_WEBHOOK_SECRET }}
         run: python scripts/monitor_production.py --expect-sha "${{ steps.expected.outputs.sha }}"
