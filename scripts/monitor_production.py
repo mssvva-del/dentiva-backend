@@ -102,6 +102,14 @@ def check_detailed(expect_sha: str | None) -> str:
             "rolled back or one never landed; everything merged since is not in "
             "front of a patient."
         )
+    if body.get("pms_credentials_ambiguous"):
+        raise Failure(
+            "more than one clinic has a PMS while the environment's credentials "
+            "belong to no named practice. In that state the second clinic reads "
+            "the FIRST clinic's calendar, and with writes on books patients into "
+            "its chairs. Set PMS_ENV_PRACTICE_ID, or give each practice its own "
+            "credentials."
+        )
     broken = {
         kind: count
         for kind, count in (body.get("alerts", {}).get("by_kind") or {}).items()

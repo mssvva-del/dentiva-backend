@@ -45,9 +45,33 @@ def _nexhealth_configured() -> bool:
     )
 
 
+def _env_credentials_are_for(practice: Practice) -> bool:
+    """May this practice use the credentials in the environment?
+
+    NEXHEALTH_* and KOLLA_* name ONE clinic's location or linked account. They
+    used to apply to any practice that had picked a PMS, so the second clinic to
+    finish onboarding would have had its agent read the FIRST clinic's openings
+    aloud and, with writes enabled, book its patients into the first clinic's
+    chairs. Nothing would have errored — the two clinics would simply have been
+    one clinic.
+
+    Binding them to a named practice makes that impossible to reach by accident.
+    An unset id keeps a single-clinic deployment working, which is every
+    deployment today, and stops being enough the moment a second practice picks
+    a PMS — handled by the caller, which can count.
+    """
+    named = (get_settings().pms_env_practice_id or "").strip()
+    return not named or named == str(practice.id)
+
+
 def bridge_name(practice: Practice) -> str | None:
     """"kolla", "nexhealth", or None when nothing can answer for this practice."""
     if (practice.pms_system or "").strip().lower() in _NO_PMS:
+        return None
+    if not _env_credentials_are_for(practice):
+        # Another clinic's credentials are the only ones here. No PMS is the
+        # correct answer: the agent falls back to our own book, which is honest,
+        # rather than reading somebody else's calendar, which is not.
         return None
     if _kolla_configured():
         return "kolla"

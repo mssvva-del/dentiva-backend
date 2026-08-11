@@ -276,6 +276,20 @@ class Settings(BaseSettings):
     # turned this on deliberately.
     pms_write_enabled: bool = False
 
+    # Which practice the PMS credentials in this environment belong to.
+    #
+    # NEXHEALTH_* and KOLLA_* name ONE clinic's location or linked account. They
+    # were applied to any practice that had picked a PMS, so the second clinic to
+    # finish onboarding would have had its agent read the FIRST clinic's open
+    # slots aloud, and — with writes on — put its patients in the first clinic's
+    # chairs. Nothing would have failed; both clinics would simply have been the
+    # same clinic.
+    #
+    # So the environment's credentials are bound to one practice id, explicitly.
+    # Any other practice needs its own, or gets no PMS at all — which degrades to
+    # our own book, and is the safe half of being wrong.
+    pms_env_practice_id: str = ""
+
     # CORS — comma-separated list of EXACT allowed origins (no wildcards). The
     # browser sends credentials, so wildcards are unsafe and disallowed by the
     # CORS spec anyway. Defaults to local dev; set CORS_ALLOWED_ORIGINS in prod
