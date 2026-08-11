@@ -25,6 +25,20 @@ _APP = "postgresql://dentiva_app:secret@db:5432/dentiva"
 _OWNER = "postgresql://postgres:secret@db:5432/dentiva"
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_database_urls(monkeypatch):
+    """Build settings from the arguments alone.
+
+    pydantic-settings reads os.environ whether or not _env_file is None, and CI
+    exports DATABASE_URL_SYNC for its own Postgres. Without this the explicit
+    branch wins, every case collapses to the CI connection, and the test asserts
+    nothing about the code — it passed locally and failed in CI for exactly that
+    reason.
+    """
+    for name in ("DATABASE_URL", "DATABASE_URL_SYNC", "DATABASE_URL_PLATFORM"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _settings(**env) -> Settings:
     return Settings(_env_file=None, **env)
 
