@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -25,6 +25,41 @@ _settings = get_settings()
 
 engine = create_async_engine(_settings.database_url, echo=False, pool_pre_ping=True)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+
+def _clear_tenant_on_checkout(dbapi_connection, connection_record, connection_proxy):
+    """Hand out a connection with no tenant bound to it. Ever.
+
+    set_tenant sets the GUC at SESSION scope, deliberately, because a handler
+    commits partway through and transaction scope would lose the binding. The
+    cost of that choice is that the value outlives the request: PostgreSQL undoes
+    a SET when its transaction rolls back, and the pool's default reset IS a
+    rollback — so the binding vanishes on the paths that roll back and SURVIVES
+    on the paths that commit, which is every handler we have.
+
+    Then the connection goes back in the pool carrying the last clinic it served.
+    Any query that reaches an RLS table without calling set_tenant first — a new
+    code path, an early return, a helper called before the tenant is resolved —
+    does not fail closed. It reads as whoever held that connection last.
+
+    The test suite cannot see this. conftest uses NullPool, so every test gets a
+    fresh connection where a forgotten set_tenant leaves the GUC empty, RLS
+    matches nothing, and the omission looks harmless. Production pools. The two
+    environments differ exactly on the mechanism that decides whether the bug is
+    invisible or catastrophic.
+
+    Clearing on CHECKOUT rather than on return is not a stylistic choice: the
+    "reset" event's own SQL is undone by the rollback that follows it. Verified
+    both ways against a real pooled engine before this was written.
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SELECT set_config('app.current_practice_id', '', false)")
+    finally:
+        cursor.close()
+
+
+event.listens_for(engine.sync_engine, "checkout")(_clear_tenant_on_checkout)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The PLATFORM connection — the deliberate hole in tenant isolation.
@@ -50,6 +85,13 @@ platform_engine = (
     else create_async_engine(_platform_url, echo=False, pool_pre_ping=True)
 )
 platform_session_factory = async_sessionmaker(platform_engine, expire_on_commit=False)
+
+# The platform role may bypass RLS, so a stale GUC on its connections changes
+# nothing about what it can read. It gets the same hook anyway: the two engines
+# are the SAME object whenever the URLs match, and a rule with an exception is a
+# rule someone removes the wrong half of later.
+if platform_engine is not engine:
+    event.listens_for(platform_engine.sync_engine, "checkout")(_clear_tenant_on_checkout)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
