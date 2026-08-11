@@ -59,6 +59,7 @@ def _configured(monkeypatch, **overrides):
         "nexhealth_api_key": "k", "nexhealth_subdomain": "sub",
         "nexhealth_location_id": "1",
         "kolla_api_key": "", "kolla_consumer_id": "", "kolla_connector_id": "",
+        "pms_env_practice_id": "",
         **overrides,
     })()
     monkeypatch.setattr(bridge, "get_settings", lambda: settings)
@@ -286,3 +287,56 @@ async def test_the_pms_is_asked_for_the_length_of_the_procedure_requested(monkey
         now=datetime(2026, 8, 3, 9, 0, tzinfo=UTC), client=pms,
     )
     assert pms.calls[0]["slot_length"] == 90
+
+
+# ---------------------------------------------------------------------------
+# NEXHEALTH_* and KOLLA_* name ONE clinic's location or linked account. They were
+# applied to any practice that had picked a PMS — so the second clinic to finish
+# onboarding would have had its agent read the FIRST clinic's openings aloud and,
+# with writes enabled, book its patients into the first clinic's chairs.
+#
+# Nothing would have errored. The two clinics would simply have been one clinic.
+# ---------------------------------------------------------------------------
+
+
+def _practice_with_id(practice_id):
+    practice = _practice()
+    practice.id = practice_id
+    return practice
+
+
+def test_the_environments_credentials_serve_only_the_practice_they_name(monkeypatch):
+    import uuid
+
+    from app.adapters.bridge import bridge_name
+
+    mine = uuid.uuid4()
+    theirs = uuid.uuid4()
+    _configured(monkeypatch, pms_env_practice_id=str(mine))
+
+    assert bridge_name(_practice_with_id(mine)) == "nexhealth"
+    assert bridge_name(_practice_with_id(theirs)) is None, (
+        "a second clinic was handed the first clinic's PMS location"
+    )
+
+
+def test_an_unnamed_practice_id_still_serves_a_single_clinic(monkeypatch):
+    """Every deployment today has one clinic, and making them all set a variable
+    to keep working would be a migration disguised as a safety feature."""
+    import uuid
+
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch, pms_env_practice_id="")
+    assert bridge_name(_practice_with_id(uuid.uuid4())) == "nexhealth"
+
+
+def test_the_wrong_clinic_gets_no_pms_rather_than_someone_elses(monkeypatch):
+    """No PMS degrades to our own book, which is honest. Reading somebody else's
+    calendar is not, and both look identical to the caller on the phone."""
+    import uuid
+
+    from app.adapters.bridge import pms_client_for
+
+    _configured(monkeypatch, pms_env_practice_id=str(uuid.uuid4()))
+    assert pms_client_for(_practice_with_id(uuid.uuid4())) is None

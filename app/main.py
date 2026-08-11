@@ -256,6 +256,26 @@ async def health_detailed() -> JSONResponse:
     except Exception:  # noqa: BLE001
         db_ok = False
 
+    # Cheap and worth it: one count, and it names the only configuration in
+    # which two practices share a PMS location.
+    pms_ambiguous = False
+    if not settings.pms_env_practice_id:
+        try:
+            from sqlalchemy import func as _func
+            from sqlalchemy import select as _sa_select_
+
+            from app.models.practice import Practice as _Practice
+
+            async with app_db.platform_session_factory() as session:
+                with_pms = (await session.execute(
+                    _sa_select_(_func.count()).select_from(_Practice).where(
+                        _Practice.pms_system.notin_(("", "none", "mock", "other"))
+                    )
+                )).scalar_one()
+            pms_ambiguous = with_pms > 1
+        except Exception:  # noqa: BLE001 — a health check must not fail on a count
+            pms_ambiguous = False
+
     alerts = recent_alerts()
     body = {
         "status": "ok" if (db_ok and alerts["count_last_hour"] == 0) else "degraded",
@@ -278,6 +298,12 @@ async def health_detailed() -> JSONResponse:
         # answerable from outside the box. Booleans only — never a value, never a
         # prefix. Each one is a whole feature that is silently inert without it:
         # nobody can subscribe, no reactivation call dials, no PMS is reachable.
+        # More than one clinic with a PMS while the environment's credentials
+        # belong to no named practice. That is the state where two clinics
+        # quietly become one: the second reads the first's calendar. Reported
+        # rather than logged, because the external monitor can see this and a log
+        # line cannot page anyone.
+        "pms_credentials_ambiguous": pms_ambiguous,
         "capabilities": {
             "take_payment": bool(
                 settings.stripe_secret_key and settings.stripe_price_growth_monthly
