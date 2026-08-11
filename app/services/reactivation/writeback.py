@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.kolla.client import KollaError, KollaUnavailable
 from app.adapters.nexhealth.client import NexHealthError, NexHealthUnavailable
+from app.config import get_settings
 from app.db import set_tenant
 from app.models.booking import Booking
 from app.models.practice import Practice
@@ -87,6 +88,12 @@ async def write_back_booking(
     """Write a confirmed booking back to the PMS. See module docstring for status
     values. Sets ``booking.pms_external_id`` only on success."""
     await set_tenant(session, practice_id)
+    if client is None and not get_settings().pms_write_enabled:
+        # Read-only until somebody has compared the two calendars by eye. The
+        # booking still exists in our book and the patient still has it; what is
+        # withheld is touching the clinic's own schedule before we have seen the
+        # integration behave.
+        return "write_disabled"
     if client is None:
         from app.adapters.bridge import pms_client_for
 
@@ -164,6 +171,8 @@ async def cancel_in_pms(
     await set_tenant(session, practice_id)
     if not booking.pms_external_id:
         return "no_pms_record"
+    if client is None and not get_settings().pms_write_enabled:
+        return "write_disabled"
     client = await _bridge_for(session, practice_id, client)
     if client is None:
         return "no_pms"
@@ -195,6 +204,8 @@ async def move_in_pms(
     await set_tenant(session, practice_id)
     if not booking.pms_external_id:
         return "no_pms_record"
+    if client is None and not get_settings().pms_write_enabled:
+        return "write_disabled"
     client = await _bridge_for(session, practice_id, client)
     if client is None:
         return "no_pms"

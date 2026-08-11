@@ -262,6 +262,20 @@ class Settings(BaseSettings):
     # person running SQL against production.
     canary_practice_enabled: bool = False
 
+    # May we write into a clinic's own calendar yet?
+    #
+    # Reading and writing are separate risks and should be separate decisions.
+    # Reading a practice's schedule is invisible to them; creating, moving or
+    # cancelling an appointment in it is not — a wrong write is a patient shown
+    # a time the clinic cannot honour, or a chair held empty, and the front desk
+    # finds out before we do.
+    #
+    # So a new clinic connects read-only. The agent offers the practice's real
+    # openings immediately, which is most of the value, while every write stays
+    # in our own book until somebody has compared the two calendars by eye and
+    # turned this on deliberately.
+    pms_write_enabled: bool = False
+
     # CORS — comma-separated list of EXACT allowed origins (no wildcards). The
     # browser sends credentials, so wildcards are unsafe and disallowed by the
     # CORS spec anyway. Defaults to local dev; set CORS_ALLOWED_ORIGINS in prod

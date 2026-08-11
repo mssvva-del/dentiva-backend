@@ -843,6 +843,14 @@ async def test_cancelling_reaches_the_clinics_calendar(client, db_session, monke
         writeback, "_bridge_for",
         lambda session, practice_id, client=None: _returns(_Client()),
     )
+    # Writes are off by default now — a clinic connects read-only until somebody
+    # has compared the two calendars. This test is about the cancellation
+    # reaching the PMS at all, so it turns them on rather than asserting the
+    # switch it is not about.
+    monkeypatch.setattr(
+        writeback, "get_settings",
+        lambda: type("S", (), {"pms_write_enabled": True})(),
+    )
 
     r = await client.post("/webhooks/retell", json={
         "event": "function_call", "call_id": "pms-c1",
