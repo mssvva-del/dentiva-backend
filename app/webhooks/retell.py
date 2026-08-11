@@ -916,6 +916,43 @@ async def _handle_call_analyzed(payload: dict) -> dict:
 
 
 
+async def _sync_booking_change_to_pms(booking_id, practice_id, action: str) -> None:
+    """Carry a cancellation or a move into the clinic's own calendar. Never raises.
+
+    Both used to stop at our database. A cancellation that only happens here is
+    the loss this product is sold to prevent, inverted: the patient is gone, the
+    front desk still sees them booked, and the hour stays blocked against
+    everyone else. A move is worse — the clinic holds the old time and knows
+    nothing of the new one, so one call produces two wrong entries.
+
+    Runs AFTER our side is committed, so the two can only disagree in the
+    direction the front desk can see and fix.
+    """
+    from app.services.reactivation.writeback import cancel_in_pms, move_in_pms
+
+    try:
+        async with _app_db.async_session_factory() as session:
+            await set_tenant(session, practice_id)
+            booking = (await session.execute(
+                select(Booking).where(Booking.id == booking_id)
+            )).scalar_one_or_none()
+            if booking is None:
+                return
+            fn = cancel_in_pms if action == "cancel" else move_in_pms
+            status = await fn(session, practice_id, booking)
+    except Exception:  # noqa: BLE001 — a PMS problem is never worth a 500 mid-call
+        logger.exception("PMS %s crashed for booking %s", action, booking_id)
+        record_alert(f"pms_{action}_crashed", f"booking={booking_id}")
+        return
+
+    # no_pms: this clinic has no calendar but ours. no_pms_record: the booking
+    # never reached the PMS, so there is nothing there to change. Neither is a
+    # failure, and alerting on them would bury the two that are.
+    if status not in ("cancelled", "moved", "no_pms", "no_pms_record"):
+        record_alert(f"pms_{action}_{status}", f"booking={booking_id}")
+    logger.info("PMS %s %s for booking %s", action, status, booking_id)
+
+
 async def _write_booking_to_pms(
     practice_id, booking_id, patient_pms_id: str, provider_id: str, operatory_id
 ) -> None:
@@ -1408,6 +1445,7 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
         practice_name = (practice_obj.name if practice_obj else None) or "our office"
         first_name = patient.first_name
         patient_opted_out = patient.sms_opt_out
+        patient_language = patient.preferred_language
 
         session.add(
             AuditLog(
@@ -1425,12 +1463,21 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
             )
         )
         await session.commit()
+        # The DATE WE STORED, not the one that was asked for. compute_native_slots
+        # treats preferred_date as a starting point and scans forward two weeks,
+        # so when the requested day is full, chosen is a later one. Telling the
+        # patient "Friday" while the booking says Monday sends them to a clinic
+        # that is not expecting them, and the clinic blames the AI. book_
+        # appointment was fixed for exactly this; reschedule was not.
+        new_date = chosen.date
         new_time = chosen.time
         new_provider = chosen.provider
+        booking_id_for_pms = booking.id
 
     logger.info(
         "reschedule_appointment: call=%s moved to %s %s", retell_call_id, new_date, new_time
     )
+    await _sync_booking_change_to_pms(booking_id_for_pms, practice_id, "move")
     _fire_sms(send_booking_confirmation(
         to=phone,
         practice_name=practice_name,
@@ -1439,6 +1486,10 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
         time=new_time,
         provider=new_provider,
         opted_out=patient_opted_out,
+        # book_appointment passes this and reschedule did not, so a patient whose
+        # record says Spanish got the move in English — from the same agent that
+        # had just spoken Spanish to them.
+        language=patient_language,
     ))
 
     return {
@@ -1508,6 +1559,10 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
         cancelled_date = booking.appointment_at.date().isoformat()
         cancelled_time = booking.appointment_at.strftime("%H:%M")
         booking.status = CANCELLED
+        # Captured before the session closes: the PMS call runs on its own
+        # session afterwards, and touching an expired instance there would fail
+        # in a way that reads as a PMS problem.
+        booking_id_for_pms = booking.id
 
         practice_name = (
             await session.execute(
@@ -1555,6 +1610,7 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
         cancelled_date,
         cancelled_time,
     )
+    await _sync_booking_change_to_pms(booking_id_for_pms, practice_id, "cancel")
     _fire_sms(send_cancellation_notice(
         to=phone,
         practice_name=practice_name,
