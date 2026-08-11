@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
+from app.db import set_tenant
 from app.models.call import Call
 from tests.conftest import seed_practice
 
@@ -126,3 +127,46 @@ async def test_one_clinic_still_answers_a_number_nobody_configured(client, db_se
     assert (await db_session.execute(
         select(Call.practice_id).where(Call.retell_call_id == "route-4")
     )).scalar_one() == practice_id
+
+
+async def test_the_waitlist_works_when_a_second_clinic_exists(client, db_session):
+    """join_waitlist read the calls row before binding a tenant.
+
+    calls is RLS-protected and the policy matches nothing when no tenant is set,
+    so the row came back empty every time and the handler fell through to
+    guessing the practice — which is correct only while exactly one exists. With
+    two, the caller heard "I'm having trouble accessing our system" and no
+    waitlist entry was written, so the clinic never learned that someone wanted
+    an appointment it could not offer.
+
+    It looked fine for two reasons at once: the single-practice fallback, and a
+    pooled connection sometimes still carrying the previous request's tenant.
+    """
+    from sqlalchemy import func
+
+    from app.models.waitlist_entry import WaitlistEntry
+
+    _, second_id = await _two_clinics(db_session)
+
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "wl-1",
+        "call": {"agent_id": "agent_shared", "from_number": "+15551112222",
+                 "to_number": _DIALLED, "start_timestamp": 1748563200000},
+    })
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "wl-1",
+        "function_name": "join_waitlist",
+        "args": {"patient_first_name": "Nina", "patient_last_name": "Cruz",
+                 "patient_phone": "+15553334444", "procedure": "cleaning",
+                 "preferred_date": "2099-12-01", "preferred_time_window": "morning"},
+    })
+    assert r.json().get("added") is True, r.json()
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, second_id)
+    count = (await db_session.execute(
+        select(func.count()).select_from(WaitlistEntry)
+        .where(WaitlistEntry.practice_id == second_id)
+    )).scalar_one()
+    assert count == 1, "the waitlist entry was never written"
