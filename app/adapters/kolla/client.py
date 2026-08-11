@@ -53,6 +53,12 @@ def _hhmm(value: str) -> time | None:
         return None
 
 
+def _appointment_name(appointment_id: str) -> str:
+    """Kolla addresses appointments as "appointments/{id}". Accept either form so
+    an id stored before that was true still resolves."""
+    return appointment_id if "/" in appointment_id else f"appointments/{appointment_id}"
+
+
 def _iso(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -290,10 +296,52 @@ class KollaClient:
             body["providers"] = [{"name": provider_id}]
 
         payload = await self._request("POST", "/appointments", json=body)
-        appointment_id = payload.get("remote_id") or payload.get("name") or ""
+        # Store Kolla's own resource name, not remote_id. remote_id is the id
+        # inside Eaglesoft, which reads well in a log and cannot be used to
+        # address anything here: cancel and move both take "appointments/{id}".
+        # Preferring remote_id would have made every appointment we create
+        # impossible to cancel afterwards, discovered the first time a patient
+        # called back to cancel one.
+        appointment_id = payload.get("name") or payload.get("remote_id") or ""
         if not appointment_id:
             raise KollaError("Kolla created an appointment with no id we can store")
         return PmsAppointment(
             appointment_id=str(appointment_id),
             start_time=str(payload.get("start_time") or start_time),
+        )
+
+    async def cancel_appointment(
+        self, appointment_id: str, *, canceler: str | None = None
+    ) -> None:
+        """Free the chair in the clinic's calendar.
+
+        Kolla marks the appointment broken in the source system rather than
+        deleting it, which is what a practice wants: the slot reopens and the
+        history survives.
+
+        A cancellation that only happens in our database is the exact revenue
+        loss this product is sold to prevent — the patient is gone, the front
+        desk still sees them booked, and the hour stays blocked.
+        """
+        name = _appointment_name(appointment_id)
+        body: dict = {"name": name}
+        if canceler:
+            body["canceler"] = {"name": canceler}
+        await self._request("POST", f"/{name}:cancel", json=body)
+
+    async def move_appointment(
+        self, appointment_id: str, *, start_time: str, end_time: str
+    ) -> None:
+        """Move it, rather than cancelling and rebooking.
+
+        Cancel-then-create would lose the appointment's history and, worse, can
+        leave the patient with nothing at all if the second call fails — the
+        clinic's calendar would show a hole and our database a confirmation.
+        """
+        name = _appointment_name(appointment_id)
+        await self._request(
+            "PATCH",
+            f"/{name}",
+            params={"update_mask": "start_time,end_time"},
+            json={"start_time": start_time, "end_time": end_time},
         )

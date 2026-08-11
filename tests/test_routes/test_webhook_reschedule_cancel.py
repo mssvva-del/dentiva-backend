@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 
 from app.db import set_tenant
@@ -787,3 +788,197 @@ async def test_a_lone_patient_on_their_number_is_untouched(client, db_session):
                  "reason": "can't make it"},
     })
     assert r.json()["cancelled"] is True
+
+
+# ---------------------------------------------------------------------------
+# The clinic's own calendar. Cancel and move stopped at our database, so the
+# front desk kept seeing a patient who had cancelled, and after a move held the
+# old time while knowing nothing of the new one — one call, two wrong entries.
+# ---------------------------------------------------------------------------
+
+
+async def _booked_with_a_pms_record(db_session, practice_id, when):
+    from app.models.patient import Patient
+    from app.utils.crypto import phone_hmac
+
+    phone = "+15554443333"
+    patient = Patient(
+        id=uuid.uuid4(), practice_id=practice_id, pms_external_id="EXT-PMS",
+        first_name="Dana", last_name="Reed", phone=phone, phone_hmac=phone_hmac(phone),
+        date_of_birth="1990-01-01",
+    )
+    db_session.add(patient)
+    await db_session.flush()
+    booking = Booking(
+        id=uuid.uuid4(), practice_id=practice_id, patient_id=patient.id,
+        appointment_at=when, status="confirmed", procedure_type="cleaning",
+        provider_name="Dr. Smith", source="ai_call",
+        pms_external_id="appointments/77",
+    )
+    db_session.add(booking)
+    await db_session.commit()
+    return phone, booking.id
+
+
+async def test_cancelling_reaches_the_clinics_calendar(client, db_session, monkeypatch):
+    """Without this the chair stays blocked: the patient is gone and the front
+    desk still has them booked, which is the revenue loss this product is sold
+    to prevent, running backwards."""
+    from app.services.reactivation import writeback
+
+    practice, _ = await seed_practice(
+        db_session, name="PMS Cancel", clerk_org_id="org_pc1", clerk_user_id="user_pc1"
+    )
+    phone, _ = await _booked_with_a_pms_record(
+        db_session, practice.id, datetime.now(tz=UTC) + timedelta(days=3)
+    )
+
+    cancelled: list[str] = []
+
+    class _Client:
+        async def cancel_appointment(self, appointment_id, **kwargs):
+            cancelled.append(appointment_id)
+
+    monkeypatch.setattr(
+        writeback, "_bridge_for",
+        lambda session, practice_id, client=None: _returns(_Client()),
+    )
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "pms-c1",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": phone, "patient_dob": "1990-01-01",
+                 "reason": "can't make it"},
+    })
+    assert r.json()["cancelled"] is True
+    assert cancelled == ["appointments/77"]
+
+
+async def test_a_booking_that_never_reached_the_pms_is_not_an_error(
+    client, db_session, monkeypatch
+):
+    """Most bookings today have no PMS record at all. Treating that as a failed
+    cancellation would alert on nearly every call and bury the ones that matter."""
+    from app.services.reactivation import writeback
+
+    practice, _ = await seed_practice(
+        db_session, name="PMS Cancel 2", clerk_org_id="org_pc2", clerk_user_id="user_pc2"
+    )
+    practice_id = practice.id
+    phone, booking_id = await _booked_with_a_pms_record(
+        db_session, practice_id, datetime.now(tz=UTC) + timedelta(days=3)
+    )
+    await db_session.execute(
+        Booking.__table__.update().where(Booking.id == booking_id)
+        .values(pms_external_id=None)
+    )
+    await db_session.commit()
+
+    called: list[str] = []
+
+    class _Client:
+        async def cancel_appointment(self, appointment_id, **kwargs):
+            called.append(appointment_id)
+
+    monkeypatch.setattr(
+        writeback, "_bridge_for",
+        lambda session, practice_id, client=None: _returns(_Client()),
+    )
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "pms-c2",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": phone, "patient_dob": "1990-01-01"},
+    })
+    assert r.json()["cancelled"] is True
+    assert called == [], "asked the PMS to cancel something it never had"
+
+
+async def test_a_pms_that_refuses_the_cancel_does_not_undo_ours(
+    client, db_session, monkeypatch
+):
+    """The patient has been told it is cancelled and the waitlist has already
+    been offered the slot. Rolling our side back to match the PMS would be a
+    second wrong answer, not a correction."""
+    from app.adapters.kolla.client import KollaError
+    from app.services.reactivation import writeback
+
+    practice, _ = await seed_practice(
+        db_session, name="PMS Cancel 3", clerk_org_id="org_pc3", clerk_user_id="user_pc3"
+    )
+    practice_id = practice.id
+    phone, booking_id = await _booked_with_a_pms_record(
+        db_session, practice_id, datetime.now(tz=UTC) + timedelta(days=3)
+    )
+
+    class _Client:
+        async def cancel_appointment(self, appointment_id, **kwargs):
+            raise KollaError("the PMS said no")
+
+    monkeypatch.setattr(
+        writeback, "_bridge_for",
+        lambda session, practice_id, client=None: _returns(_Client()),
+    )
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "pms-c3",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": phone, "patient_dob": "1990-01-01"},
+    })
+    assert r.json()["cancelled"] is True
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    assert (await db_session.execute(
+        select(Booking.status).where(Booking.id == booking_id)
+    )).scalar_one() == "cancelled"
+
+
+async def _returns(value):
+    return value
+
+
+async def test_the_patient_is_told_the_date_that_was_actually_booked(
+    client, db_session
+):
+    """compute_native_slots treats the requested date as a STARTING POINT and
+    scans forward two weeks. Ask for a day the clinic is closed and the move
+    lands later — while the agent said, and the text confirmed, the day that was
+    asked for.
+
+    The patient then arrives at a practice that is not expecting them, and the
+    clinic blames the AI. book_appointment was fixed for exactly this; reschedule
+    kept speaking the request.
+    """
+    practice, _ = await seed_practice(
+        db_session, name="Spoken Date", clerk_org_id="org_sd1", clerk_user_id="user_sd1"
+    )
+    practice_id = practice.id
+    phone, booking_id = await _booked_with_a_pms_record(
+        db_session, practice_id, datetime.now(tz=UTC) + timedelta(days=2)
+    )
+
+    # A Sunday. seed_practice opens Monday to Friday, so nothing is free that day.
+    a_sunday = "2099-11-15"
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "spoken-1",
+        "function_name": "reschedule_appointment",
+        "args": {"patient_phone": phone, "patient_dob": "1990-01-01",
+                 "new_date": a_sunday},
+    })
+    body = r.json()
+    if not body.get("rescheduled"):
+        pytest.skip("no slot offered at all — a different branch, covered elsewhere")
+
+    spoken = body["appointment"]["date"]
+    assert spoken != a_sunday, "told the patient a day the clinic is closed"
+
+    await db_session.commit()
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    stored = (await db_session.execute(
+        select(Booking.appointment_at).where(Booking.id == booking_id)
+    )).scalar_one()
+    assert stored.date().isoformat() == spoken, "spoken date and stored date differ"
+    assert spoken in body["message"], "the sentence and the record disagree"

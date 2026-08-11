@@ -169,6 +169,25 @@ class NexHealthClient(ReactivationSource):
             )
         return await _once()
 
+    async def _patch(self, path: str, body: dict) -> httpx.Response:
+        """Authenticated PATCH. Single-shot for the same reason as _post: a
+        retried write is a write we cannot prove happened only once."""
+        if self._token is None:
+            self._token = await self._fetch_token()
+        scoped = {"subdomain": self._subdomain, "location_id": self._location_id}
+        headers = {"Authorization": f"Bearer {self._token}", **_BASE_HEADERS}
+        async with await self._client() as client:
+            try:
+                resp = await client.patch(path, params=scoped, json=body, headers=headers)
+            except httpx.HTTPError as exc:
+                raise NexHealthUnavailable(str(exc)) from exc
+        if resp.status_code in (401, 500, 502, 503, 504):
+            self._token = None if resp.status_code == 401 else self._token
+            raise NexHealthUnavailable(f"NexHealth {resp.status_code} on PATCH {path}")
+        if resp.status_code >= 400:
+            raise NexHealthError(f"NexHealth {resp.status_code} on PATCH {path}")
+        return resp
+
     async def _post(self, path: str, body: dict) -> httpx.Response:
         """Authenticated POST. SINGLE-SHOT — never auto-retried: a retried create
         could double-book the patient (the caller decides any fallback)."""
@@ -393,3 +412,35 @@ class NexHealthClient(ReactivationSource):
         except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
             logger.warning("last_visit enrichment skipped: %s", type(exc).__name__)
         return out
+
+    async def cancel_appointment(
+        self, appointment_id: str, *, canceler: str | None = None  # noqa: ARG002
+    ) -> None:
+        """Free the chair in the clinic's calendar.
+
+        UNVERIFIED against the sandbox: our NexHealth key does not authenticate
+        yet, so this shape comes from their reference rather than a response we
+        have seen. The Kolla path is the one our first customer uses; this exists
+        so a NexHealth practice is not silently worse off, and it is marked
+        because a shape nobody has run is a guess with good manners.
+
+        ``canceler`` is accepted and ignored — Kolla records who cancelled, and
+        the two clients take the same call so the caller never branches on which
+        bridge it holds.
+        """
+        await self._patch(
+            f"/appointments/{appointment_id}", {"appt": {"cancelled": True}}
+        )
+
+    async def move_appointment(
+        self, appointment_id: str, *, start_time: str, end_time: str | None = None  # noqa: ARG002
+    ) -> None:
+        """Move it rather than cancelling and rebooking, so the appointment keeps
+        its history and a failure cannot leave the patient with nothing.
+
+        UNVERIFIED — see cancel_appointment. ``end_time`` is ignored: NexHealth
+        derives the end from the appointment type.
+        """
+        await self._patch(
+            f"/appointments/{appointment_id}", {"appt": {"start_time": start_time}}
+        )

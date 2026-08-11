@@ -222,7 +222,11 @@ async def test_writing_an_appointment_sends_the_shape_kolla_documents():
     # A bare patient id is normalised — Kolla addresses patients by resource name.
     assert sent["contact_id"] == "contacts/123"
     assert sent["operatory"] == _ROOM
-    assert created.appointment_id == "ES-77"
+    # Kolla's own resource name, NOT remote_id. remote_id is the id inside
+    # Eaglesoft: it reads well in a log and addresses nothing here. Storing it
+    # would have made every appointment we create impossible to cancel or move
+    # afterwards, found the first time a patient rang back to cancel one.
+    assert created.appointment_id == "appointments/77"
 
 
 async def test_a_write_with_no_usable_id_is_a_failure():
@@ -234,3 +238,42 @@ async def test_a_write_with_no_usable_id_is_a_failure():
             patient_pms_id="1", start_time="2026-09-01T09:00:00Z",
             end_time="2026-09-01T10:00:00Z",
         )
+
+
+async def test_cancelling_and_moving_address_the_appointment_by_name():
+    """Both take "appointments/{id}", and both accept a bare id so anything
+    stored before that was true still resolves."""
+    seen: list[tuple[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json={"name": "appointments/77", "cancelled": True})
+
+    client = KollaClient(api_key="k", consumer_id="consumers/1",
+                         transport=httpx.MockTransport(handle))
+    await client.cancel_appointment("appointments/77")
+    await client.move_appointment(
+        "77", start_time="2026-09-02T09:00:00Z", end_time="2026-09-02T10:00:00Z"
+    )
+    assert seen[0] == ("POST", "/dental/v1/appointments/77:cancel")
+    assert seen[1] == ("PATCH", "/dental/v1/appointments/77")
+
+
+async def test_a_move_names_the_fields_it_changes():
+    """Without update_mask, Kolla applies every field in the body — and a body
+    carrying only the times would blank whatever it omitted."""
+    seen: dict = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["query"] = str(request.url.query)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"name": "appointments/77"})
+
+    client = KollaClient(api_key="k", consumer_id="consumers/1",
+                         transport=httpx.MockTransport(handle))
+    await client.move_appointment(
+        "appointments/77",
+        start_time="2026-09-02T09:00:00Z", end_time="2026-09-02T10:00:00Z",
+    )
+    assert "update_mask=start_time%2Cend_time" in seen["query"]
+    assert set(seen["body"]) == {"start_time", "end_time"}

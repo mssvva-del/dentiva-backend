@@ -136,3 +136,80 @@ async def write_back_booking(
     except _PMS_REJECTED:
         logger.warning("write-back failed (PMS 4xx) for booking %s", booking.id)
         return "pms_error"
+
+
+async def _bridge_for(session, practice_id: uuid.UUID, client=None):
+    if client is not None:
+        return client
+    from app.adapters.bridge import pms_client_for
+
+    practice = (await session.execute(
+        select(Practice).where(Practice.id == practice_id)
+    )).scalar_one_or_none()
+    return pms_client_for(practice) if practice else None
+
+
+async def cancel_in_pms(
+    session: AsyncSession, practice_id: uuid.UUID, booking: Booking, *, client=None
+) -> str:
+    """Free the chair in the clinic's own calendar.
+
+    A cancellation that happens only in our database is the exact loss this
+    product is sold to prevent, inverted: the patient is gone, the front desk
+    still sees them booked, and the hour stays blocked against everyone else.
+
+    A booking with no pms_external_id never reached the PMS in the first place —
+    there is nothing to cancel and that is not a failure.
+    """
+    await set_tenant(session, practice_id)
+    if not booking.pms_external_id:
+        return "no_pms_record"
+    client = await _bridge_for(session, practice_id, client)
+    if client is None:
+        return "no_pms"
+    try:
+        await client.cancel_appointment(booking.pms_external_id)
+    except _PMS_UNAVAILABLE:
+        logger.warning("cancel deferred (PMS unavailable) for booking %s", booking.id)
+        return "pms_unavailable"
+    except _PMS_REJECTED:
+        logger.warning("cancel rejected by PMS for booking %s", booking.id)
+        return "pms_error"
+    return "cancelled"
+
+
+async def move_in_pms(
+    session: AsyncSession, practice_id: uuid.UUID, booking: Booking, *, client=None
+) -> str:
+    """Move the appointment in the clinic's calendar to where we just put it.
+
+    Moved rather than cancelled-and-recreated: the appointment keeps its history,
+    and a failure halfway through cannot leave the patient with nothing at all —
+    a hole in the clinic's calendar and a confirmation in ours is worse than
+    either failure alone.
+
+    Call this AFTER the new time is committed on our side, so the two can only
+    disagree in the direction where the clinic still holds the old slot — visible
+    to the front desk, rather than a patient with no appointment anywhere.
+    """
+    await set_tenant(session, practice_id)
+    if not booking.pms_external_id:
+        return "no_pms_record"
+    client = await _bridge_for(session, practice_id, client)
+    if client is None:
+        return "no_pms"
+    start = booking.appointment_at.isoformat()
+    end = (
+        booking.appointment_at + timedelta(minutes=booking.duration_minutes or 60)
+    ).isoformat()
+    try:
+        await client.move_appointment(
+            booking.pms_external_id, start_time=start, end_time=end
+        )
+    except _PMS_UNAVAILABLE:
+        logger.warning("move deferred (PMS unavailable) for booking %s", booking.id)
+        return "pms_unavailable"
+    except _PMS_REJECTED:
+        logger.warning("move rejected by PMS for booking %s", booking.id)
+        return "pms_error"
+    return "moved"
