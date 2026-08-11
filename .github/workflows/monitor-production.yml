@@ -1,0 +1,38 @@
+# Is production still the thing we think it is?
+#
+# Runs here rather than inside the app on purpose: a check living in the process
+# it is checking proves nothing when that process is what is wrong. /health has
+# answered cheerfully from a container whose deploy had rolled back a week
+# earlier — that is not a hypothetical, it cost eleven days.
+#
+# A failed run emails whoever owns this repository. That is the page.
+name: monitor-production
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Never let two runs overlap; a slow one should be replaced, not queued behind.
+concurrency:
+  group: monitor-production
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Is production running what main says it should?
+        id: expected
+        run: echo "sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Probe
+        run: python scripts/monitor_production.py --expect-sha "${{ steps.expected.outputs.sha }}"
