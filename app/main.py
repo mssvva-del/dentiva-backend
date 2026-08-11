@@ -96,6 +96,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Texts first, and BEFORE the workers are cancelled. They are detached on
+        # purpose — Twilio can take fifteen seconds and that is dead air on a live
+        # call — so at any moment a redeploy can be dropping a confirmation the
+        # caller was promised, or the page telling a clinic somebody is bleeding.
+        # Railway redeploys on every merge, so the window opens several times a
+        # day and is exactly as wide as the calls in flight.
+        from app.webhooks.retell import drain_pending_sms
+
+        with contextlib.suppress(Exception):
+            drained = await drain_pending_sms()
+            if drained:
+                logger.info("shutdown: waited for %d in-flight text(s)", drained)
+
         for task in tasks:
             task.cancel()
         for task in tasks:

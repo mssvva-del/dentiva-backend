@@ -71,6 +71,31 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 _bg_sms_tasks: set = set()
 
 
+async def drain_pending_sms(timeout: float = 10.0) -> int:
+    """Let the detached sends finish before the process goes away.
+
+    Every text this system sends is fired and forgotten, because Twilio can take
+    fifteen seconds and that is dead air on a live call. The cost is that a
+    redeploy in the middle of one drops it: the confirmation the caller was
+    promised, or the page telling a clinic that somebody is bleeding.
+
+    Railway redeploys on every merge, so this is not a rare window — it is a
+    window we open several times a day, and its size is exactly the number of
+    calls in flight.
+
+    Returns how many were still running, so shutdown can say what it waited for.
+    A timeout is deliberate: a stuck send must not hold a deploy open forever,
+    and losing one text is better than a container that will not die.
+    """
+    pending = list(_bg_sms_tasks)
+    if not pending:
+        return 0
+    done, still_running = await asyncio.wait(pending, timeout=timeout)
+    for task in still_running:
+        task.cancel()
+    return len(pending)
+
+
 def _fire_sms(coro, *, critical: str = "") -> None:
     """Send without making the caller wait. Optionally, notice when it did not.
 
