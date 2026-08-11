@@ -1693,14 +1693,28 @@ async def _handle_join_waitlist(retell_call_id: str, args: dict) -> dict:
     notes = args.get("notes")
 
     async with _app_db.async_session_factory() as session:
-        result = await session.execute(
-            select(Call).where(Call.retell_call_id == retell_call_id)
-        )
-        call = result.scalar_one_or_none()
+        # Resolve the tenant FIRST, like every other handler. This one read the
+        # calls row directly, before any set_tenant — and calls is RLS-protected,
+        # so with no tenant bound the policy matched nothing and `call` came back
+        # None every single time. The handler then fell through to guessing the
+        # practice, which works only while exactly one exists.
+        #
+        # It looked fine because of that fallback, and because a pooled
+        # connection sometimes still carried the previous request's tenant. That
+        # accident is gone now that connections are cleared on checkout, which
+        # makes this reliably broken instead of intermittently working.
+        practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
+        call = None
+        if practice_id is not None:
+            await set_tenant(session, practice_id)
+            call = (await session.execute(
+                select(Call).where(Call.retell_call_id == retell_call_id)
+            )).scalar_one_or_none()
 
         if call is not None:
-            practice_id = call.practice_id
             call_internal_id = call.id
+        elif practice_id is not None:
+            call_internal_id = None
         else:
             resolved = await _resolve_practice(None)
             if resolved is None:
