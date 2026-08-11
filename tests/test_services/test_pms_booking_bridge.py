@@ -45,12 +45,23 @@ def _practice(pms_system="open_dental") -> Practice:
 
 
 def _configured(monkeypatch, **overrides):
-    """Pretend the NexHealth adapter has credentials."""
+    """Pretend a bridge has credentials.
+
+    Choosing the bridge moved out of availability and into app.adapters.bridge —
+    the PMS a practice runs and the aggregator we reach it through are separate
+    facts, and only the second depends on credentials. Defaults here configure
+    NexHealth and leave Kolla empty, which is what these tests were written
+    against.
+    """
+    from app.adapters import bridge
+
     settings = type("S", (), {
         "nexhealth_api_key": "k", "nexhealth_subdomain": "sub",
-        "nexhealth_location_id": "1", **overrides,
+        "nexhealth_location_id": "1",
+        "kolla_api_key": "", "kolla_consumer_id": "", "kolla_connector_id": "",
+        **overrides,
     })()
-    monkeypatch.setattr(avail, "get_settings", lambda: settings)
+    monkeypatch.setattr(bridge, "get_settings", lambda: settings)
 
 
 def test_a_practice_without_a_pms_is_not_connected(monkeypatch):
@@ -183,3 +194,47 @@ def test_every_placeholder_the_prompt_uses_is_supplied_somewhere():
 
     missing = sorted(used - supplied)
     assert not missing, f"spoken to a patient as literal text: {missing}"
+
+
+
+# ---------------------------------------------------------------------------
+# Which bridge answers. Eaglesoft and Dentrix both refuse to talk to us directly
+# — Patterson wants $3–5K to join their programme, Dentrix $5,000 — so we go
+# through an aggregator, and there are two at very different prices.
+# ---------------------------------------------------------------------------
+
+
+def test_the_cheaper_bridge_wins_when_both_are_configured(monkeypatch):
+    """$19 a location against $75. With both reachable there is nothing to weigh."""
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch, kolla_api_key="k", kolla_consumer_id="consumers/1")
+    assert bridge_name(_practice("eaglesoft")) == "kolla"
+
+
+def test_the_pms_brand_does_not_pick_the_bridge(monkeypatch):
+    """A practice says "we run Eaglesoft". Both bridges reach Eaglesoft; which
+    one we pay is our decision, not theirs."""
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch)  # NexHealth only
+    for system in ("eaglesoft", "dentrix", "open_dental", "curve"):
+        assert bridge_name(_practice(system)) == "nexhealth"
+
+
+def test_no_credentials_means_no_bridge(monkeypatch):
+    """A clinic that picked a PMS in onboarding while nothing is wired up is not
+    connected. Saying otherwise fails at the worst possible moment — mid-call."""
+    from app.adapters.bridge import bridge_name, pms_client_for
+
+    _configured(monkeypatch, nexhealth_api_key="")
+    assert bridge_name(_practice("eaglesoft")) is None
+    assert pms_client_for(_practice("eaglesoft")) is None
+
+
+def test_a_practice_with_no_pms_gets_no_bridge_however_well_configured(monkeypatch):
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch, kolla_api_key="k", kolla_consumer_id="consumers/1")
+    for system in ("", "none", "mock", "other"):
+        assert bridge_name(_practice(system)) is None
