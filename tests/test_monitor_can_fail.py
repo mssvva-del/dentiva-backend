@@ -107,3 +107,34 @@ def test_the_probe_body_never_carries_anything_real():
     one day the guard failed, become a real booking."""
     assert monitor._PROBE_BODY == {"event": "call_started", "call_id": "monitor-probe"}
     assert "function_name" not in monitor._PROBE_BODY
+
+
+def test_the_booking_probe_always_targets_the_canary():
+    """The one check that WRITES. If it ever addressed anything else, a synthetic
+    patient would appear in a real clinic's calendar every ten minutes — and the
+    routing fallback it would hit picks the only practice in the database, which
+    is a practice with patients."""
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "monitor_production.py"
+    ).read_text()
+    start = source.index("def check_a_call_still_ends_in_a_booking")
+    end = source.index("def check_webhook_refuses_forgeries")
+    probe = source[start:end]
+    assert probe.count("CANARY_NUMBER") >= 3, "a request went out without the canary number"
+    assert "to_number" in probe
+
+
+def test_a_missing_secret_fails_rather_than_skips(monkeypatch):
+    """Everything else can pass while the product is broken. A quiet skip here
+    would produce a green run that means nothing."""
+    with pytest.raises(monitor.Failure, match="NOT exercised"):
+        monitor.check_a_call_still_ends_in_a_booking(None)
+
+
+def test_the_canary_number_matches_what_the_backend_provisions():
+    """Two constants, two files, one meaning. If they drift, the probe routes by
+    the fallback into a real clinic — the exact failure this design exists to
+    make impossible."""
+    from app.services.canary import CANARY_NUMBER as backend_number
+
+    assert monitor.CANARY_NUMBER == backend_number
