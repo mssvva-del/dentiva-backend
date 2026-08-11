@@ -47,6 +47,7 @@ from app.auth.permissions import (
     VIEW_SYSTEM_HEALTH,
     VIEW_USAGE_METRICS,
 )
+from app.billing.metering import _month_bounds
 from app.billing.plans import ESTIMATED_COST_CENTS_PER_MIN, get_plan
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
@@ -144,6 +145,12 @@ class ClinicDetail(BaseModel):
     user_count: int
     call_count: int
     booking_count: int
+    # THIS period, against what they pay for. Lifetime counts say a clinic has
+    # been busy; they cannot say whether it is about to cost us money. A practice
+    # quietly running at three times its bucket looks identical to a happy one
+    # until the invoice.
+    period_minutes_used: float = 0.0
+    period_minutes_included: int | None = None
     # ADM-CLIENT-360: the full clinic profile in one card.
     address: str | None = None
     phone_number: str | None = None
@@ -216,6 +223,21 @@ async def clinic_detail(
         bookings = (await session.execute(
             select(func.count()).select_from(Booking).where(Booking.practice_id == practice_id)
         )).scalar_one()
+        # Minutes THIS period, against what they pay for. The subscription's own
+        # window when it has one, otherwise the calendar month — the same rule
+        # metering writes by, so the two can never disagree about which period
+        # a call belongs to.
+        if sub and sub.current_period_start:
+            usage_from = sub.current_period_start
+        else:
+            usage_from, _ = _month_bounds(datetime.now(tz=UTC))
+        period_minutes = float((await session.execute(
+            select(func.coalesce(func.sum(UsageRecord.minutes_used), 0))
+            .where(
+                UsageRecord.practice_id == practice_id,
+                UsageRecord.period_start >= usage_from,
+            )
+        )).scalar_one())
         await _audit(session, ctx, "admin_view_clinic", practice_id=practice_id)
         await session.commit()
 
@@ -234,6 +256,8 @@ async def clinic_detail(
         cancel_at_period_end=bool(sub.cancel_at_period_end) if sub else False,
         current_period_end=sub.current_period_end if sub else None,
         user_count=users, call_count=calls, booking_count=bookings,
+        period_minutes_used=period_minutes,
+        period_minutes_included=sub.included_minutes if sub else None,
         address=p.address, phone_number=p.phone_number,
         transfer_phone_number=p.transfer_phone_number,
         # This clinic's own provisioned number (NUM-1); global env is the
@@ -469,9 +493,20 @@ async def revenue(
 ) -> RevenueSummary:
     async with _app_db.platform_session_factory() as session:
         subs = (await session.execute(select(Subscription))).scalars().all()
-        practices = (await session.execute(select(Practice))).scalars().all()
+        # The canary is a monitoring tenant, not a customer. Counting it inflates
+        # every clinic figure on this page by one, and this page is where those
+        # figures get quoted to other people.
+        practices = (await session.execute(
+            select(Practice).where(Practice.is_canary.is_(False))
+        )).scalars().all()
+        # THIS month, not all of history. This summed every usage row ever
+        # written while calling itself period_minutes, so the cost and margin
+        # below drifted further from the truth with every call the product had
+        # ever taken — a number that can only grow, presented as a monthly one.
+        period_start, _ = _month_bounds(datetime.now(tz=UTC))
         minutes = (await session.execute(
             select(func.coalesce(func.sum(UsageRecord.minutes_used), 0))
+            .where(UsageRecord.period_start >= period_start)
         )).scalar_one()
     total_mrr = sum(s.mrr_cents for s in subs if s.status in ("active", "trialing"))
     minutes_f = float(minutes)
