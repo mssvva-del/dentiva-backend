@@ -112,6 +112,8 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
     # tasks (the ASGI request task vs. the test task).
     test_engine = create_async_engine(TEST_DB_URL, poolclass=NullPool)
 
+    _make_an_unbound_tenant_query_loud(test_engine)
+
     # Repoint the app's engine/session factory at the test DB.
     app_db.engine = test_engine
     app_db.async_session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
@@ -146,6 +148,63 @@ async def _prepare_database() -> AsyncGenerator[None, None]:
 # Set per-test in _prepare_database (owner/superuser → bypasses RLS for seeding).
 _seed_engine = None
 _seed_session_factory = None
+
+
+# Tables whose rows belong to exactly one clinic. Mirrors REQUIRED_RLS in
+# scripts/check_rls_coverage.py, which the CI gate enforces at HEAD.
+_TENANT_TABLES = (
+    "patients", "calls", "bookings", "callback_requests", "waitlist_entries",
+    "invitations", "reactivation_campaigns", "reactivation_targets",
+    "reactivation_touches",
+)
+
+
+class UnboundTenantQuery(AssertionError):
+    """A tenant table was read with no clinic bound to the connection."""
+
+
+def _make_an_unbound_tenant_query_loud(engine) -> None:
+    """Turn "RLS returned nothing" into an error, in tests only.
+
+    RLS fails closed, which is the right design and an awful diagnostic: a query
+    that forgets set_tenant does not raise, it returns an empty result. The
+    handler then reads that as "this patient has no appointment" or "there is no
+    such call" and answers the caller accordingly.
+
+    That is not hypothetical. join_waitlist read the calls row before binding a
+    tenant, found nothing every single time, and fell through to guessing the
+    practice — which happens to be correct while exactly one clinic exists, so
+    the tests were green and the feature was broken for the second clinic.
+
+    Production keeps the silent behaviour on purpose: an exception mid-call is
+    worse for a patient than a degraded answer. Tests do not have patients, so
+    here the same mistake is a failure with the query attached.
+    """
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _guard(conn, cursor, statement, parameters, context, executemany):
+        lowered = statement.lower()
+        if not lowered.lstrip().startswith("select"):
+            return
+        if not any(f" {table}" in lowered for table in _TENANT_TABLES):
+            return
+        # Routing legitimately runs before a tenant is known, through a
+        # SECURITY DEFINER function that returns a practice_id and no PHI.
+        if "dentiva_practice_for_retell_call" in lowered:
+            return
+        bound = conn.exec_driver_sql(
+            "SELECT current_setting('app.current_practice_id', true)"
+        ).scalar()
+        if bound:
+            return
+        raise UnboundTenantQuery(
+            "a tenant table was queried with no clinic bound to the connection. "
+            "RLS will return zero rows and the caller will read that as 'not "
+            "found', which is how join_waitlist was broken for a year of "
+            "single-clinic testing.\n\n"
+            f"{statement.strip()[:400]}"
+        )
 
 
 @pytest_asyncio.fixture
