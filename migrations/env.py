@@ -38,6 +38,9 @@ def run_migrations_offline() -> None:
 def _refuse_to_run_without_ddl_rights(connection) -> None:
     """Stop with a readable sentence rather than a traceback eighty lines long.
 
+    Takes its OWN connection — see the caller. Sharing Alembic's connection makes
+    every migration roll back without a word.
+
     The application role is deliberately not the owner of any table — that is
     what makes RLS real — so it cannot ALTER anything. Running migrations as it
     fails on the first schema change with "must be owner of table X", buried in
@@ -80,8 +83,16 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    # On its OWN connection. Querying Alembic's connection before context.configure
+    # starts a transaction Alembic then believes the caller owns, so it never
+    # commits, and the entire upgrade is rolled back when the connection closes —
+    # silently. The RLS gate caught it only because it reported every required
+    # table as missing its policy, which is what "the table is not there at all"
+    # looks like from the outside.
+    with connectable.connect() as probe:
+        _refuse_to_run_without_ddl_rights(probe)
+
     with connectable.connect() as connection:
-        _refuse_to_run_without_ddl_rights(connection)
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
