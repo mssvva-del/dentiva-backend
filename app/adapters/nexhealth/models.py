@@ -50,3 +50,10 @@ class NexHealthAppointment(BaseModel):
 
     appointment_id: str        # NexHealth appointment id → stored on our booking
     start_time: str
+
+
+# PMS-neutral aliases. These DTOs were named after the first PMS we spoke to and
+# are not specific to it — Kolla returns the same two shapes. New adapters use
+# the neutral names; the old ones stay so nothing has to be renamed at once.
+PmsSlot = NexHealthSlot
+PmsAppointment = NexHealthAppointment
