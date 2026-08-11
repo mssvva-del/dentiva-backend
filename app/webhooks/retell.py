@@ -47,6 +47,7 @@ from app.services.availability import (
     compute_pms_slots,
     pms_is_connected,
     slot_to_utc,
+    visit_minutes,
 )
 from app.services.call_outcome import BOOKED, classify_outcome
 from app.services.call_sync import slim_transcript
@@ -1010,6 +1011,7 @@ async def _open_slots(session, practice, *, procedure, preferred_date, preferred
             practice,
             preferred_date=preferred_date,
             preferred_window=preferred_window,
+            procedure=procedure,
         )
         if pms_slots is not None:
             return pms_slots
@@ -1185,7 +1187,11 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
             patient_id=patient.id,
             source_call_id=call_internal_id,
             appointment_at=appointment_at,
-            duration_minutes=60,
+            # The length THIS clinic books this procedure at — the same number
+            # the slot was sized with. Storing a flat 60 under a 90-minute slot
+            # leaves half an hour that availability believes is free, and offers
+            # it to the next caller on top of a patient already in the chair.
+            duration_minutes=visit_minutes(practice_obj, procedure) if practice_obj else 60,
             procedure_type=procedure,
             provider_name=chosen_slot.provider if chosen_slot else "Dr. Smith",
             status=CONFIRMED,

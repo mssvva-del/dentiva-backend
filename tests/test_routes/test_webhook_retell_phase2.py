@@ -1162,3 +1162,41 @@ def test_real_phrasings_in_both_languages(said, blocks_scheduling, sends_to_er):
     args = {"reason": said}
     assert _contains_emergency_keywords(args) is blocks_scheduling, said
     assert _needs_emergency_room(args) is sends_to_er, said
+
+
+async def test_a_booking_is_stored_at_the_length_the_clinic_books_it(
+    client, db_session
+):
+    """The slot was sized by the clinic's own appointment types and the booking
+    stored a flat hour. A ninety-minute root canal recorded as sixty leaves half
+    an hour that availability believes is free — and offers it to the next
+    caller, on top of a patient already in the chair.
+
+    No race is needed. One quiet afternoon with one long procedure does it.
+    """
+    from sqlalchemy import select
+
+    from app.models.booking import Booking
+    from tests.conftest import seed_practice
+
+    practice, _ = await seed_practice(
+        db_session, name="Long Visits", clerk_org_id="org_dur1", clerk_user_id="user_dur1"
+    )
+    practice.knowledge_base = {
+        "appointment_types": [{"name": "root canal", "minutes": 90}]
+    }
+    await db_session.commit()
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "dur-1",
+        "function_name": "book_appointment",
+        "args": {"patient_first_name": "Ann", "patient_last_name": "Lee",
+                 "patient_phone": "+15556660000", "procedure": "root canal",
+                 "preferred_date": "2099-11-10", "preferred_time_window": "morning"},
+    })
+    assert r.json().get("booked") is True
+
+    await db_session.commit()
+    db_session.expire_all()
+    stored = (await db_session.execute(select(Booking.duration_minutes))).scalars().all()
+    assert stored == [90], "stored an hour for a ninety-minute procedure"
