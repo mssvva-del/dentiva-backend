@@ -238,3 +238,51 @@ def test_a_practice_with_no_pms_gets_no_bridge_however_well_configured(monkeypat
     _configured(monkeypatch, kolla_api_key="k", kolla_consumer_id="consumers/1")
     for system in ("", "none", "mock", "other"):
         assert bridge_name(_practice(system)) is None
+
+
+# ---------------------------------------------------------------------------
+# How long a visit takes. The slot was sized by the clinic's own appointment
+# types; the booking stored a flat 60. When those disagree the disagreement is
+# silent and it compounds — no race, no error, one quiet afternoon is enough.
+# ---------------------------------------------------------------------------
+
+
+def _practice_with_types(**minutes):
+    practice = _practice()
+    practice.knowledge_base = {
+        "appointment_types": [
+            {"name": name, "minutes": mins} for name, mins in minutes.items()
+        ]
+    }
+    return practice
+
+
+def test_the_clinics_own_length_is_used_not_a_flat_hour():
+    from app.services.availability import visit_minutes
+
+    practice = _practice_with_types(cleaning=30, root_canal=90)
+    assert visit_minutes(practice, "root_canal") == 90
+    assert visit_minutes(practice, "cleaning") == 30
+
+
+def test_a_procedure_the_clinic_never_configured_falls_back_to_an_hour():
+    """Clinics fill this in over time. An unknown procedure must book something
+    rather than nothing, and an hour is the safe direction — too long merely
+    wastes a slot, too short puts two patients in one chair."""
+    from app.services.availability import visit_minutes
+
+    assert visit_minutes(_practice_with_types(cleaning=30), "implant") == 60
+    assert visit_minutes(_practice(), "cleaning") == 60
+
+
+async def test_the_pms_is_asked_for_the_length_of_the_procedure_requested(monkeypatch):
+    """It used to ask for a cleaning's length whatever the caller wanted, so a
+    clinic could be shown a 30-minute gap for an extraction it books at 90."""
+    _configured(monkeypatch)
+    practice = _practice_with_types(cleaning=30, extraction=90)
+    pms = _FakePMS([])
+    await avail.compute_pms_slots(
+        practice, procedure="extraction",
+        now=datetime(2026, 8, 3, 9, 0, tzinfo=UTC), client=pms,
+    )
+    assert pms.calls[0]["slot_length"] == 90

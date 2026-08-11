@@ -78,8 +78,16 @@ def _provider_name(practice: Practice) -> str:
     return "our team"
 
 
-def _duration_minutes(practice: Practice, procedure: str) -> int:
-    """Visit length from the KB appointment_types (matched loosely by name), else 60."""
+def visit_minutes(practice: Practice, procedure: str) -> int:
+    """How long this visit takes at THIS clinic, from its own appointment types.
+
+    Public because the booking path needs the same answer the slot was sized
+    with. When the two disagree, the disagreement is silent and compounding: a
+    root canal offered as a 90-minute slot but stored as 60 leaves half an hour
+    that _taken_intervals believes is free, so the next caller is offered a time
+    that overlaps a patient already in the chair. No race, no error — one quiet
+    afternoon is enough.
+    """
     kb = practice.knowledge_base or {}
     types = kb.get("appointment_types") if isinstance(kb, dict) else None
     if isinstance(types, list) and procedure:
@@ -147,7 +155,7 @@ async def compute_native_slots(
     tz = _tz(practice.timezone)
     now_local = (now or datetime.now(tz=UTC)).astimezone(tz)
     hours = practice.business_hours or {}
-    duration = _duration_minutes(practice, procedure)
+    duration = visit_minutes(practice, procedure)
     provider = _provider_name(practice)
     lo, hi = _WINDOWS.get((preferred_window or "any").lower(), _WINDOWS["any"])
 
@@ -308,6 +316,7 @@ async def compute_pms_slots(
     *,
     preferred_date: str = "",
     preferred_window: str | None = None,
+    procedure: str = "cleaning",
     now: datetime | None = None,
     days_ahead: int = 14,
     max_slots: int = 6,
@@ -347,7 +356,10 @@ async def compute_pms_slots(
         raw = await client.find_appointment_slots(
             start_date=start_day.isoformat(),
             days=days_ahead,
-            slot_length=_duration_minutes(practice, "cleaning"),
+            # The procedure the caller actually asked for. Asking for a
+            # cleaning's length regardless meant a clinic could offer a 30-minute
+            # gap for an extraction it books at 90.
+            slot_length=visit_minutes(practice, procedure),
         )
     except (NexHealthUnavailable, NexHealthError):
         return None
