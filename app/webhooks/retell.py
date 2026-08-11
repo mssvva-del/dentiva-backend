@@ -948,10 +948,14 @@ async def _write_booking_to_pms(
         record_alert("pms_write_crashed", f"booking={booking_id}")
         return
 
-    if status != "written":
+    if status not in ("written", "no_pms"):
         # 'conflict' is the one that needs a human NOW: the clinic's calendar took
         # that time while we were on the phone, so the patient is holding a slot
         # the practice no longer has.
+        #
+        # 'no_pms' is not a failure. A clinic with no practice-management system
+        # connected is a clinic whose whole calendar is our book, and alerting on
+        # every booking there would bury the statuses that mean something.
         record_alert(f"pms_write_{status}", f"booking={booking_id}")
     logger.info("PMS write-back %s for booking %s", status, booking_id)
 
