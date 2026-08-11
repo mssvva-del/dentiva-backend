@@ -21,7 +21,13 @@ COPY app ./app
 COPY migrations ./migrations
 COPY alembic.ini ./
 COPY start.sh ./
-RUN chmod +x start.sh
+# scripts/ holds the pre-deploy migration runner that railway.toml invokes. This
+# COPY list is an allow-list: a file added to the repo is NOT in the image until
+# it is named here, and the omission shows up as "No such file or directory" at
+# deploy time rather than anywhere earlier. tests/test_container_has_what_it_runs.py
+# checks that every path the deploy config runs is present.
+COPY scripts ./scripts
+RUN chmod +x start.sh scripts/*.sh
 
 EXPOSE 8000
 
