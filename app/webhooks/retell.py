@@ -1123,14 +1123,18 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         # bypasses RLS for the practice_id only) and bind it, so the Call lookup
         # below actually sees the row instead of falling into the orphan branch.
         routed_practice_id = await _resolve_practice_id_for_call(session, retell_call_id)
-        if routed_practice_id is not None:
-            await set_tenant(session, routed_practice_id)
 
         # Resolve call row (may or may not exist depending on call_started timing).
-        result = await session.execute(
-            select(Call).where(Call.retell_call_id == retell_call_id)
-        )
-        call = result.scalar_one_or_none()
+        # Only worth asking once a tenant is bound: calls is RLS-protected, so
+        # without one the query cannot return anything and its empty result reads
+        # exactly like "no such call" — the same confusion that hid the waitlist
+        # bug for as long as a single clinic made it invisible.
+        call = None
+        if routed_practice_id is not None:
+            await set_tenant(session, routed_practice_id)
+            call = (await session.execute(
+                select(Call).where(Call.retell_call_id == retell_call_id)
+            )).scalar_one_or_none()
 
         practice_id: uuid.UUID
         call_internal_id: uuid.UUID | None = None
