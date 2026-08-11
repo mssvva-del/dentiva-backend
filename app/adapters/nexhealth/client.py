@@ -251,7 +251,12 @@ class NexHealthClient(ReactivationSource):
         start_time: str,
         operatory_id: str | None = None,
         note: str | None = None,
+        end_time: str | None = None,  # noqa: ARG002 — see below
     ) -> NexHealthAppointment:
+        # end_time is accepted and ignored: NexHealth derives the end from the
+        # appointment type, while Kolla requires it explicitly. The two clients
+        # take the same call so the write-back path never has to ask which PMS
+        # bridge it is holding — the moment it asks, it starts getting it wrong.
         """Write an appointment back to the PMS. Returns the PMS appointment id.
 
         CONFIRMED against sandbox 2026-06-26 (status 201): body is

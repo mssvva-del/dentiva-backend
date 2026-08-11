@@ -133,3 +133,117 @@ async def test_write_back_graceful_on_pms_unavailable(db_session):
         select(Booking).where(Booking.id == bk.id)
     )).scalar_one()
     assert refreshed.pms_external_id is None  # left un-synced for retry
+
+
+# ---------------------------------------------------------------------------
+# The bridge decides which PMS answers, and this file used to ignore it.
+#
+# It constructed a NexHealthClient unconditionally while app.adapters.bridge
+# preferred Kolla. On our first customer's practice — Eaglesoft, reachable only
+# through Kolla — every voice booking would have been created in our database,
+# confirmed to the patient by SMS, and never written to the calendar the front
+# desk reads. The only trace was an alert in an in-process ring buffer.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """Answers like whichever bridge you tell it to be, and remembers the call."""
+
+    def __init__(self, slots):
+        self._slots = slots
+        self.created: dict | None = None
+
+    async def find_appointment_slots(self, **kwargs):
+        return self._slots
+
+    async def create_appointment(self, **kwargs):
+        self.created = kwargs
+        from app.adapters.nexhealth.models import PmsAppointment
+
+        return PmsAppointment(appointment_id="PMS-1", start_time=kwargs["start_time"])
+
+
+def _slot(start, provider="", operatory=None):
+    from app.adapters.nexhealth.models import PmsSlot
+
+    return PmsSlot(start_time=start, provider_id=provider, operatory_id=operatory)
+
+
+async def test_a_kolla_slot_is_not_read_as_taken(db_session):
+    """Kolla schedules rooms and leaves the provider blank. Requiring a provider
+    match made every one of its slots look busy, so the write never happened and
+    the status said 'conflict' — the one word that makes a human think the clinic
+    took the time, rather than that we never asked."""
+    from app.services.reactivation.writeback import write_back_booking
+
+    practice, booking = await _clinic_with_a_booking(db_session)
+    start = booking.appointment_at.isoformat()
+    client = _RecordingClient([_slot(start, provider="", operatory="resources/op-1")])
+
+    status = await write_back_booking(
+        db_session, practice.id, booking,
+        patient_pms_id="contacts/9", provider_id="",
+        operatory_id="resources/op-1", client=client,
+    )
+    assert status == "written"
+    assert booking.pms_external_id == "PMS-1"
+
+
+async def test_a_different_room_at_the_same_time_is_still_taken(db_session):
+    """The time matching is not enough on its own when both sides name a room."""
+    from app.services.reactivation.writeback import write_back_booking
+
+    practice, booking = await _clinic_with_a_booking(db_session)
+    start = booking.appointment_at.isoformat()
+    client = _RecordingClient([_slot(start, operatory="resources/op-2")])
+
+    status = await write_back_booking(
+        db_session, practice.id, booking,
+        patient_pms_id="contacts/9", provider_id="",
+        operatory_id="resources/op-1", client=client,
+    )
+    assert status == "conflict"
+    assert client.created is None
+
+
+async def test_the_write_carries_an_end_time_because_kolla_requires_one(db_session):
+    """NexHealth derives the end from the appointment type; Kolla refuses without
+    it. Both clients take the same call so this path never has to know which
+    bridge it is holding."""
+    from app.services.reactivation.writeback import write_back_booking
+
+    practice, booking = await _clinic_with_a_booking(db_session)
+    start = booking.appointment_at.isoformat()
+    client = _RecordingClient([_slot(start, provider="prov-1")])
+
+    await write_back_booking(
+        db_session, practice.id, booking,
+        patient_pms_id="1", provider_id="prov-1", client=client,
+    )
+    assert client.created["end_time"] > client.created["start_time"]
+
+
+async def test_a_clinic_with_no_bridge_is_not_an_error(db_session):
+    """A practice with no PMS connected has its whole calendar in our book.
+    Reporting that as a failed write would alert on every booking it ever takes
+    and bury the statuses that mean something."""
+    from app.services.reactivation.writeback import write_back_booking
+
+    practice, booking = await _clinic_with_a_booking(db_session)
+    status = await write_back_booking(
+        db_session, practice.id, booking, patient_pms_id="1", provider_id="p",
+    )
+    assert status == "no_pms"
+    assert booking.pms_external_id is None
+
+
+async def _clinic_with_a_booking(db_session):
+    """A practice and one confirmed booking, named so each test gets its own."""
+    import uuid as _uuid
+
+    suffix = _uuid.uuid4().hex[:6]
+    practice, _ = await seed_practice(
+        db_session, name=f"Bridge {suffix}",
+        clerk_org_id=f"org_{suffix}", clerk_user_id=f"u_{suffix}",
+    )
+    return practice, await _seed_booking(db_session, practice)
