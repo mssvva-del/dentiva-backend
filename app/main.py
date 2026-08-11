@@ -93,6 +93,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         tasks.append(asyncio.create_task(reactivation_worker_loop()))
         logger.info("Reactivation worker background task started")
 
+    if settings.canary_practice_enabled:
+        import app.db as _canary_db
+        from app.services.canary import ensure_canary_practice
+
+        try:
+            async with _canary_db.platform_session_factory() as session:
+                await ensure_canary_practice(session)
+        except Exception:  # noqa: BLE001 — monitoring must never block a boot
+            logger.exception("canary practice could not be ensured")
+
     try:
         yield
     finally:
