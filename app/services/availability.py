@@ -25,7 +25,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.open_dental.models import AvailableSlot
-from app.config import get_settings
 from app.models.booking import Booking
 from app.models.practice import Practice
 
@@ -299,15 +298,9 @@ def pms_is_connected(practice: Practice) -> bool:
     while no credentials exist is not connected — treating it as connected would
     fail every call at the worst possible moment.
     """
-    system = (practice.pms_system or "").strip().lower()
-    if system in _PMS_NONE:
-        return False
-    settings = get_settings()
-    return bool(
-        settings.nexhealth_api_key
-        and settings.nexhealth_subdomain
-        and settings.nexhealth_location_id
-    )
+    from app.adapters.bridge import bridge_name
+
+    return bridge_name(practice) is not None
 
 
 async def compute_pms_slots(
@@ -327,7 +320,6 @@ async def compute_pms_slots(
     alert. Silence would be worse than a slot we're less sure about.
     """
     from app.adapters.nexhealth.client import (
-        NexHealthClient,
         NexHealthError,
         NexHealthUnavailable,
     )
@@ -345,7 +337,12 @@ async def compute_pms_slots(
 
     lo, hi = _WINDOWS.get((preferred_window or "any").lower(), _WINDOWS["any"])
     earliest = now_local + timedelta(minutes=30)
-    client = client or NexHealthClient()
+    if client is None:
+        from app.adapters.bridge import pms_client_for
+
+        client = pms_client_for(practice)
+        if client is None:
+            return None
     try:
         raw = await client.find_appointment_slots(
             start_date=start_day.isoformat(),
