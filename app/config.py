@@ -232,6 +232,13 @@ class Settings(BaseSettings):
     # the Reactivation Engine builds/tests without real access. Real keys go in
     # _KEYS_PRIVATE.md → Railway env (NOT git). Confirm prod vs sandbox on arrival.
     nexhealth_api_url: str = "https://nexhealth.info"
+    # Kolla Unify — the PMS bridge for practices not on Open Dental. consumer_id
+    # identifies one practice inside our connector; without it a request spans
+    # every practice on the connector, which is never right on a patient call.
+    kolla_api_key: str = ""
+    kolla_connector_id: str = ""
+    kolla_consumer_id: str = ""
+
     nexhealth_api_key: str = ""
     nexhealth_subdomain: str = ""      # practice subdomain in NexHealth
     nexhealth_location_id: str = ""    # NexHealth location id
