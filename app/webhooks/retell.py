@@ -347,7 +347,9 @@ def _contains_emergency_keywords(args: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_practice(agent_id: str | None) -> Practice | None:
+async def _resolve_practice(
+    agent_id: str | None, to_number: str | None = None
+) -> Practice | None:
     """Resolve which practice a call belongs to from its Retell ``agent_id``.
 
     Routing rule (HIPAA-safe — never silently attribute a call to the wrong
@@ -365,13 +367,40 @@ async def _resolve_practice(agent_id: str | None) -> Practice | None:
     practice to carry its own ``retell_agent_id``.
     """
     async with _app_db.async_session_factory() as session:
-        if agent_id:
-            result = await session.execute(
-                select(Practice).where(Practice.retell_agent_id == agent_id)
-            )
-            practice = result.scalar_one_or_none()
-            if practice:
+        # The number that was dialled. Every clinic gets its own Dentovox number
+        # at provisioning (NUM-1) and it is written to practices.ai_phone_number,
+        # so this is the one key that is actually populated. We also match the
+        # clinic's own number, because a practice can point its line at us
+        # directly instead of forwarding.
+        for column in (Practice.ai_phone_number, Practice.phone_number):
+            if not to_number or to_number == "unknown":
+                break
+            practice = (await session.execute(
+                select(Practice).where(column == to_number)
+            )).scalars().first()
+            if practice is not None:
                 return practice
+
+        # Agent id, kept for web calls and for a clinic given its own agent later.
+        # NOTHING writes practices.retell_agent_id today, so this matches nothing
+        # in practice — it is a hook, not a route. first() rather than
+        # scalar_one_or_none() on purpose: every clinic currently shares one
+        # Retell agent, so anyone "fixing" routing by copying that id onto each
+        # practice row would otherwise turn call_started into a 500 and a retry
+        # storm. Ambiguous is logged and refused below, never raised.
+        if agent_id:
+            matches = (await session.execute(
+                select(Practice).where(Practice.retell_agent_id == agent_id).limit(2)
+            )).scalars().all()
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                logger.critical(
+                    "resolve_practice: agent_id=%r is on more than one practice — "
+                    "refusing to route rather than guess which clinic called.",
+                    agent_id,
+                )
+                return None
 
         # No match: only safe to guess in the unambiguous single-practice case.
         rows = (await session.execute(select(Practice).limit(2))).scalars().all()
@@ -380,12 +409,12 @@ async def _resolve_practice(agent_id: str | None) -> Practice | None:
         if not rows:
             return None
         logger.critical(
-            "resolve_practice: REFUSING to route — agent_id=%r matched no "
-            "practice and %d practices exist. Set practices.retell_agent_id for "
-            "each clinic (its Retell agent id). Returning None to avoid a "
-            "cross-tenant data leak.",
-            agent_id,
-            len(rows),
+            "resolve_practice: REFUSING to route — to_number=%r and agent_id=%r "
+            "matched no practice, and %d practices exist. The number is the key: "
+            "check that this clinic was provisioned (practices.ai_phone_number). "
+            "Returning None rather than guessing, which would be a cross-tenant "
+            "data leak.",
+            to_number, agent_id, len(rows),
         )
         return None
 
@@ -564,9 +593,13 @@ async def _resolve_practice_id_for_call(session, retell_call_id: str) -> uuid.UU
 
 
 async def _resolve_practice_meta(call_data: dict, agent_id: str | None) -> Practice | None:
-    """Prefer an explicit ``metadata.practice_id`` (the web-call demo carries it,
-    since every web call shares the demo agent and agent_id can't disambiguate),
-    else fall back to agent-id routing."""
+    """Which clinic this call belongs to.
+
+    ``metadata.practice_id`` wins when present — the web-call demo carries it,
+    because every web call shares one agent and the agent id cannot tell them
+    apart. Otherwise the number that was dialled decides.
+    """
+    to_number = call_data.get("to_number")
     pid = (call_data.get("metadata") or {}).get("practice_id")
     if pid:
         try:
@@ -578,7 +611,7 @@ async def _resolve_practice_meta(call_data: dict, agent_id: str | None) -> Pract
                     return p
         except ValueError:
             pass
-    return await _resolve_practice(agent_id)
+    return await _resolve_practice(agent_id, to_number)
 
 
 async def _ensure_call_row(retell_call_id: str, call_obj: dict) -> None:
@@ -2312,27 +2345,14 @@ _VAR_FALLBACKS = {
 
 async def _resolve_practice_for_inbound(agent_id: str | None,
                                         to_number: str | None) -> Practice | None:
-    """Which clinic was called.
+    """Which clinic was called — one resolver, shared with the event webhook.
 
-    ``to_number`` is the number the caller reached — OUR number for this clinic
-    (the one they forward their line to), which is unique per practice (NUM-1).
-    That makes it the reliable key. We also still match the clinic's OWN number,
-    because a practice can point a line at us directly rather than forwarding.
-    Falls back to agent-id routing, then the single-practice case.
+    This used to carry its own copy of the number lookup while the event and
+    tool webhook routed on agent id alone. The copy was the correct one, which is
+    the worst way for two implementations to disagree: greeting a caller with the
+    right clinic's name and then booking them at whichever practice sorted first.
     """
-    if to_number:
-        async with _app_db.async_session_factory() as session:
-            p = (await session.execute(
-                select(Practice).where(Practice.ai_phone_number == to_number)
-            )).scalar_one_or_none()
-            if p is not None:
-                return p
-            p = (await session.execute(
-                select(Practice).where(Practice.phone_number == to_number)
-            )).scalar_one_or_none()
-            if p is not None:
-                return p
-    return await _resolve_practice(agent_id)
+    return await _resolve_practice(agent_id, to_number)
 
 
 @router.post("/retell/inbound", status_code=status.HTTP_200_OK)
