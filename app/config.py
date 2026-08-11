@@ -256,6 +256,12 @@ class Settings(BaseSettings):
     # becomes production.
     qa_llm_review_enabled: bool = False
 
+    # Create the monitoring clinic on boot. Off by default: it is a real row in
+    # a real database and should appear only where somebody wants it. See
+    # app/services/canary.py for why the application makes it rather than a
+    # person running SQL against production.
+    canary_practice_enabled: bool = False
+
     # CORS — comma-separated list of EXACT allowed origins (no wildcards). The
     # browser sends credentials, so wildcards are unsafe and disallowed by the
     # CORS spec anyway. Defaults to local dev; set CORS_ALLOWED_ORIGINS in prod
