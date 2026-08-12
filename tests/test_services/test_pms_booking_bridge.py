@@ -340,3 +340,89 @@ def test_the_wrong_clinic_gets_no_pms_rather_than_someone_elses(monkeypatch):
 
     _configured(monkeypatch, pms_env_practice_id=str(uuid.uuid4()))
     assert pms_client_for(_practice_with_id(uuid.uuid4())) is None
+
+
+# ── the clinic's own credentials, rather than the deployment's ───────────────
+#
+# Binding the environment to one practice stopped the second clinic reading the
+# first clinic's calendar, but left it with no PMS at all and no way to give it
+# one short of a redeploy. These pin the column that fixes that — and, more
+# importantly, that it cannot be half-set.
+
+
+def _with_credentials(practice, **fields):
+    practice.pms_credentials = fields
+    return practice
+
+
+def test_a_clinic_with_its_own_credentials_ignores_the_environment(monkeypatch):
+    """The environment belongs to somebody else and this clinic still gets a
+    bridge — that is the whole point of the column."""
+    import uuid
+
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch, pms_env_practice_id=str(uuid.uuid4()))
+    theirs = _practice_with_id(uuid.uuid4())
+    assert bridge_name(theirs) is None
+    _with_credentials(theirs, bridge="kolla", api_key="k", consumer_id="c")
+    assert bridge_name(theirs) == "kolla"
+
+
+def test_the_clinics_own_bridge_wins_over_the_environments(monkeypatch):
+    """NexHealth is configured in the environment and this clinic is on Kolla.
+    Preferring the environment would authenticate happily against the wrong
+    practice's location."""
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch)  # nexhealth in the environment
+    practice = _with_credentials(_practice(), bridge="kolla", api_key="k", consumer_id="c")
+    assert bridge_name(practice) == "kolla"
+
+
+def test_half_filled_credentials_are_treated_as_none(monkeypatch):
+    """A NexHealth client without a location id does not fail at construction —
+    it fails in the middle of a call, which is the same bad news delivered to a
+    patient instead of to us. Missing a field must degrade to our own book."""
+    import uuid
+
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch, pms_env_practice_id=str(uuid.uuid4()))
+    practice = _practice_with_id(uuid.uuid4())
+    for partial in (
+        {"bridge": "nexhealth", "api_key": "k", "subdomain": "s"},   # no location
+        {"bridge": "nexhealth", "api_key": "k", "location_id": "1"},  # no subdomain
+        {"bridge": "kolla", "api_key": "k"},        # neither consumer nor connector
+        {"bridge": "carrier-pigeon", "api_key": "k"},
+        {"api_key": "k", "subdomain": "s", "location_id": "1"},       # no bridge named
+    ):
+        _with_credentials(practice, **partial)
+        assert bridge_name(practice) is None, f"{partial} was accepted"
+
+
+def test_a_clinics_own_key_is_never_mixed_with_the_environments_location(monkeypatch):
+    """The dangerous middle: this clinic's api_key with the environment's
+    subdomain and location id. That authenticates, and reads the wrong calendar."""
+    from app.adapters.bridge import pms_client_for
+
+    _configured(monkeypatch)  # nexhealth: sub / 1
+    practice = _with_credentials(
+        _practice(), bridge="nexhealth", api_key="theirs",
+        subdomain="theirs-sub", location_id="99",
+    )
+    client = pms_client_for(practice)
+    assert client._subdomain == "theirs-sub"
+    assert client._location_id == "99"
+
+
+def test_a_practice_with_no_pms_is_still_refused_a_bridge(monkeypatch):
+    """Credentials do not override "this clinic has not connected a PMS" —
+    otherwise a stale row books a patient into a system nobody uses."""
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch)
+    practice = _with_credentials(
+        _practice("none"), bridge="nexhealth", api_key="k", subdomain="s", location_id="1"
+    )
+    assert bridge_name(practice) is None
