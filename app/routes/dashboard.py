@@ -512,7 +512,15 @@ async def dashboard_roi(
     window_start = datetime.combine(today - timedelta(days=period_days - 1), time.min, tzinfo=UTC)
     window_end = datetime.combine(today, time.max, tzinfo=UTC)
 
-    # ── Calls handled by AI (all completed / non-in_progress calls) ──────────
+    # ── Calls the AI actually handled ────────────────────────────────────────
+    #
+    # This counted everything that was not still ringing — which includes the
+    # calls the AI MISSED. A practice with eighty answered and twenty dropped was
+    # shown "100 calls handled by AI receptionist", the twenty failures counted
+    # as successes, on the card they use to decide whether we are worth keeping.
+    #
+    # Statuses are only in_progress / completed / missed, so "handled" is
+    # completed, and nothing else.
     calls_handled_by_ai = (
         await db.execute(
             select(func.count())
@@ -520,7 +528,7 @@ async def dashboard_roi(
             .where(Call.practice_id == practice.id)
             .where(Call.started_at >= window_start)
             .where(Call.started_at <= window_end)
-            .where(Call.status != "in_progress")
+            .where(Call.status == "completed")
         )
     ).scalar_one()
 
@@ -566,11 +574,17 @@ async def dashboard_roi(
     # ── Derived metrics ───────────────────────────────────────────────────────
     minutes_saved = total_talk_time_minutes
     cost_saved_usd = round(minutes_saved / 60 * 25, 2)
-    revenue_protected_usd = round(int(bookings_by_ai) * 150, 2)
-    ai_answer_rate_pct = round(
-        int(calls_handled_by_ai) / max(int(calls_handled_by_ai) + int(calls_missed), 1) * 100,
-        1,
-    )
+    # $150 a booking was invented. Nothing displays it, and a dollar figure a
+    # practice owner would repeat to their accountant should not sit in an API
+    # waiting for somebody to put it on a card. A real figure needs the procedure
+    # and the practice's own fee schedule; until we have those, no number.
+    revenue_protected_usd = 0.0
+    # Answered out of offered. The denominator used to be handled + missed while
+    # handled ALREADY contained missed, so every dropped call was counted twice
+    # below the line and once above it — which pushed the rate up, in the one
+    # direction that hides our own failures from the practice paying for them.
+    offered = int(calls_handled_by_ai) + int(calls_missed)
+    ai_answer_rate_pct = round(int(calls_handled_by_ai) / offered * 100, 1) if offered else 0.0
 
     return ROIResponse(
         period_days=period_days,
