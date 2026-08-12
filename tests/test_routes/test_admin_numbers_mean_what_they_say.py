@@ -116,3 +116,40 @@ async def test_the_clinic_list_carries_usage_without_a_query_per_clinic(
     assert by_name["B Co"]["period_minutes_used"] == 3400
     assert by_name["C Co"]["period_minutes_used"] == 0
     assert all("period_minutes_included" in r for r in rows)
+
+
+async def test_the_list_says_when_each_clinic_last_had_a_call(client, db_session):
+    """Silence is the failure nobody notices. If the number breaks or the
+    practice turns forwarding off, calls stop and every other column stays
+    exactly as it was — the money is still billed, the plan is still there, the
+    dashboard is still green.
+
+    The practice finds out before we do, and reports it as "your product does not
+    work" rather than "our forwarding is off", because from their side those are
+    the same sentence.
+    """
+    from app.db import set_tenant
+    from app.models.call import Call
+
+    await _internal(db_session, clerk_id="sa_quiet", role="super_admin")
+    loud, _ = await seed_practice(
+        db_session, name="Loud Co", clerk_org_id="org_q1", clerk_user_id="user_q1"
+    )
+    await seed_practice(
+        db_session, name="Silent Co", clerk_org_id="org_q2", clerk_user_id="user_q2"
+    )
+    when = datetime.now(tz=UTC) - timedelta(hours=3)
+    await set_tenant(db_session, loud.id)
+    db_session.add(Call(
+        id=uuid.uuid4(), practice_id=loud.id, retell_call_id="quiet-1",
+        direction="inbound", from_number="+15551110000", to_number="+15559876543",
+        started_at=when, status="completed",
+    ))
+    await db_session.commit()
+
+    rows = {r["name"]: r for r in
+            (await client.get("/api/admin/clinics", headers=_h("sa_quiet"))).json()}
+    assert rows["Loud Co"]["last_call_at"] is not None
+    assert rows["Silent Co"]["last_call_at"] is None, (
+        "a clinic that has never had a call must be visibly different"
+    )

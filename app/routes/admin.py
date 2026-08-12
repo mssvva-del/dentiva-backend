@@ -107,6 +107,13 @@ class ClinicRow(BaseModel):
     # them, which nobody does twice.
     period_minutes_used: float = 0.0
     period_minutes_included: int | None = None
+    # When this clinic last had a call. Silence is the failure nobody notices:
+    # if the number breaks or the practice turns forwarding off, calls simply
+    # stop, every other column stays exactly as it was, and the practice finds
+    # out before we do — reporting it as "your product does not work" rather
+    # than "our forwarding is off", because from their side those are the same
+    # sentence.
+    last_call_at: datetime | None = None
 
 
 @router.get("/clinics", response_model=list[ClinicRow])
@@ -129,6 +136,11 @@ async def list_clinics(
             .where(UsageRecord.period_start >= month_start)
             .group_by(UsageRecord.practice_id)
         )).all())
+        # Grouped for the same reason: one query for every clinic's last call,
+        # not one per row. No PHI — a timestamp per practice.
+        last_call = dict((await session.execute(
+            select(Call.practice_id, func.max(Call.started_at)).group_by(Call.practice_id)
+        )).all())
     return [
         ClinicRow(
             id=str(p.id), name=p.name, status=p.status,
@@ -138,6 +150,7 @@ async def list_clinics(
             is_canary=p.is_canary,
             period_minutes_used=float(usage.get(p.id, 0)),
             period_minutes_included=subs[p.id].included_minutes if p.id in subs else None,
+            last_call_at=last_call.get(p.id),
         )
         for p in rows
     ]
