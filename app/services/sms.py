@@ -33,6 +33,20 @@ TWILIO_BASE = "https://api.twilio.com"
 # See app/services/canary.py.
 RESERVED_PREFIX = "+1000"
 
+# The monitor's PREVIOUS synthetic caller, retired in favour of the block above.
+# It is still stored on canary patients and waitlist entries written before the
+# change, and the backfill texts the oldest waitlisted patient on every cancel —
+# so those rows keep dialling once per probe until they drain. Listed by exact
+# value rather than by prefix: 555-0000 is not an assignable subscriber number,
+# but +1555 as a range is, and blocking a real patient's confirmation to tidy up
+# our own leftovers would be a poor trade.
+_RETIRED_PROBE_NUMBER = "+15550000000"
+
+# Deliberate non-sends. Distinct from failures: a page that we CHOSE not to
+# deliver is not a promise broken, and callers that alert on undelivered pages
+# have to be able to tell the two apart.
+SKIPPED_ON_PURPOSE = frozenset({"monitoring_number"})
+
 
 # --------------------------------------------------------------------------- #
 # Phone normalization
@@ -216,7 +230,7 @@ async def send_sms(
     if not dest:
         logger.warning("sms: unusable destination number (…%s) — skipping", _last4(to))
         return {"skipped": "bad_number"}
-    if dest.startswith(RESERVED_PREFIX):
+    if dest.startswith(RESERVED_PREFIX) or dest == _RETIRED_PROBE_NUMBER:
         # The monitoring block. Dialling it is guaranteed to fail — +1 000 is not
         # an assignable area code — so every synthetic call was raising
         # twilio_send_failed, four an hour, forever. Production reported

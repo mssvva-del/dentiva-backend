@@ -197,3 +197,27 @@ async def test_an_ordinary_number_that_merely_starts_with_one_is_still_dialled(
     _patch_settings(monkeypatch)
     client = _FakeClient(_FakeResponse(201, {"sid": "SM9"}))
     assert (await sms.send_sms("+12005551234", "hi", client=client))["sent"] is True
+
+
+async def test_the_retired_probe_number_is_also_left_alone(monkeypatch):
+    """It is still on canary patients and waitlist rows written before the
+    reserved block existed, and the cancel path texts the oldest waitlisted
+    patient on every probe — so those rows kept dialling once an hour."""
+    _patch_settings(monkeypatch)
+
+    class _Boom:
+        async def post(self, *a, **kw):
+            raise AssertionError("the retired probe number was dialled")
+
+    assert await sms.send_sms("+15550000000", "hi", client=_Boom()) == {
+        "skipped": "monitoring_number"
+    }
+
+
+async def test_an_ordinary_555_number_is_still_dialled(monkeypatch):
+    """One exact value, not the +1555 range — that range is assignable, and
+    silencing a real patient's confirmation to tidy up our own leftover rows
+    would be a poor trade."""
+    _patch_settings(monkeypatch)
+    client = _FakeClient(_FakeResponse(201, {"sid": "SM7"}))
+    assert (await sms.send_sms("+15550001234", "hi", client=client))["sent"] is True
