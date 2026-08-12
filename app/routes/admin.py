@@ -101,6 +101,12 @@ class ClinicRow(BaseModel):
     # they see that it is one. A monitoring tenant counted as a customer is a
     # number somebody eventually reports to someone else.
     is_canary: bool = False
+    # Minutes THIS period against what they pay for — the column that turns a
+    # list of names into a list of clinics worth looking at. Without it the only
+    # way to find the practice eating three times its bucket is to open all of
+    # them, which nobody does twice.
+    period_minutes_used: float = 0.0
+    period_minutes_included: int | None = None
 
 
 @router.get("/clinics", response_model=list[ClinicRow])
@@ -115,6 +121,14 @@ async def list_clinics(
             s.practice_id: s
             for s in (await session.execute(select(Subscription))).scalars().all()
         }
+        # One grouped query rather than one per clinic. At seven practices the
+        # difference is invisible and at seventy it is the page.
+        month_start, _ = _month_bounds(datetime.now(tz=UTC))
+        usage = dict((await session.execute(
+            select(UsageRecord.practice_id, func.coalesce(func.sum(UsageRecord.minutes_used), 0))
+            .where(UsageRecord.period_start >= month_start)
+            .group_by(UsageRecord.practice_id)
+        )).all())
     return [
         ClinicRow(
             id=str(p.id), name=p.name, status=p.status,
@@ -122,6 +136,8 @@ async def list_clinics(
             mrr_cents=subs[p.id].mrr_cents if p.id in subs else 0,
             onboarding_step=p.onboarding_step, created_at=p.created_at,
             is_canary=p.is_canary,
+            period_minutes_used=float(usage.get(p.id, 0)),
+            period_minutes_included=subs[p.id].included_minutes if p.id in subs else None,
         )
         for p in rows
     ]

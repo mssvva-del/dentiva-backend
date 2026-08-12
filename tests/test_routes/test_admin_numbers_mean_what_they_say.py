@@ -88,3 +88,31 @@ async def test_a_clinic_shows_what_it_used_against_what_it_pays_for(
     )).json()
     assert body["period_minutes_used"] == 850, "history leaked into this period"
     assert "period_minutes_included" in body
+
+
+async def test_the_clinic_list_carries_usage_without_a_query_per_clinic(
+    client, db_session
+):
+    """The column exists so the list answers "who is worth looking at" without
+    opening every clinic. It has to come from one grouped query — at seven
+    practices the difference is invisible and at seventy it is the page."""
+    await _internal(db_session, clerk_id="sa_list", role="super_admin")
+    now = datetime.now(tz=UTC)
+    for name, minutes in (("A Co", 120), ("B Co", 3400), ("C Co", 0)):
+        practice, _ = await seed_practice(
+            db_session, name=name,
+            clerk_org_id=f"org_{name[0]}", clerk_user_id=f"user_{name[0]}",
+        )
+        if minutes:
+            await _usage(db_session, practice.id, minutes=minutes,
+                         period_start=now.replace(day=1))
+            # Last year's usage must not appear in this month's column.
+            await _usage(db_session, practice.id, minutes=50_000,
+                         period_start=now - timedelta(days=400))
+
+    rows = (await client.get("/api/admin/clinics", headers=_h("sa_list"))).json()
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["A Co"]["period_minutes_used"] == 120
+    assert by_name["B Co"]["period_minutes_used"] == 3400
+    assert by_name["C Co"]["period_minutes_used"] == 0
+    assert all("period_minutes_included" in r for r in rows)
