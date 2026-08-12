@@ -484,6 +484,13 @@ async def get_conversion(
         for row in procedure_rows
     ]
 
+    # "Calls that became a booking". Correct only while every booking comes from
+    # a call, which is true today — Booking.source has one value, ai_call, and it
+    # is also the column default. The moment a second intake path exists (a
+    # receptionist booking in our own dashboard, a reactivation campaign) its
+    # bookings land in this numerator with no call under them, and the rate
+    # climbs for a reason that has nothing to do with the phone. Filter by
+    # source=ai_call then, the way /roi already does.
     conversion_rate = round(bookings_created / calls_total, 3) if calls_total else 0.0
     ai_answer_rate = round(calls_completed / calls_total, 3) if calls_total else 0.0
 
