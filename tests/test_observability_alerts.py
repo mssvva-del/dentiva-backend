@@ -102,3 +102,39 @@ async def test_health_names_the_commit_it_is_running(client):
     body = (await client.get("/health/detailed")).json()
     assert "revision" in body
     assert isinstance(body["revision"], str) and body["revision"]
+
+
+async def test_shared_pms_credentials_only_warn_when_there_are_credentials(
+    client, db_session, monkeypatch
+):
+    """The warning exists for the state where a second clinic reads the first
+    clinic's calendar. With no bridge configured there is nothing to read, and
+    firing on the harmless version teaches everyone to ignore it — which is how
+    the dangerous version arrives unread.
+
+    It fired for a day in production before this narrowed it, on an installation
+    with no PMS credentials at all.
+    """
+    from app.adapters import bridge
+    from tests.conftest import seed_practice
+
+    for i in (1, 2):
+        practice, _ = await seed_practice(
+            db_session, name=f"PMS Clinic {i}",
+            clerk_org_id=f"org_pms{i}", clerk_user_id=f"user_pms{i}",
+        )
+        practice.pms_system = "open_dental"
+    await db_session.commit()
+
+    monkeypatch.setattr(bridge, "_kolla_configured", lambda: False)
+    monkeypatch.setattr(bridge, "_nexhealth_configured", lambda: False)
+    body = (await client.get("/health/detailed")).json()
+    assert body["pms_credentials_ambiguous"] is False, (
+        "warned about sharing credentials that do not exist"
+    )
+
+    monkeypatch.setattr(bridge, "_nexhealth_configured", lambda: True)
+    body = (await client.get("/health/detailed")).json()
+    assert body["pms_credentials_ambiguous"] is True, (
+        "two clinics, one set of credentials, and nobody said so"
+    )

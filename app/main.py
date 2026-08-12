@@ -258,8 +258,14 @@ async def health_detailed() -> JSONResponse:
 
     # Cheap and worth it: one count, and it names the only configuration in
     # which two practices share a PMS location.
+    # Only a danger once credentials EXIST. With no bridge configured there is
+    # nothing for a second clinic to read, and firing on the harmless version of
+    # this state teaches everyone to ignore it — which is how the dangerous
+    # version arrives unread. It fired for a day before this narrowed it.
     pms_ambiguous = False
-    if not settings.pms_env_practice_id:
+    from app.adapters.bridge import _kolla_configured, _nexhealth_configured
+
+    if not settings.pms_env_practice_id and (_kolla_configured() or _nexhealth_configured()):
         try:
             from sqlalchemy import func as _func
             from sqlalchemy import select as _sa_select_
