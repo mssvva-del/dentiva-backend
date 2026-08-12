@@ -51,6 +51,14 @@ _PROBE_BODY = {"event": "call_started", "call_id": "monitor-probe"}
 # picks the only practice in the database, and that practice has patients.
 CANARY_NUMBER = "+10000000000"
 
+# The synthetic caller. Also in the reserved +1000 block, and for the same
+# reason: the booking and waitlist paths text the patient, so a probe using a
+# plausible-looking number had production trying to SMS it every ten minutes and
+# raising twilio_send_failed when it could not. Production reported "degraded"
+# around the clock over messages nobody was meant to receive — which is how a
+# real alert arrives into a silence everyone has learned to ignore.
+PROBE_CALLER = "+10000000001"
+
 
 class Failure(Exception):
     """A check that did not pass. The message is what a human will read first."""
@@ -193,7 +201,7 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
     call_id = f"monitor-{uuid.uuid4().hex[:10]}"
     _signed_post({
         "event": "call_started", "call_id": call_id,
-        "call": {"call_id": call_id, "from_number": "+15550000000",
+        "call": {"call_id": call_id, "from_number": PROBE_CALLER,
                  "to_number": CANARY_NUMBER,
                  "start_timestamp": int(time.time() * 1000)},
     }, secret)
@@ -204,7 +212,7 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
         "function_name": "book_appointment",
         "args": {
             "patient_first_name": "Monitor", "patient_last_name": "Probe",
-            "patient_phone": "+15550000000", "procedure": "cleaning",
+            "patient_phone": PROBE_CALLER, "procedure": "cleaning",
             "preferred_date": "2099-11-10", "preferred_time_window": "morning",
         },
     }, secret)
@@ -221,7 +229,7 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
         "event": "function_call", "call_id": call_id,
         "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
         "function_name": "reschedule_appointment",
-        "args": {"patient_phone": "+15550000000", "new_date": "2099-11-17"},
+        "args": {"patient_phone": PROBE_CALLER, "new_date": "2099-11-17"},
     }, secret)
     if not moved.get("rescheduled"):
         raise Failure(
@@ -240,7 +248,7 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
         "event": "function_call", "call_id": call_id,
         "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
         "function_name": "cancel_appointment",
-        "args": {"patient_phone": "+15550000000", "reason": "monitoring probe"},
+        "args": {"patient_phone": PROBE_CALLER, "reason": "monitoring probe"},
     }, secret)
     if not cancelled.get("cancelled"):
         # Not fatal: the booking worked, which is the headline. But an
@@ -256,7 +264,7 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
         "function_name": "join_waitlist",
         "args": {
             "patient_first_name": "Monitor", "patient_last_name": "Probe",
-            "patient_phone": "+15550000000", "procedure": "cleaning",
+            "patient_phone": PROBE_CALLER, "procedure": "cleaning",
             "preferred_date": "2099-12-01", "preferred_time_window": "morning",
         },
     }, secret)
@@ -274,7 +282,7 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
         "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
         "function_name": "create_callback_request",
         "args": {
-            "patient_name": "Monitor Probe", "patient_phone": "+15550000000",
+            "patient_name": "Monitor Probe", "patient_phone": PROBE_CALLER,
             "reason": "monitoring probe — synthetic, no patient", "urgent": True,
         },
     }, secret)

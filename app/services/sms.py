@@ -27,6 +27,12 @@ logger = logging.getLogger("dentiva.services.sms")
 
 TWILIO_BASE = "https://api.twilio.com"
 
+# Numbers belonging to the monitoring clinic and its synthetic caller. +1 000 is
+# not an assignable area code, so nothing here reaches a person and no carrier
+# routes it — these are routing keys wearing the shape of a phone number.
+# See app/services/canary.py.
+RESERVED_PREFIX = "+1000"
+
 
 # --------------------------------------------------------------------------- #
 # Phone normalization
@@ -210,6 +216,15 @@ async def send_sms(
     if not dest:
         logger.warning("sms: unusable destination number (…%s) — skipping", _last4(to))
         return {"skipped": "bad_number"}
+    if dest.startswith(RESERVED_PREFIX):
+        # The monitoring block. Dialling it is guaranteed to fail — +1 000 is not
+        # an assignable area code — so every synthetic call was raising
+        # twilio_send_failed, four an hour, forever. Production reported
+        # "degraded" around the clock as a result, which is worse than reporting
+        # nothing: an alert that is always on is an alert nobody reads, and the
+        # real one arrives into that silence.
+        logger.debug("sms: reserved monitoring number — not dialled")
+        return {"skipped": "monitoring_number"}
 
     url = f"{TWILIO_BASE}/2010-04-01/Accounts/{sid}/Messages.json"
     data = {"To": dest, "From": sender, "Body": body}

@@ -123,3 +123,51 @@ async def test_the_canary_has_no_pms_so_a_write_can_never_land_anywhere_real(
     # Every bridge fully configured, and still nothing to write to.
     assert bridge.bridge_name(practice) is None
     assert bridge.pms_client_for(practice) is None
+
+
+async def test_the_canary_can_be_paged_so_it_never_says_it_cannot(db_session):
+    """The canary is escalated a synthetic urgent callback on every monitoring
+    run. A practice with no number to page raises urgent_callback_unpageable —
+    so production reported "degraded" around the clock over a page nobody was
+    ever supposed to receive, and the one that mattered would have arrived into
+    that noise.
+
+    Its numbers are in the reserved +1 000 block, which app/services/sms.py
+    refuses to dial: reachable on paper, silent in practice.
+    """
+    from app.services.canary import CANARY_CLINIC_NUMBER, ensure_canary_practice
+    from app.services.sms import RESERVED_PREFIX
+
+    practice_id = await ensure_canary_practice(db_session)
+    practice = (await db_session.execute(
+        select(Practice).where(Practice.id == practice_id)
+    )).scalar_one()
+
+    dest = practice.transfer_phone_number or practice.phone_number
+    assert dest, "the canary pages nobody, and says so every ten minutes"
+    assert dest.startswith(RESERVED_PREFIX), (
+        "the canary would page a number a real person could answer"
+    )
+    assert practice.phone_number == CANARY_CLINIC_NUMBER
+
+
+async def test_a_canary_created_before_it_had_numbers_is_repaired(db_session):
+    """Ours already exists in production without them. Creation-time defaults
+    fix nothing for the row that is already there."""
+    from app.services.canary import CANARY_NUMBER, ensure_canary_practice
+
+    existing_id = await _canary(db_session, number=CANARY_NUMBER)
+    # How the production row actually looks: created by a version of
+    # ensure_canary_practice that set no numbers at all.
+    (await db_session.execute(
+        select(Practice).where(Practice.id == existing_id)
+    )).scalar_one().phone_number = None
+    await db_session.commit()
+
+    practice_id = await ensure_canary_practice(db_session)
+
+    db_session.expire_all()
+    practice = (await db_session.execute(
+        select(Practice).where(Practice.id == practice_id)
+    )).scalar_one()
+    assert practice.phone_number and practice.phone_number.startswith("+1000")
