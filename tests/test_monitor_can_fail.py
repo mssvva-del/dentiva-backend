@@ -154,3 +154,37 @@ def test_a_rejected_signature_names_the_secret_it_used():
     block = source[start:start + 900]
     assert "sha256" in block
     assert "{secret}" not in block
+
+
+def test_the_probe_walks_every_promise_the_agent_makes():
+    """Booking was the only promise under watch. The others fail in ways that
+    look like nothing happening: a waitlist that writes no row still answers
+    politely, a move can store one date and speak another, and an urgent callback
+    is promised to the caller before anything is written."""
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "monitor_production.py"
+    ).read_text()
+    start = source.index("def check_a_call_still_ends_in_a_booking")
+    end = source.index("def check_webhook_refuses_forgeries")
+    probe = source[start:end]
+    for tool in (
+        "book_appointment", "reschedule_appointment", "join_waitlist",
+        "create_callback_request", "cancel_appointment",
+    ):
+        assert tool in probe, f"{tool} is not exercised by the monitor"
+    # Every one of them has to land on the canary, not on a real clinic.
+    assert probe.count("CANARY_NUMBER") >= 6
+
+
+def test_the_move_is_checked_for_saying_what_it_stored():
+    """A reschedule that stores Monday and says Friday sends the patient to a
+    practice not expecting them. We shipped exactly that once, on this path, so
+    the monitor compares the spoken sentence with the stored date rather than
+    trusting rescheduled: true."""
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "monitor_production.py"
+    ).read_text()
+    start = source.index("reschedule_appointment")
+    block = source[start:start + 1200]
+    assert "spoken" in block
+    assert 'moved.get("message")' in block

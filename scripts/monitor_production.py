@@ -169,8 +169,14 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
     """The only check that answers the question the product is sold on.
 
     Everything else here reads what production says about itself. This one makes
-    a call happen: start it, ask for times, book, then cancel so the canary's
-    calendar does not fill up with a decade of synthetic Tuesdays.
+    a call happen and walks every promise the agent makes to a patient: book,
+    move, join the waitlist, escalate something urgent, and cancel — the last so
+    the canary's calendar does not fill with a decade of synthetic Tuesdays.
+
+    Each of these fails quietly in its own way. A booking that does not happen is
+    at least visible in the answer; a waitlist that writes nothing still sounds
+    polite, a move can store one date and speak another, and an urgent callback
+    is promised to the caller before anything is written.
 
     Every request carries the canary's number, so it lands on the monitoring
     clinic and nowhere else — and that clinic has no PMS, so nothing it books can
@@ -208,6 +214,28 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
             "the product. Everything else can be green while this is broken."
         )
 
+    # Moving it. The clinic hears a different sentence from the one it stores if
+    # this breaks, and the patient arrives on a day nobody expects them — a bug
+    # we have already shipped once, on this exact path.
+    _, moved = _signed_post({
+        "event": "function_call", "call_id": call_id,
+        "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
+        "function_name": "reschedule_appointment",
+        "args": {"patient_phone": "+15550000000", "new_date": "2099-11-17"},
+    }, secret)
+    if not moved.get("rescheduled"):
+        raise Failure(
+            f"a booking could not be moved: {json.dumps(moved)[:300]}. Every "
+            "patient who calls back to change a time meets this."
+        )
+    spoken = (moved.get("appointment") or {}).get("date")
+    if spoken and spoken not in (moved.get("message") or ""):
+        raise Failure(
+            f"the agent was told to say {spoken!r} and its sentence does not "
+            f"contain it: {moved.get('message')!r}. A patient told one date and "
+            "booked for another arrives at a practice not expecting them."
+        )
+
     _, cancelled = _signed_post({
         "event": "function_call", "call_id": call_id,
         "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
@@ -218,8 +246,45 @@ def check_a_call_still_ends_in_a_booking(secret: str | None) -> str:
         # Not fatal: the booking worked, which is the headline. But an
         # accumulating calendar eventually makes every later probe fail to find a
         # slot, and that failure would look like a booking bug.
-        return "booked; the probe cancellation did not take — canary calendar will fill"
-    return "booked and cancelled on the canary"
+        return "booked and moved; the probe cancellation did not take — canary calendar will fill"
+
+    # The waitlist is what catches demand we cannot serve. It broke once and
+    # nothing noticed, because it fails by writing nothing and saying so politely.
+    _, waitlisted = _signed_post({
+        "event": "function_call", "call_id": call_id,
+        "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
+        "function_name": "join_waitlist",
+        "args": {
+            "patient_first_name": "Monitor", "patient_last_name": "Probe",
+            "patient_phone": "+15550000000", "procedure": "cleaning",
+            "preferred_date": "2099-12-01", "preferred_time_window": "morning",
+        },
+    }, secret)
+    if not waitlisted.get("added"):
+        raise Failure(
+            f"the waitlist refused a caller: {json.dumps(waitlisted)[:300]}. This "
+            "is how a clinic learns somebody wanted an appointment it could not "
+            "offer, and it fails by writing nothing while sounding polite."
+        )
+
+    # And the one that is not about money. An urgent callback has to be recorded
+    # AND paged; the agent has already told the caller the team knows.
+    _, urgent = _signed_post({
+        "event": "function_call", "call_id": call_id,
+        "call": {"call_id": call_id, "to_number": CANARY_NUMBER},
+        "function_name": "create_callback_request",
+        "args": {
+            "patient_name": "Monitor Probe", "patient_phone": "+15550000000",
+            "reason": "monitoring probe — synthetic, no patient", "urgent": True,
+        },
+    }, secret)
+    if urgent.get("status") not in ("callback_logged", "er_referral"):
+        raise Failure(
+            f"an urgent callback was not recorded: {json.dumps(urgent)[:300]}. The "
+            "agent tells the caller the team has been notified before this "
+            "returns, so a failure here is a promise already made."
+        )
+    return "booked, moved, waitlisted, escalated and cancelled on the canary"
 
 
 def check_webhook_refuses_forgeries() -> str:
