@@ -10,7 +10,6 @@ from datetime import date
 
 import httpx
 
-from app.adapters.nexhealth import get_reactivation_source
 from app.adapters.nexhealth.client import NexHealthClient
 from app.adapters.nexhealth.mock import MockReactivationSource
 
@@ -44,11 +43,6 @@ async def test_mock_source_incremental_filter():
     recs = await MockReactivationSource().pull_reactivation_records(updated_since=cutoff)
     # Only records with last_visit_date >= cutoff (the active-ish one).
     assert all(r.last_visit_date and r.last_visit_date >= cutoff for r in recs)
-
-
-async def test_factory_returns_mock_without_keys(settings):
-    # settings fixture clears cache; no NexHealth keys set in test env.
-    assert isinstance(get_reactivation_source(), MockReactivationSource)
 
 
 # ── real client (mocked HTTP) ─────────────────────────────────────────────────

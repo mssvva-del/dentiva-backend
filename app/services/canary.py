@@ -48,6 +48,16 @@ CANARY_NAME = "Dentovox Monitoring"
 # a phone number.
 CANARY_NUMBER = "+10000000000"
 
+# The clinic's "own" line, and where an urgent callback would be paged. Both are
+# in the same reserved block, and app/services/sms.py never dials it.
+#
+# They exist because their ABSENCE was the loud thing. A practice with no number
+# to page raises urgent_callback_unpageable, and the monitor escalates a
+# synthetic urgent callback every run — so production reported "degraded" around
+# the clock over a page nobody was ever supposed to receive. An alert that is
+# always on is an alert nobody reads.
+CANARY_CLINIC_NUMBER = "+10000000002"
+
 # Monday to Friday, a normal day. The monitor books against these, so they have
 # to be hours a slot can actually fall inside.
 _HOURS = {
@@ -71,10 +81,19 @@ async def ensure_canary_practice(session) -> uuid.UUID | None:
         # Repair rather than assume: a canary created before it had a routing
         # number would send every synthetic call down the fallback path, into
         # whichever real clinic is the only one in the database.
+        changed = False
         if existing.ai_phone_number != CANARY_NUMBER:
             existing.ai_phone_number = CANARY_NUMBER
+            changed = True
+        if not existing.phone_number:
+            # A canary created before these existed pages nobody, and says so
+            # once every ten minutes.
+            existing.phone_number = CANARY_CLINIC_NUMBER
+            existing.transfer_phone_number = CANARY_CLINIC_NUMBER
+            changed = True
+        if changed:
             await session.commit()
-            logger.info("canary practice given its routing number")
+            logger.info("canary practice repaired")
         return existing.id
 
     practice = Practice(
@@ -85,6 +104,8 @@ async def ensure_canary_practice(session) -> uuid.UUID | None:
         # No PMS. This is the property everything else rests on.
         pms_system="none",
         ai_phone_number=CANARY_NUMBER,
+        phone_number=CANARY_CLINIC_NUMBER,
+        transfer_phone_number=CANARY_CLINIC_NUMBER,
         languages_enabled=["en"],
         business_hours=_HOURS,
         is_canary=True,

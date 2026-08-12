@@ -170,3 +170,30 @@ async def test_send_booking_confirmation_sends_built_body(monkeypatch):
     assert result == {"sent": True, "sid": "SM999"}
     sent_body = client.calls[0]["data"]["Body"]
     assert "Sarah" in sent_body and "Smile Dental" in sent_body
+
+
+async def test_the_monitoring_block_is_never_dialled(monkeypatch):
+    """The canary and its synthetic caller live on +1 000, which is not an
+    assignable area code. Every probe was therefore raising twilio_send_failed —
+    four an hour, forever — and production reported "degraded" around the clock
+    over messages nobody was meant to receive. An alert that is always on is an
+    alert nobody reads, and the real one arrives into that silence."""
+    _patch_settings(monkeypatch)
+
+    class _Boom:
+        async def post(self, *a, **kw):
+            raise AssertionError("a reserved monitoring number was dialled")
+
+    for number in ("+10000000000", "+10000000001", "+10000000002"):
+        assert await sms.send_sms(number, "hi", client=_Boom()) == {
+            "skipped": "monitoring_number"
+        }
+
+
+async def test_an_ordinary_number_that_merely_starts_with_one_is_still_dialled(
+    monkeypatch,
+):
+    """The guard is a reserved block, not a prefix that swallows real numbers."""
+    _patch_settings(monkeypatch)
+    client = _FakeClient(_FakeResponse(201, {"sid": "SM9"}))
+    assert (await sms.send_sms("+12005551234", "hi", client=client))["sent"] is True
