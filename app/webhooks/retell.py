@@ -52,6 +52,7 @@ from app.services.availability import (
 from app.services.call_outcome import BOOKED, classify_outcome
 from app.services.call_sync import slim_transcript
 from app.services.sms import (
+    SKIPPED_ON_PURPOSE,
     page_clinic_new_booking,
     page_clinic_urgent_callback,
     send_booking_confirmation,
@@ -113,6 +114,18 @@ def _fire_sms(coro, *, critical: str = "") -> None:
         result = await coro
         if critical and isinstance(result, dict) and not result.get("sid"):
             reason = result.get("skipped") or result.get("error") or "unknown"
+            if reason in SKIPPED_ON_PURPOSE:
+                # We chose not to send — the monitoring clinic's own numbers are
+                # deliberately undialable. Calling that a broken promise raised
+                # page_not_delivered_urgent_callback on every probe, and that
+                # alert is in the set the external monitor treats as "a patient
+                # was told something untrue". Louder than the noise it replaced,
+                # and about nobody.
+                #
+                # Only this reason. "sms_disabled" and "not_configured" are
+                # exactly what the alert exists to catch: the page never left,
+                # and the caller was told the team had been notified.
+                return
             record_alert(f"page_not_delivered_{critical}", f"reason={reason}")
             logger.error(
                 "PAGE NOT DELIVERED (%s): %s — the caller was told the clinic "

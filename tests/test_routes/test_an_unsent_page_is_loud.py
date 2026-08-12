@@ -105,3 +105,49 @@ async def test_a_delivered_page_is_quiet(client, db_session, monkeypatch):
         k.startswith("page_not_delivered")
         for k in alerts.recent_alerts()["by_kind"]
     )
+
+
+async def test_a_page_we_chose_not_to_send_is_not_a_broken_promise(
+    client, db_session, monkeypatch
+):
+    """The monitoring clinic's numbers are deliberately undialable, so its
+    synthetic urgent callback ends in {"skipped": "monitoring_number"}. Treating
+    that as an undelivered page raised page_not_delivered_urgent_callback on
+    every probe — an alert the external monitor reads as "a patient was told
+    something untrue", fired about nobody.
+
+    The distinction is between a send that FAILED and a send we declined. Only
+    the second is quiet; sms_disabled above stays loud, because there the caller
+    really was promised a call back that nothing was going to make.
+    """
+    from app.services import sms as sms_service
+
+    practice, _ = await seed_practice(
+        db_session, name="Page Dental 3", clerk_org_id="org_pg3", clerk_user_id="user_pg3"
+    )
+    practice.transfer_phone_number = "+10000000002"
+    await db_session.commit()
+
+    async def _declined(to, body, **kwargs):
+        return {"skipped": "monitoring_number"}
+
+    monkeypatch.setattr(sms_service, "send_sms", _declined)
+    alerts._RECENT.clear()
+
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "page-3",
+        "call": {"from_number": "+10000000001", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "page-3",
+        "function_name": "create_callback_request",
+        "args": {"patient_name": "Monitor Probe", "patient_phone": "+10000000001",
+                 "reason": "monitoring probe", "urgent": True},
+    })
+    await _drain_background_sends()
+
+    assert not any(
+        k.startswith("page_not_delivered")
+        for k in alerts.recent_alerts()["by_kind"]
+    )
