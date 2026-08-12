@@ -54,6 +54,41 @@ async def create_org_invitation(
         return None
 
 
+async def create_organization(*, name: str) -> str | None:
+    """Create a Clerk organization and return its id, or None.
+
+    Identity lives in Clerk: a practice row is born when an organization exists,
+    in both of the paths that create one. So a clinic created in the admin panel
+    without an organization is an orphan — nobody can sign in to it, and when the
+    real owner eventually creates their own organization, a SECOND practice
+    appears alongside it.
+
+    Which is why the caller must treat None as a refusal to create anything. A
+    half-created clinic is worse than no button.
+    """
+    settings = get_settings()
+    if not settings.clerk_secret_key:
+        logger.info("CLERK_SECRET_KEY unset — cannot create a Clerk organization.")
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{_CLERK_API_BASE}/organizations",
+                headers={"Authorization": f"Bearer {settings.clerk_secret_key}"},
+                json={"name": name},
+            )
+        if resp.status_code >= 400:
+            logger.warning(
+                "Clerk organization create failed (%s): %s",
+                resp.status_code, resp.text[:200],
+            )
+            return None
+        return resp.json().get("id")
+    except Exception:  # noqa: BLE001 — the caller refuses rather than half-creates
+        logger.exception("Clerk organization create errored")
+        return None
+
+
 async def revoke_org_invitation(*, clerk_org_id: str, clerk_invitation_id: str) -> bool:
     """Revoke a Clerk org invitation. Returns True on success (best effort)."""
     settings = get_settings()

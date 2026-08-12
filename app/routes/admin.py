@@ -206,6 +206,89 @@ class ClinicEdit(BaseModel):
     agent_greeting: str | None = None
 
 
+class CreateClinicRequest(BaseModel):
+    name: str
+    timezone: str = "America/New_York"
+    owner_email: str | None = None
+
+
+@router.post("/clinics", response_model=ClinicRow, status_code=201)
+async def create_clinic(
+    body: CreateClinicRequest,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_CLINIC_STATUS)),
+) -> ClinicRow:
+    """Stand up a clinic from the admin panel.
+
+    There was no way to do this, and the reason is worth stating rather than
+    working around: identity lives in Clerk. Both paths that create a practice
+    key on a Clerk organization, so a clinic created here without one is an
+    orphan — nobody can sign in to it, and when the owner eventually creates
+    their own organization a SECOND practice appears beside it, with the calls
+    and the billing on the wrong one.
+
+    So the organization is created FIRST, and if that fails nothing else happens.
+    A half-created clinic is worse than no button: the row looks real in every
+    list while being unreachable, and the person who finds out is the customer
+    trying to log in.
+
+    The clinic lands in onboarding at step one, exactly where it would be if the
+    owner had signed up themselves — the panel skips the sign-up, not the setup.
+    """
+    from app.services.clerk_api import create_org_invitation, create_organization
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="A clinic needs a name.")
+
+    clerk_org_id = await create_organization(name=name)
+    if not clerk_org_id:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not create the organization in Clerk, so no clinic was "
+                "created. A clinic without one cannot be signed in to."
+            ),
+        )
+
+    async with _app_db.platform_session_factory() as session:
+        practice = Practice(
+            id=uuid.uuid4(),
+            clerk_org_id=clerk_org_id,
+            name=name,
+            timezone=body.timezone,
+            pms_system="none",
+            business_hours={d: None for d in
+                            ("mon", "tue", "wed", "thu", "fri", "sat", "sun")},
+            languages_enabled=["en", "es"],
+            status="onboarding",
+            onboarding_step=1,
+        )
+        session.add(practice)
+        await session.flush()
+        await _audit(
+            session, ctx, "admin_create_clinic", practice_id=practice.id,
+            meta={"name": name, "invited": bool(body.owner_email)},
+        )
+        await session.commit()
+        row = ClinicRow(
+            id=str(practice.id), name=practice.name, status=practice.status,
+            plan=None, mrr_cents=0, onboarding_step=practice.onboarding_step,
+            created_at=practice.created_at, is_canary=False,
+            period_minutes_used=0.0, period_minutes_included=None,
+        )
+
+    if body.owner_email:
+        # Best effort, and deliberately after the commit: the clinic exists
+        # either way, and an invitation can be resent. Failing the whole request
+        # over a bounced email would leave the operator retrying a create that
+        # would then make a second organization.
+        await create_org_invitation(
+            clerk_org_id=clerk_org_id, email=body.owner_email.strip(),
+            clerk_role="org:admin",
+        )
+    return row
+
+
 @router.get("/clinics/{practice_id}", response_model=ClinicDetail)
 async def clinic_detail(
     practice_id: uuid.UUID,
