@@ -282,7 +282,13 @@ async def health_detailed() -> JSONResponse:
         except Exception:  # noqa: BLE001 — a health check must not fail on a count
             pms_ambiguous = False
 
-    alerts = recent_alerts()
+    # Stored first: the buffer is per-process and empties on every redeploy, so
+    # reading it alone means the loudest signal we have is only as durable as the
+    # last deploy. Memory is the fallback for the one case the database cannot
+    # cover — itself being unreachable.
+    from app.observability.alerts import recent_alerts_stored
+
+    alerts = await recent_alerts_stored() or recent_alerts()
     body = {
         "status": "ok" if (db_ok and alerts["count_last_hour"] == 0) else "degraded",
         "db": "ok" if db_ok else "down",

@@ -138,3 +138,49 @@ async def test_shared_pms_credentials_only_warn_when_there_are_credentials(
     assert body["pms_credentials_ambiguous"] is True, (
         "two clinics, one set of credentials, and nobody said so"
     )
+
+
+async def test_an_alert_outlives_the_process_that_raised_it(db_session):
+    """The buffer is per-process and Railway redeploys on every merge, so the
+    window in which page_not_delivered_urgent_callback can vanish was opened
+    several times a day. With two instances the health endpoint showed whichever
+    half the check landed on."""
+    from app.observability.alerts import _write, recent_alerts_stored
+
+    alerts._RECENT.clear()
+    await _write("page_not_delivered_urgent_callback", "reason=sms_disabled")
+
+    # A fresh process: nothing in memory, and the alert still has to be there.
+    alerts._RECENT.clear()
+    stored = await recent_alerts_stored()
+    assert stored is not None
+    assert stored["by_kind"].get("page_not_delivered_urgent_callback") == 1
+    assert stored["last_detail"] == "reason=sms_disabled"
+
+
+async def test_an_unreadable_store_falls_back_rather_than_reporting_quiet(
+    monkeypatch,
+):
+    """None means "use the buffer", not "no alerts". Reporting quiet because the
+    database is unreachable is the failure this file exists to prevent,
+    reproduced one level up."""
+    from app.observability.alerts import recent_alerts_stored
+
+    class _Broken:
+        def __call__(self):
+            raise RuntimeError("database is gone")
+
+    monkeypatch.setattr("app.db.platform_session_factory", _Broken())
+    assert await recent_alerts_stored() is None
+
+
+async def test_the_health_endpoint_prefers_what_was_stored(client, db_session):
+    from app.observability.alerts import _write
+
+    alerts._RECENT.clear()
+    await _write("pms_write_conflict", "booking=probe")
+
+    body = (await client.get("/health/detailed")).json()
+    assert body["alerts"]["by_kind"].get("pms_write_conflict") == 1, (
+        "the endpoint read the empty buffer instead of the stored alert"
+    )

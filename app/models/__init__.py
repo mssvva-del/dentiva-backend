@@ -1,5 +1,6 @@
 """ORM models. Import all here so Alembic autogenerate sees them."""
 
+from app.models.alert_event import AlertEvent
 from app.models.audit_log import AuditLog
 from app.models.baa_acceptance import BaaAcceptance
 from app.models.booking import Booking
@@ -44,6 +45,7 @@ __all__ = [
     "FeatureFlag",
     "Lead",
     "PricingPlan",
+    "AlertEvent",
     "PlatformSetting",
     "ProcessedWebhookEvent",
     "ReactivationCampaign",
