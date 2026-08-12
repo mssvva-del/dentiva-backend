@@ -29,6 +29,8 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.db as _app_db
+from app.adapters.bridge import bridge_name as _bridge_name
+from app.adapters.bridge import practice_credentials as _practice_credentials
 from app.auth.admin import AdminContext, require_admin_permission, require_internal
 from app.auth.permissions import (
     IMPERSONATE_CLINIC,
@@ -197,6 +199,12 @@ class ClinicDetail(BaseModel):
     kb_insurances: int = 0
     kb_has_policies: bool = False
     kb_has_emergency: bool = False
+    # Which bridge actually answers for this clinic, and whose keys it uses.
+    # "eaglesoft" in pms_system says what the practice runs; it says nothing
+    # about whether we can reach it, and those two were indistinguishable from
+    # this screen. None here means every call falls back to our own book.
+    pms_bridge: str | None = None
+    pms_credentials_own: bool = False
 
 
 class BaaHistoryRow(BaseModel):
@@ -387,6 +395,8 @@ async def clinic_detail(
         kb_insurances=len(kb.get("insurances") or []),
         kb_has_policies=bool(any((kb.get("policies") or {}).values())),
         kb_has_emergency=bool(kb.get("emergency")),
+        pms_bridge=_bridge_name(p),
+        pms_credentials_own=_practice_credentials(p) is not None,
     )
 
 
@@ -448,6 +458,67 @@ async def edit_clinic(
         await session.commit()
     # Return the fresh detail (reuse the reader).
     return await clinic_detail(practice_id, ctx)  # type: ignore[arg-type]
+
+
+class PmsCredentials(BaseModel):
+    """One clinic's own bridge credentials. Write-only: nothing reads them back."""
+    bridge: str                       # "nexhealth" | "kolla"
+    api_key: str
+    subdomain: str | None = None      # nexhealth
+    location_id: str | None = None    # nexhealth
+    consumer_id: str | None = None    # kolla
+    connector_id: str | None = None   # kolla
+
+
+class PmsCredentialsStatus(BaseModel):
+    practice_id: str
+    bridge: str | None
+    configured: bool
+
+
+@router.put("/clinics/{practice_id}/pms-credentials", response_model=PmsCredentialsStatus)
+async def set_pms_credentials(
+    practice_id: uuid.UUID,
+    payload: PmsCredentials,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_CLINIC_STATUS)),
+) -> PmsCredentialsStatus:
+    """Give this clinic its own PMS bridge.
+
+    Until now the only credentials were the deployment's, and they describe ONE
+    location — so clinic number two either shared clinic number one's calendar or
+    had no PMS at all. Neither is something to fix with a redeploy while a
+    practice waits.
+
+    Nothing here is returned, logged or echoed: an API key into a dental
+    practice's own system is a larger thing to leak than any one patient record.
+    The audit entry records who set it and which bridge, never the value.
+    """
+    async with _app_db.platform_session_factory() as session:
+        practice = (await session.execute(
+            select(Practice).where(Practice.id == practice_id)
+        )).scalar_one_or_none()
+        if practice is None:
+            raise HTTPException(status_code=404, detail="Clinic not found.")
+
+        practice.pms_credentials = payload.model_dump(exclude_none=True)
+        # Validate through the same function the voice path uses, so "accepted"
+        # and "usable on a call" cannot mean different things. A half-filled set
+        # would otherwise be stored happily and fail mid-conversation.
+        if _practice_credentials(practice) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Incomplete credentials. nexhealth needs api_key, subdomain "
+                    "and location_id; kolla needs api_key and one of consumer_id "
+                    "or connector_id."
+                ),
+            )
+        await _audit(session, ctx, "admin_set_pms_credentials",
+                     practice_id=practice_id, meta={"bridge": payload.bridge})
+        await session.commit()
+        return PmsCredentialsStatus(
+            practice_id=str(practice_id), bridge=payload.bridge, configured=True
+        )
 
 
 # ===========================================================================

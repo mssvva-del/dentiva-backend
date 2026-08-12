@@ -275,7 +275,11 @@ async def health_detailed() -> JSONResponse:
             async with app_db.platform_session_factory() as session:
                 with_pms = (await session.execute(
                     _sa_select_(_func.count()).select_from(_Practice).where(
-                        _Practice.pms_system.notin_(("", "none", "mock", "other"))
+                        _Practice.pms_system.notin_(("", "none", "mock", "other")),
+                        # A clinic carrying its own bridge credentials is not
+                        # competing for the environment's, so it cannot be one of
+                        # the two this alert is about.
+                        _Practice.pms_credentials.is_(None),
                     )
                 )).scalar_one()
             pms_ambiguous = with_pms > 1

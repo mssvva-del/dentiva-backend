@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 from app.models.mixins import TimestampMixin, UUIDPKMixin
+from app.models.types import EncryptedJSON
 
 
 class Practice(UUIDPKMixin, TimestampMixin, Base):
@@ -37,6 +38,15 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     rings_before_ai: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
     pms_system: Mapped[str] = mapped_column(Text, nullable=False)
     pms_credentials_secret_key: Mapped[str | None] = mapped_column(Text)
+    # This clinic's OWN bridge credentials: {"bridge": "nexhealth"|"kolla", ...}.
+    # The environment's NEXHEALTH_*/KOLLA_* name one clinic's location, so a
+    # second practice on a PMS either has this or has no PMS — the alternative is
+    # reading somebody else's calendar aloud to a patient.
+    #
+    # Encrypted (Fernet) because it holds a live key into a practice's own
+    # system, and write-only across the API: the admin endpoint sets it, nothing
+    # returns it.
+    pms_credentials: Mapped[dict | None] = mapped_column(EncryptedJSON)
     languages_enabled: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default="{en}"
     )
