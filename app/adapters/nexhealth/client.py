@@ -21,6 +21,7 @@ Scope (block 2): the reactivation PULL only. Booking write-back
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 
 import httpx
@@ -72,6 +73,24 @@ class NexHealthError(Exception):
 
 class NexHealthUnavailable(Exception):
     """Transient NexHealth failure (5xx / network / timeout) — retryable."""
+
+
+class NexHealthDuplicate(NexHealthError):
+    """The patient we tried to create is already in the practice's system.
+
+    Carries their id, because this is not really a failure — the person exists,
+    which is what we wanted — and losing a booking over it would be absurd.
+    """
+
+    def __init__(self, patient_id: str) -> None:
+        super().__init__("patient already exists")
+        self.patient_id = patient_id
+
+
+# The only part of a NexHealth error body we ever keep. Error text can echo what
+# we sent, which for this endpoint is a real person's name and number, so the
+# body is matched and discarded rather than stored or logged.
+_DUPLICATE_ID_RE = re.compile(r"already exists\D+id=(\d+)")
 
 
 def _str_or_none(value: object) -> str | None:
@@ -206,6 +225,13 @@ class NexHealthClient(ReactivationSource):
             self._token = None if resp.status_code == 401 else self._token
             raise NexHealthUnavailable(f"NexHealth {resp.status_code} on POST {path}")
         if resp.status_code >= 400:
+            # One thing is worth reading out of an error body: "this person is
+            # already here, and here is their id". Everything else about the body
+            # is discarded — error text echoes what we sent, and for /patients
+            # that is a real name and number.
+            duplicate = _DUPLICATE_ID_RE.search(resp.text or "")
+            if duplicate:
+                raise NexHealthDuplicate(duplicate.group(1))
             raise NexHealthError(f"NexHealth {resp.status_code} on POST {path}")
         return resp
 
@@ -303,6 +329,116 @@ class NexHealthClient(ReactivationSource):
             appointment_id=str(appt_id),
             start_time=str(created.get("start_time") or start_time),
         )
+
+    # ── the patient behind the appointment ───────────────────────────────────
+
+    async def find_patient_id(self, *, phone: str) -> str | None:
+        """The PMS id of a patient already in the practice's system, or None.
+
+        This is what keeps most calls short. A returning caller is already in the
+        clinic's system, so we adopt their id and ask them nothing; only a
+        genuinely new person has to answer for a date of birth.
+
+        The parameter is ``phone_number``, verified against the sandbox
+        2026-08-13. ``search`` is silently IGNORED — it answered 200 with the
+        first five patients in the practice, none of them the one being looked
+        for. A lookup that returns strangers rather than nothing is the worse
+        kind of wrong, which is why the digit comparison below is not optional
+        even now that the parameter is right.
+
+        Matching is on digits alone: the PMS stores whatever the front desk
+        typed years ago, which is "(620) 555-1111" as often as "+16205551111".
+        """
+        wanted = re.sub(r"\D", "", phone or "")[-10:]
+        if len(wanted) < 10:
+            return None
+        try:
+            payload = (await self._get(
+                "/patients", {"per_page": 25, "phone_number": wanted}
+            )).json()
+        except (NexHealthError, NexHealthUnavailable):
+            # Not being able to look someone up is not a reason to fail a
+            # booking. The caller falls through to creating them, and NexHealth
+            # refuses a duplicate on its own.
+            return None
+        for row in self._patients_from(payload):
+            stored = re.sub(r"\D", "", str((row.get("bio") or {}).get("phone_number") or ""))
+            if stored[-10:] == wanted and row.get("id") is not None:
+                return str(row["id"])
+        return None
+
+    async def first_provider_id(self) -> str | None:
+        """Any provider at this location — a patient cannot be created without one.
+
+        Which provider hardly matters: NexHealth attaches a new patient to one as
+        an administrative owner, and the appointment carries the provider the
+        caller was actually offered. Taking the first keeps a phone call from
+        having to ask "and which dentist would you like on your file?".
+        """
+        try:
+            payload = (await self._get("/providers", {"per_page": 5})).json()
+        except (NexHealthError, NexHealthUnavailable):
+            return None
+        rows = payload.get("data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("providers") or []
+        for row in rows:
+            if isinstance(row, dict) and row.get("id") is not None and not row.get("inactive"):
+                return str(row["id"])
+        return None
+
+    async def create_patient(
+        self,
+        *,
+        first_name: str,
+        last_name: str,
+        phone: str,
+        date_of_birth: str,
+        provider_id: str,
+        email: str,
+    ) -> str:
+        """Create the patient in the practice's own system. Returns their PMS id.
+
+        VERIFIED against the sandbox 2026-08-13, and every part of the shape was
+        wrong in the docs we would otherwise have followed:
+
+          * ``provider`` goes in the BODY, not the query string — the documented
+            ``?provider_id=`` form answers 400 "Missing parameter provider".
+          * ``email`` and ``bio.date_of_birth`` are REQUIRED, not optional. That
+            is why the agent has to ask for a date of birth: a call knows a name
+            and a number, and an invented birth date lands in the field practices
+            match and de-duplicate people on.
+          * a duplicate answers 400 "A patient with that information already
+            exists - id=NNN". That is not a failure — the person is there, which
+            is what we wanted — so the id is read back out of the message rather
+            than the booking being lost over it.
+        """
+        digits = re.sub(r"\D", "", phone or "")[-10:]
+        body = {
+            "provider": {"provider_id": provider_id},
+            "patient": {
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": email,
+                "bio": {"phone_number": digits, "date_of_birth": date_of_birth},
+            },
+        }
+        try:
+            payload = (await self._post("/patients", body)).json()
+        except NexHealthDuplicate as exc:
+            # Already there. The booking proceeds against the person NexHealth
+            # just told us about, rather than failing over a success.
+            return exc.patient_id
+        data = payload.get("data")
+        # Their docs wrap the new patient in "user"; the sandbox has returned it
+        # bare. Reading the wrapper as the patient would store an id that
+        # addresses nothing, and the appointment write would fail later, on a
+        # call, rather than here.
+        created = data.get("user") if isinstance(data, dict) and "user" in data else data
+        patient_id = created.get("id") if isinstance(created, dict) else None
+        if patient_id is None:
+            raise NexHealthError("create-patient response missing id")
+        return str(patient_id)
 
     # ── pull ──────────────────────────────────────────────────────────────────
     @staticmethod

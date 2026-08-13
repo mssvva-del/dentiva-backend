@@ -24,7 +24,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -506,6 +506,7 @@ async def _upsert_patient(
     last_name: str,
     phone: str,
     language: str | None = None,
+    date_of_birth: str | None = None,
 ) -> Patient | str:
     """Return existing patient by phone or create a stub for this call.
 
@@ -535,6 +536,11 @@ async def _upsert_patient(
         last_name=last_name,
         phone=phone,
         preferred_language=preferred_language,
+        # Kept when the caller gave it. NexHealth will not create a patient
+        # without one, so this is what decides whether the clinic's own system
+        # ever learns this person exists — or whether the front desk types them
+        # in from an SMS.
+        date_of_birth=date_of_birth or None,
     )
     session.add(patient)
     await session.flush()
@@ -1021,6 +1027,76 @@ async def _sync_booking_change_to_pms(booking_id, practice_id, action: str) -> N
     logger.info("PMS %s %s for booking %s", action, status, booking_id)
 
 
+def service_email_for(patient_id) -> str:
+    """The address we put in a PMS record for someone met over the phone.
+
+    NexHealth will not create a patient without an email, and a call does not
+    collect one. Three ways to answer that, and only one of them is honest:
+
+      * Invent something plausible — that is a REAL address belonging to a
+        stranger, who then receives a dental practice's appointment reminders.
+      * Reuse a shared placeholder — the practice's own mail then collapses
+        several patients into one address.
+      * Say plainly that we do not have one. That is this: a unique address on a
+        subdomain we own with no mailbox behind it, so mail to it bounces rather
+        than disappearing quietly. "no-reply" is legible to whoever opens the
+        chart, and the bounce is legible to whoever sends to it.
+
+    The patient's own email replaces this the moment the practice collects one
+    in the chair, which is where an email address actually gets typed correctly.
+    """
+    return f"no-reply+{patient_id}@no-reply.dentovox.com"
+
+
+async def _resolve_patient_in_pms(
+    practice, patient_facts: tuple, practice_id, booking_id
+) -> str:
+    """Get this caller a real id in the clinic's own system. "" if we cannot.
+
+    Returning "" is a normal outcome, not a failure: the booking is already made
+    and the caller has already been told it is confirmed. The clinic gets its
+    text and the front desk adds the patient, which is what happened for every
+    booking before this function existed. Nothing here may raise into a live call.
+    """
+    from app.adapters.bridge import bridge_name, pms_client_for
+
+    if bridge_name(practice) != "nexhealth":
+        # Only NexHealth is verified. Kolla's contact-creation shape has never
+        # been seen against a live connector, and guessing it would write
+        # half-formed people into a practice's records.
+        record_alert("pms_patient_not_in_pms", f"practice={practice_id} booking={booking_id}")
+        return ""
+
+    patient_id, first_name, last_name, phone, date_of_birth = patient_facts
+    client = pms_client_for(practice)
+    try:
+        found = await client.find_patient_id(phone=phone or "")
+        if found:
+            return found
+        if not date_of_birth:
+            # The one thing a call does not know and we refuse to invent.
+            record_alert(
+                "pms_patient_needs_dob", f"practice={practice_id} booking={booking_id}"
+            )
+            return ""
+        provider_id = await client.first_provider_id()
+        if not provider_id:
+            record_alert("pms_no_provider", f"practice={practice_id}")
+            return ""
+        return await client.create_patient(
+            first_name=first_name or "Patient",
+            last_name=last_name or "Unknown",
+            phone=phone or "",
+            date_of_birth=date_of_birth,
+            provider_id=provider_id,
+            email=service_email_for(patient_id),
+        )
+    except Exception:  # noqa: BLE001 — never worth a 500 in the middle of a call
+        logger.exception("could not resolve patient in the PMS")
+        record_alert("pms_patient_not_in_pms", f"practice={practice_id} booking={booking_id}")
+        return ""
+
+
 async def _write_booking_to_pms(
     practice_id, booking_id, patient_pms_id: str, provider_id: str, operatory_id
 ) -> None:
@@ -1214,11 +1290,17 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
 
         # Upsert patient (stores preferred_language on a new patient).
         patient = await _upsert_patient(
-            session, practice_id, first_name, last_name, phone, language=call_language
+            session, practice_id, first_name, last_name, phone,
+            language=call_language, date_of_birth=args.get("patient_dob"),
         )
         if patient is AMBIGUOUS:
             return {"booked": False, "message": ASK_WHICH_PATIENT}
         patient_opted_out = patient.sms_opt_out
+        # Read now, while the instance is live. Everything on this session
+        # expires at the commit below, and the PMS lookup happens after it.
+        patient_id_for_pms = patient.id
+        patient_facts = (patient.id, patient.first_name, patient.last_name,
+                         patient.phone, patient.date_of_birth)
 
         # REAL openings from the clinic's own hours minus booked slots (same source
         # check_availability offered). Honor an exact time if the agent passed one,
@@ -1333,14 +1415,38 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         if practice_obj is not None and pms_is_connected(practice_obj):
             patient_pms_id = patient.pms_external_id or ""
             if not patient_pms_id or patient_pms_id.startswith(VOICE_PATIENT_PREFIX):
-                # We met this person on the phone; the clinic's system has never
-                # heard of them. Writing an appointment against an unknown patient
-                # is not possible, so the front desk has to add them by hand — and
-                # must be told, or the slot silently exists only here.
-                record_alert(
-                    "pms_patient_not_in_pms",
-                    f"practice={practice_id} booking={booking.id}",
+                # We met this person on the phone and the clinic's system has
+                # never heard of them — so before an appointment can be written,
+                # the person has to exist there. Two ways, in this order:
+                #
+                #   1. They are already there under the number they are calling
+                #      from. Most callers are: this asks them nothing.
+                #   2. Create them. Which needs a date of birth, because
+                #      NexHealth requires one and inventing it would put a made-up
+                #      date in the field practices match people on.
+                #
+                # Neither working is not an error. The booking stands, the clinic
+                # gets its text, and the front desk types the patient in — which
+                # is exactly what happened for every booking before this existed.
+                patient_pms_id = await _resolve_patient_in_pms(
+                    practice_obj, patient_facts, practice_id, booking.id,
                 )
+                if patient_pms_id:
+                    # Update by statement rather than through the instance. The
+                    # session has already committed the booking, which expires
+                    # every object on it — and a re-attached Patient tries an
+                    # UPDATE that matches no row, failing the whole tool call
+                    # with "our system hiccuped" after the appointment was
+                    # already made. Storing the id is an optimisation; losing the
+                    # booking over it would not be.
+                    await session.execute(
+                        update(Patient)
+                        .where(Patient.id == patient_id_for_pms)
+                        .values(pms_external_id=patient_pms_id)
+                    )
+                    await session.commit()
+            if not patient_pms_id or patient_pms_id.startswith(VOICE_PATIENT_PREFIX):
+                pass  # already alerted inside _resolve_patient_in_pms
             elif not chosen_slot.prov_num:
                 record_alert(
                     "pms_slot_without_provider",
