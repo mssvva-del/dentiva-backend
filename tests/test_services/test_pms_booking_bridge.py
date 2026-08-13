@@ -408,7 +408,6 @@ def test_a_location_is_enough_because_the_key_is_the_accounts(monkeypatch):
     import uuid
 
     from app.adapters.bridge import bridge_name, pms_client_for
-
     from app.adapters.nexhealth import client as nx
 
     _configured(monkeypatch, pms_env_practice_id=str(uuid.uuid4()))
