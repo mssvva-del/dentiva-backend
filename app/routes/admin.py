@@ -461,13 +461,47 @@ async def edit_clinic(
 
 
 class PmsCredentials(BaseModel):
-    """One clinic's own bridge credentials. Write-only: nothing reads them back."""
+    """What links a clinic to its calendar. Write-only: nothing reads it back.
+
+    For NexHealth this is usually just ``location_id`` — one account key covers
+    every practice connected to us, and copying it into each clinic's row would
+    mean rotating it in as many places as we have customers. api_key and
+    subdomain are for the practice that is on its OWN NexHealth account.
+    """
     bridge: str                       # "nexhealth" | "kolla"
-    api_key: str
+    api_key: str | None = None
     subdomain: str | None = None      # nexhealth
     location_id: str | None = None    # nexhealth
     consumer_id: str | None = None    # kolla
     connector_id: str | None = None   # kolla
+
+
+class PmsLocation(BaseModel):
+    id: str
+    name: str
+
+
+@router.get("/pms/locations", response_model=list[PmsLocation])
+async def pms_locations(
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_CLINIC_STATUS)),
+) -> list[PmsLocation]:
+    """The practices connected to our NexHealth account, for the link dropdown.
+
+    Admin-only, deliberately: this list is our customer roster. Showing it on a
+    clinic's own onboarding screen would let anyone who signs up read which
+    practices work with us — self-service that leaks the customer list is not
+    self-service.
+
+    Empty is normal. A practice appears here only after NexHealth connects it,
+    which involves their staff installing the Synchronizer at the clinic; until
+    then there is genuinely nothing to pick.
+    """
+    from app.adapters.nexhealth.client import NexHealthClient
+    from app.config import get_settings as _settings
+
+    if not _settings().nexhealth_api_key:
+        return []
+    return [PmsLocation(**row) for row in await NexHealthClient().list_locations()]
 
 
 class PmsCredentialsStatus(BaseModel):
@@ -508,9 +542,10 @@ async def set_pms_credentials(
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "Incomplete credentials. nexhealth needs api_key, subdomain "
-                    "and location_id; kolla needs api_key and one of consumer_id "
-                    "or connector_id."
+                    "Incomplete. nexhealth needs a location_id (the account key "
+                    "comes from the environment; send api_key and subdomain only "
+                    "for a practice on its own NexHealth account). kolla needs "
+                    "api_key and one of consumer_id or connector_id."
                 ),
             )
         await _audit(session, ctx, "admin_set_pms_credentials",

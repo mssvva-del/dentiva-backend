@@ -35,12 +35,22 @@ from app.models.practice import Practice
 # state and not an error.
 _NO_PMS = {"", "none", "mock", "other"}
 
-# What each bridge cannot work without. A half-filled set is treated as no
-# credentials at all: a client built without a location id does not fail at
-# construction, it fails mid-call, which is the same bad news delivered to a
-# patient instead of to us.
+# What each bridge cannot work without, on the practice's own row. A half-filled
+# set is treated as no credentials at all: a client built without a location id
+# does not fail at construction, it fails mid-call, which is the same bad news
+# delivered to a patient instead of to us.
+#
+# NexHealth needs only the LOCATION. The api_key is one key for our whole
+# account and every practice connected to it, so copying it into each clinic's
+# row would mean rotating it in N places — and the one row somebody missed
+# would lose its calendar silently, months later, with no error anywhere. The
+# key stays in the environment, where there is exactly one of it.
+#
+# A practice may still carry a full set (its own key and subdomain) when it is
+# on its own NexHealth account rather than ours. Whatever it carries wins; what
+# it omits falls back to the environment.
 REQUIRED_FIELDS = {
-    "nexhealth": ("api_key", "subdomain", "location_id"),
+    "nexhealth": ("location_id",),
     "kolla": ("api_key",),  # plus one of consumer_id / connector_id, checked below
 }
 
@@ -82,6 +92,12 @@ def practice_credentials(practice: Practice) -> dict | None:
     if bridge == "kolla" and not (creds.get("consumer_id") or creds.get("connector_id")):
         # Without one of these a Kolla request spans every practice on the
         # connector. That is never what a patient-facing call wants.
+        return None
+    if bridge == "nexhealth" and not (
+        str(creds.get("api_key") or "").strip() or get_settings().nexhealth_api_key
+    ):
+        # A location id with no key anywhere addresses nothing. Better to say so
+        # than to build a client that fails on the first call of the day.
         return None
     return {**creds, "bridge": bridge}
 

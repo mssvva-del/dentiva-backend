@@ -367,6 +367,37 @@ class NexHealthClient(ReactivationSource):
                 return str(row["id"])
         return None
 
+    async def list_locations(self) -> list[dict]:
+        """Every practice connected to OUR NexHealth account: [{id, name}].
+
+        One account key covers all of them, so linking a clinic to its calendar
+        is a matter of picking an id — nobody types a credential, and no clinic
+        is ever shown another clinic's practice, because only an admin sees this.
+
+        The endpoint answers 200 with an empty list until NexHealth connects a
+        practice on their side (their staff install the Synchronizer at the
+        clinic). Empty is therefore a normal, expected answer and not a fault.
+
+        Field names beyond id/name are UNVERIFIED: the production account had
+        nothing connected when this was written, so there was no row to read.
+        Anything missing degrades to a blank label, never to a crash.
+        """
+        try:
+            payload = (await self._get("/locations", {"per_page": 100})).json()
+        except (NexHealthError, NexHealthUnavailable):
+            return []
+        rows = payload.get("data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("locations") or []
+        out = []
+        for row in rows:
+            if isinstance(row, dict) and row.get("id") is not None:
+                out.append({
+                    "id": str(row["id"]),
+                    "name": str(row.get("name") or row.get("display_name") or ""),
+                })
+        return out
+
     async def first_provider_id(self) -> str | None:
         """Any provider at this location — a patient cannot be created without one.
 
