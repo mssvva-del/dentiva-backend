@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,14 +59,44 @@ class PatientsListResponse(BaseModel):
     has_more: bool
 
 
+class PatientSearch(BaseModel):
+    """Search terms travel in a BODY, never a query string.
+
+    A patient's name in a URL is written into the web server's access log, the
+    browser's history, and the log of every proxy on the way. It is the same
+    reason /api/calls/search is a POST, decided once and then not carried across
+    to this endpoint when it was written.
+    """
+    search: str | None = Field(default=None, max_length=120)
+    limit: int = Field(default=25, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
+@router.post("/search", response_model=PatientsListResponse)
+async def search_patients(
+    body: PatientSearch,
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+    user: User = Depends(require_permission(VIEW_PATIENTS)),
+) -> PatientsListResponse:
+    """The roster, filtered by a name or number the caller typed."""
+    return await list_patients(
+        limit=body.limit, offset=body.offset, search=body.search,
+        practice=practice, db=db, _user=user,
+    )
+
+
 @router.get("", response_model=PatientsListResponse)
 async def list_patients(
-    search: str | None = Query(default=None, max_length=120),
+    # No `search` here any more. Listing is a plain read and belongs in a GET;
+    # a name is not, and leaving the parameter in place would keep the leak open
+    # for anyone who still passed it.
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     practice: Practice = Depends(get_current_practice),
     db: AsyncSession = Depends(get_tenant_db),
     _user: User = Depends(require_permission(VIEW_PATIENTS)),
+    search: str | None = None,   # POST /search only — never bound from the query
 ) -> PatientsListResponse:
     """Patient roster with per-patient visit aggregates.
 

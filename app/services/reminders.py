@@ -29,6 +29,7 @@ from app.db import set_tenant
 from app.models.booking import Booking
 from app.models.patient import Patient
 from app.models.practice import Practice
+from app.services.availability import slot_from_utc
 from app.services.sms import send_appointment_reminder
 from app.services.worker_lock import advisory_tick_lock
 
@@ -78,13 +79,18 @@ async def _claim_window(
 
     payloads: list[dict] = []
     for booking, patient, practice in rows:
+        # The clinic's own clock. appointment_at is UTC, so the raw column put an
+        # hour in the reminder that did not match the confirmation text the same
+        # patient got when they booked — off by the offset, and on a late Pacific
+        # appointment naming the wrong day.
+        local_date, local_time = slot_from_utc(booking.appointment_at, practice.timezone)
         payloads.append(
             {
                 "to": patient.phone,
                 "practice_name": practice.name,
                 "first_name": patient.first_name,
-                "date": booking.appointment_at.date().isoformat(),
-                "time": booking.appointment_at.strftime("%H:%M"),
+                "date": local_date,
+                "time": local_time,
                 "soon": soon,
                 "opted_out": patient.sms_opt_out,
             }

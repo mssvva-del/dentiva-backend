@@ -46,6 +46,7 @@ from app.services.availability import (
     compute_native_slots,
     compute_pms_slots,
     pms_is_connected,
+    slot_from_utc,
     slot_to_utc,
     visit_minutes,
 )
@@ -1578,6 +1579,43 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
                 ),
             }
 
+        # Idempotency, the same guard book_appointment has had all along.
+        #
+        # Retell redelivers a function_call when its own request times out. On
+        # redelivery this handler finds the appointment it ALREADY moved, sees
+        # its new slot as taken (it is taken by this very booking), and moves it
+        # AGAIN to the next free time. The patient agreed to ten o'clock, gets a
+        # second text saying eleven, and turns up to a clinic expecting neither.
+        # With a PMS connected it moves in their real calendar twice.
+        #
+        # The marker is the audit row this handler writes: booking_rescheduled
+        # carries the retell_call_id, so "have I already moved something on this
+        # call?" is answerable without a new column.
+        already = (await session.execute(
+            select(AuditLog).where(
+                AuditLog.practice_id == practice_id,
+                AuditLog.action == "booking_rescheduled",
+                AuditLog.resource_id == booking.id,
+                AuditLog.audit_metadata["retell_call_id"].astext == retell_call_id,
+            )
+        )).scalars().first()
+        if already is not None:
+            # Answer with the time we actually hold, spoken the way the first
+            # reply spoke it. Saying "already moved" without the time invites the
+            # agent to ask again, which is how one redelivery becomes two.
+            meta = already.audit_metadata or {}
+            stored = booking.appointment_at
+            return {
+                "rescheduled": True,
+                "appointment": {
+                    "date": meta.get("spoken_date") or stored.date().isoformat(),
+                    "time": meta.get("spoken_time") or stored.strftime("%H:%M"),
+                    "provider": booking.provider_name or "Dr. Smith",
+                    "procedure": booking.procedure_type or "cleaning",
+                },
+                "message": "That's already moved — you're all set.",
+            }
+
         procedure = booking.procedure_type or "cleaning"
         practice_obj = (
             await session.execute(select(Practice).where(Practice.id == practice_id))
@@ -1645,6 +1683,12 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
                     "retell_call_id": retell_call_id,
                     "from": old_at.isoformat() if old_at else None,
                     "to": booking.appointment_at.isoformat(),
+                    # The time as it was SPOKEN — the clinic's local clock, not
+                    # UTC. A redelivery of this call answers from here, and
+                    # deriving it from the UTC stamp above told the patient a
+                    # time four hours off the one they had just agreed to.
+                    "spoken_date": chosen.date,
+                    "spoken_time": chosen.time,
                     "patient_phone_last4": phone[-4:] if len(phone) >= 4 else "****",
                 },
             )
@@ -1743,19 +1787,24 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
                 "message": "I don't see an upcoming appointment to cancel.",
             }
 
-        cancelled_date = booking.appointment_at.date().isoformat()
-        cancelled_time = booking.appointment_at.strftime("%H:%M")
         booking.status = CANCELLED
         # Captured before the session closes: the PMS call runs on its own
         # session afterwards, and touching an expired instance there would fail
         # in a way that reads as a PMS problem.
         booking_id_for_pms = booking.id
 
-        practice_name = (
+        row = (
             await session.execute(
-                select(Practice.name).where(Practice.id == practice_id)
+                select(Practice.name, Practice.timezone).where(Practice.id == practice_id)
             )
-        ).scalar_one_or_none() or "our office"
+        ).first()
+        practice_name = (row[0] if row else None) or "our office"
+        # In the clinic's own clock. The column is UTC, so formatting it raw told
+        # the patient — out loud AND by text — an hour that was four or five off,
+        # and on a late-afternoon Pacific appointment the wrong day entirely.
+        cancelled_date, cancelled_time = slot_from_utc(
+            booking.appointment_at, row[1] if row else None
+        )
         first_name = patient.first_name
         patient_opted_out = patient.sms_opt_out
 
@@ -2138,9 +2187,16 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
         booking = await _find_upcoming_booking(session, practice_id, patient.id)
         upcoming = None
         if booking is not None:
+            # The clinic's clock, not the database's. The agent reads this out to
+            # the patient, so a raw UTC column becomes an hour they did not agree
+            # to — said in a confident voice, which is the worst way to be wrong.
+            tz_name = (await session.execute(
+                select(Practice.timezone).where(Practice.id == practice_id)
+            )).scalar_one_or_none()
+            local_date, local_time = slot_from_utc(booking.appointment_at, tz_name)
             upcoming = {
-                "date": booking.appointment_at.date().isoformat(),
-                "time": booking.appointment_at.strftime("%H:%M"),
+                "date": local_date,
+                "time": local_time,
                 "provider": booking.provider_name,
             }
 

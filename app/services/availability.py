@@ -56,6 +56,25 @@ def slot_to_utc(date_str: str, time_str: str, tz_name: str | None) -> datetime:
     return naive.replace(tzinfo=_tz(tz_name)).astimezone(UTC)
 
 
+def slot_from_utc(when: datetime, tz_name: str | None) -> tuple[str, str]:
+    """A stored UTC appointment back into the clinic's own clock: (date, "HH:MM").
+
+    The inverse of slot_to_utc, and it was missing. Booking and reschedule answer
+    with the local slot strings they were offered, so those were right — but
+    every other read-back formatted the raw UTC column:
+
+        booking.appointment_at.strftime("%H:%M")
+
+    which turns a 09:00 New York appointment into "13:00", and a 17:30 Los
+    Angeles one into 00:30 the FOLLOWING DAY. That string is what the agent says
+    out loud when a patient asks about their appointment, what the cancellation
+    confirms, what the 24-hour reminder texts, and what the waitlist offers to
+    the next patient in line. Every one of those is wrong from the first call.
+    """
+    local = when.astimezone(_tz(tz_name))
+    return local.date().isoformat(), local.strftime("%H:%M")
+
+
 def _parse_hhmm(v: str) -> tuple[int, int] | None:
     try:
         h, m = v.split(":")

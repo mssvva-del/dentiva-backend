@@ -43,6 +43,7 @@ from app.models.audit_log import AuditLog
 from app.models.enums import CANCELLED
 from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
+from app.services.availability import slot_from_utc
 from app.services.sms import send_cancellation_notice, send_waitlist_opening
 from app.webhooks.retell import (
     _backfill_from_waitlist,
@@ -269,7 +270,11 @@ async def _handle_sms(from_number: str, intent: str, to_number: str = "") -> Res
                 )
             )
             await session.commit()
-            when = booking.appointment_at.strftime("%b %-d at %-I:%M %p")
+            # The clinic's clock. appointment_at is UTC, and this line put an
+            # hour in the reply that contradicted the confirmation the same
+            # patient received when they booked.
+            _d, _t = slot_from_utc(booking.appointment_at, practice.timezone)
+            when = f"{_d} at {_t}"
             return _twiml(
                 f"Thanks {first_name}, your appointment on {when} is confirmed. "
                 "See you then!"
@@ -282,8 +287,9 @@ async def _handle_sms(from_number: str, intent: str, to_number: str = "") -> Res
                     "We don't see an upcoming appointment to cancel. Call us if you "
                     "need anything!"
                 )
-            cancelled_date = booking.appointment_at.date().isoformat()
-            cancelled_time = booking.appointment_at.strftime("%H:%M")
+            cancelled_date, cancelled_time = slot_from_utc(
+                booking.appointment_at, practice.timezone
+            )
             booking.status = CANCELLED
             session.add(
                 _audit(
