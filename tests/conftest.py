@@ -26,6 +26,22 @@ os.environ["AUTH_DEV_BYPASS"] = "true"
 os.environ["SMS_ENABLED"] = "false"
 os.environ["TWILIO_ACCOUNT_SID"] = ""
 os.environ["TWILIO_AUTH_TOKEN"] = ""
+# Same rule, and learned the same way. A developer .env holding a REAL NexHealth
+# production key was read by the suite: an adapter test that asserted on the
+# configured key printed the whole thing into its failure output, where it went
+# into a terminal, a log and a chat transcript before anyone noticed.
+#
+# A test that can reach production credentials can reach production. It can
+# create a patient in a real practice, read a real calendar, and leak the key by
+# doing nothing more exotic than failing. Blanked here for the whole session, so
+# no individual test has to remember.
+for _credential in (
+    "NEXHEALTH_API_KEY", "NEXHEALTH_SUBDOMAIN", "NEXHEALTH_LOCATION_ID",
+    "KOLLA_API_KEY", "KOLLA_CONNECTOR_ID", "KOLLA_CONSUMER_ID",
+    "OPEN_DENTAL_DEV_KEY", "OPEN_DENTAL_CUSTOMER_KEY",
+    "RETELL_API_KEY", "STRIPE_SECRET_KEY",
+):
+    os.environ[_credential] = ""
 # Mount the Groq custom-LLM relay so its WS tests run (prod keeps it off by default).
 os.environ["ENABLE_LLM_RELAY"] = "true"
 # App connects as the RLS-enforced dentiva_app role; schema mgmt uses the owner.

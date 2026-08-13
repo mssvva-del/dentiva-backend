@@ -392,13 +392,60 @@ def test_half_filled_credentials_are_treated_as_none(monkeypatch):
     practice = _practice_with_id(uuid.uuid4())
     for partial in (
         {"bridge": "nexhealth", "api_key": "k", "subdomain": "s"},   # no location
-        {"bridge": "nexhealth", "api_key": "k", "location_id": "1"},  # no subdomain
         {"bridge": "kolla", "api_key": "k"},        # neither consumer nor connector
         {"bridge": "carrier-pigeon", "api_key": "k"},
         {"api_key": "k", "subdomain": "s", "location_id": "1"},       # no bridge named
     ):
         _with_credentials(practice, **partial)
         assert bridge_name(practice) is None, f"{partial} was accepted"
+
+
+def test_a_location_is_enough_because_the_key_is_the_accounts(monkeypatch):
+    """One NexHealth key covers every practice connected to our account. Copying
+    it into each clinic's row would mean rotating it in as many places as we
+    have customers — and the row somebody missed would lose its calendar
+    silently, months later, with nothing raised anywhere."""
+    import uuid
+
+    from app.adapters.bridge import bridge_name, pms_client_for
+    from app.adapters.nexhealth import client as nx
+
+    _configured(monkeypatch, pms_env_practice_id=str(uuid.uuid4()))
+    # The client reads its own settings. Given a fake set explicitly rather than
+    # whatever happens to be in the environment — a test that reaches real
+    # credentials can reach the real account behind them.
+    monkeypatch.setattr(nx, "get_settings", lambda: type("S", (), {
+        "nexhealth_api_key": "account-key", "nexhealth_subdomain": "acct",
+        "nexhealth_location_id": "", "nexhealth_api_url": "https://nexhealth.info",
+        "http_connect_timeout": 5.0, "http_read_timeout": 20.0,
+        "http_retry_attempts": 1, "http_retry_base_delay": 0.1,
+    })())
+    practice = _with_credentials(
+        _practice_with_id(uuid.uuid4()), bridge="nexhealth", location_id="351939"
+    )
+    assert bridge_name(practice) == "nexhealth"
+    client = pms_client_for(practice)
+    assert client._location_id == "351939"     # the clinic's own
+    # The key came from somewhere other than this practice's row — which is the
+    # whole point. NOT compared against its value: an assertion on a credential
+    # prints that credential when it fails, and this one once printed a real
+    # production key into a terminal, a log and a chat transcript.
+    assert client._api_key
+    assert client._api_key != "351939"
+
+
+def test_a_location_with_no_key_anywhere_is_refused(monkeypatch):
+    """A location id addresses nothing without a key. Saying so here beats
+    building a client that fails on the first call of the day."""
+    import uuid
+
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch, nexhealth_api_key="", pms_env_practice_id=str(uuid.uuid4()))
+    practice = _with_credentials(
+        _practice_with_id(uuid.uuid4()), bridge="nexhealth", location_id="351939"
+    )
+    assert bridge_name(practice) is None
 
 
 def test_a_clinics_own_key_is_never_mixed_with_the_environments_location(monkeypatch):
