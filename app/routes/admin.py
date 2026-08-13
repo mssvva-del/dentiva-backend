@@ -474,6 +474,15 @@ class PmsCredentials(BaseModel):
     location_id: str | None = None    # nexhealth
     consumer_id: str | None = None    # kolla
     connector_id: str | None = None   # kolla
+    # The Synchronizer installer key for THIS practice, copied once from the
+    # NexHealth portal. Not a credential of ours — it is what the person who
+    # looks after the clinic's server types into an installer, and the clinic
+    # sees it on their own onboarding screen.
+    #
+    # Set on its own, before a location exists: creating the institution and the
+    # practice finishing the install are hours or days apart, and the clinic
+    # needs the key during that gap.
+    product_key: str | None = None
 
 
 class PmsLocation(BaseModel):
@@ -534,7 +543,24 @@ async def set_pms_credentials(
         if practice is None:
             raise HTTPException(status_code=404, detail="Clinic not found.")
 
-        practice.pms_credentials = payload.model_dump(exclude_none=True)
+        # Merged, not replaced. The installer key is set days before a location
+        # exists — the practice has to run the installer first — so a later call
+        # carrying only the location must not wipe the key the clinic is still
+        # reading off its own screen.
+        merged = {**(practice.pms_credentials or {}), **payload.model_dump(exclude_none=True)}
+        practice.pms_credentials = merged
+
+        # An installer key on its own is a legitimate half-state: the clinic
+        # needs it during the gap, and no calendar is reachable yet. Store it and
+        # say so, rather than refusing because a location is missing.
+        if payload.product_key and not merged.get("location_id"):
+            await _audit(session, ctx, "admin_set_pms_install_key",
+                         practice_id=practice_id, meta={"bridge": payload.bridge})
+            await session.commit()
+            return PmsCredentialsStatus(
+                practice_id=str(practice_id), bridge=payload.bridge, configured=False
+            )
+
         # Validate through the same function the voice path uses, so "accepted"
         # and "usable on a call" cannot mean different things. A half-filled set
         # would otherwise be stored happily and fail mid-conversation.

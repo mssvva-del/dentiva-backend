@@ -147,3 +147,14 @@ class OnboardingState(BaseModel):
     # Step 6 (billing) is handled in Phase D / by super_admin (pilot). Surfaced
     # so the frontend can show "billing set up separately" rather than a dead step.
     billing_deferred: bool = True
+    # What the clinic has to do to connect their own calendar, and whether it is
+    # done. Eaglesoft, Dentrix and Open Dental keep their data on a machine in
+    # the practice with no route in from outside, so a small program has to run
+    # ON that machine. No vendor can automate that away — the ones who look like
+    # they did are either on a cloud PMS or are emailing this same installer.
+    #
+    # What CAN be automated is everybody's part in the middle. This carries the
+    # key and the link into the clinic's own screen, so nothing travels by email
+    # and nobody has to ask us where things stand.
+    pms_install_key: str | None = None
+    pms_connected: bool = False

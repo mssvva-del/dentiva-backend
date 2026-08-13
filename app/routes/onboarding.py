@@ -115,6 +115,15 @@ def _state(practice: Practice) -> OnboardingState:
             rings_before_ai=practice.rings_before_ai,
             ai_number=ai_number,
         ),
+        # The installer key belongs to THIS practice and is meant for the person
+        # who looks after their server. Showing it in their own screen is what
+        # takes us out of the middle: no forwarded email to lose, no asking us
+        # where things stand.
+        pms_install_key=(practice.pms_credentials or {}).get("product_key"),
+        # Connected means we can address their calendar — a location is linked.
+        # Until then the screen says "waiting", which is the truth and stops the
+        # clinic wondering whether it worked.
+        pms_connected=bool((practice.pms_credentials or {}).get("location_id")),
     )
 
 

@@ -106,3 +106,81 @@ async def test_a_clinic_user_cannot_set_another_clinics_bridge(client, db_sessio
         json=_NEXHEALTH,
     )
     assert r.status_code in (401, 403)
+
+
+# ── the gap between "we started it" and "their calendar answers" ────────────
+#
+# Creating the institution and the practice finishing the install are hours or
+# days apart. The clinic needs the installer key during that gap, and used to get
+# it in a forwarded email — then had to ask us whether it had worked.
+
+
+async def test_an_installer_key_can_be_stored_before_any_location_exists(
+    client, db_session
+):
+    """A location cannot exist until the practice has run the installer, and the
+    installer cannot be run without this key. Refusing the key for want of a
+    location would deadlock the only path there is."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Waiting", clerk_org_id="org_pms6", clerk_user_id="u_pms6"
+    )
+
+    r = await client.put(
+        f"/api/admin/clinics/{practice.id}/pms-credentials",
+        headers=_h("sa_pms"),
+        json={"bridge": "nexhealth", "product_key": "PK-TEST-1234"},
+    )
+    assert r.status_code == 200, r.text
+    # Honest: stored, and not yet connected. The clinic's screen says "waiting".
+    assert r.json()["configured"] is False
+
+    practice_id = practice.id
+    db_session.expire_all()
+    stored = (await db_session.execute(
+        select(Practice).where(Practice.id == practice_id)
+    )).scalar_one()
+    assert stored.pms_credentials["product_key"] == "PK-TEST-1234"
+
+
+async def test_linking_the_location_later_keeps_the_installer_key(
+    client, db_session, monkeypatch
+):
+    """THE test. The second call carries only the location — and used to replace
+    the whole record, wiping the key the clinic was still reading off its own
+    screen while the install was in progress."""
+    from app.adapters import bridge
+
+    # The account key lives in the environment, and the suite blanks real
+    # credentials — so a location alone would be refused here for the right
+    # reason (a location with no key addresses nothing) and hide the wrong one.
+    monkeypatch.setattr(bridge, "get_settings", lambda: type("S", (), {
+        "nexhealth_api_key": "account-key", "kolla_api_key": "",
+        "kolla_consumer_id": "", "kolla_connector_id": "",
+        "nexhealth_subdomain": "acct", "nexhealth_location_id": "",
+        "pms_env_practice_id": "",
+    })())
+
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Two Step", clerk_org_id="org_pms7", clerk_user_id="u_pms7"
+    )
+    for body in (
+        {"bridge": "nexhealth", "product_key": "PK-TEST-9999"},
+        {"bridge": "nexhealth", "location_id": "351939"},
+    ):
+        r = await client.put(
+            f"/api/admin/clinics/{practice.id}/pms-credentials",
+            headers=_h("sa_pms"), json=body,
+        )
+        assert r.status_code == 200, r.text
+
+    practice_id = practice.id
+    db_session.expire_all()
+    stored = (await db_session.execute(
+        select(Practice).where(Practice.id == practice_id)
+    )).scalar_one()
+    assert stored.pms_credentials["location_id"] == "351939"
+    assert stored.pms_credentials["product_key"] == "PK-TEST-9999", (
+        "linking the calendar erased the key the clinic was still using"
+    )
