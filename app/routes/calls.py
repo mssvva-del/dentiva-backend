@@ -253,10 +253,24 @@ async def get_call(
         )
     ).scalar_one_or_none()
 
-    recording_url: str | None = None
-    if call.recording_path:
-        # In production this would be a signed S3 URL; for weekend mode return the path as-is.
-        recording_url = call.recording_path
+    # Fetched now, not served from what the webhook happened to send months ago.
+    #
+    # A stored link is a permanent, unauthenticated URL to a recording of a
+    # patient describing their symptoms — readable by anyone who ever saw it,
+    # for as long as it exists. Retell can sign these so they expire, and the
+    # only reason we could not turn that on was this line: every stored link
+    # would have died and the play button would have led nowhere, silently, for
+    # every call older than a day.
+    #
+    # Asking at the moment somebody presses play makes the link live for the
+    # length of a listen. The stored path stays as the fallback for anything
+    # that never came from Retell, and for the case where Retell is unreachable
+    # — an old link is better than no recording at all.
+    recording_url: str | None = call.recording_path
+    if call.retell_call_id:
+        from app.services.retell_admin import recording_url_for_call
+
+        recording_url = await recording_url_for_call(call.retell_call_id) or recording_url
 
     return CallDetail(
         id=str(call.id),
