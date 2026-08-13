@@ -80,6 +80,30 @@ async def get_agent(agent_id: str, *, transport=None) -> dict:
     return await _request("GET", f"/get-agent/{agent_id}", transport=transport)
 
 
+async def recording_url_for_call(retell_call_id: str, *, transport=None) -> str | None:
+    """Ask Retell for a FRESH link to this call's recording. None if there isn't one.
+
+    We used to store the link that arrived on the webhook and hand that same
+    string to the dashboard months later. That works only while the link is
+    permanent — which is to say, while a recording of a patient describing their
+    symptoms is readable by anyone who ever saw the URL, forever, with no login.
+
+    Retell can sign these links so they expire, and turning that on breaks every
+    stored one. Fetching at the moment somebody presses play is what makes the
+    setting safe to enable: the link lives for the length of a listen instead of
+    the length of the company.
+
+    Never raises. A recording nobody can fetch is a missing play button; it is
+    not a reason for the call detail page to fail.
+    """
+    try:
+        call = await _request("GET", f"/v2/get-call/{retell_call_id}", transport=transport)
+    except (RetellError, RetellNotConfigured):
+        return None
+    url = call.get("recording_url")
+    return str(url) if url else None
+
+
 async def get_llm(llm_id: str, *, transport=None) -> dict:
     return await _request("GET", f"/get-retell-llm/{llm_id}", transport=transport)
 
