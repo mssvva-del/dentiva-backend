@@ -30,6 +30,7 @@ from app.schemas.booking import (
     WeeklyStatsResponse,
     WeeklyTotals,
 )
+from app.services.availability import _tz
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -259,14 +260,25 @@ async def get_weekly_stats(
     TODO: Group by DATE(started_at AT TIME ZONE practice.timezone) once timezone-aware
     grouping is added. Currently uses UTC dates.
     """
-    today = datetime.now(UTC).date()
-    # Build the list of the last 7 dates: oldest first, today last.
+    # The clinic's days, not UTC's.
+    #
+    # This grouped by the UTC date, with a TODO admitting it. A call at 8pm in
+    # New York is midnight UTC the next day, so every evening call landed on
+    # TOMORROW's bar — the busiest end of a dental day, filed against a day that
+    # had not started. Today's bar was always missing its own evening, and the
+    # clinic reading the chart at closing time saw a quiet day.
+    #
+    # peak-hours and calls-by-hour already convert; only this one did not.
+    tz = _tz(practice.timezone)
+    today = datetime.now(tz).date()
     date_range: list[date] = [today - timedelta(days=i) for i in range(6, -1, -1)]
-    window_start = datetime.combine(date_range[0], time.min, tzinfo=UTC)
-    window_end = datetime.combine(today, time.max, tzinfo=UTC)
+    window_start = datetime.combine(date_range[0], time.min, tzinfo=tz)
+    window_end = datetime.combine(today, time.max, tzinfo=tz)
 
     # ── Per-day call counts ──────────────────────────────────────────────────
-    _day_trunc = func.date_trunc("day", Call.started_at)
+    _day_trunc = func.date_trunc(
+        "day", func.timezone(practice.timezone, Call.started_at)
+    )
     call_day_rows = (
         await db.execute(
             select(
@@ -310,7 +322,11 @@ async def get_weekly_stats(
     booking_day_rows = (
         await db.execute(
             select(
-                func.date_trunc("day", Booking.created_at).label("day"),
+                # Same clinic-local grouping as the calls above: a booking taken
+                # at 8pm belongs to that evening, not to the next morning.
+                func.date_trunc(
+                    "day", func.timezone(practice.timezone, Booking.created_at)
+                ).label("day"),
                 func.count().label("bookings_created"),
             )
             .where(Booking.practice_id == practice.id)
