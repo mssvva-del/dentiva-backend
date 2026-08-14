@@ -1622,7 +1622,17 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
         ).scalar_one_or_none()
         slots = []
         if practice_obj is not None:
-            slots = await compute_native_slots(
+            # The clinic's own calendar when it has one — the same source
+            # check_availability and book_appointment use. This called
+            # compute_native_slots directly, so on a connected practice it
+            # offered times from OUR book alone: a Tuesday 10:00 that our table
+            # shows empty and the practice's calendar shows taken by a walk-in.
+            # The patient would be moved into an occupied chair, and told so
+            # confidently.
+            #
+            # It also means the chosen slot now carries the provider and operatory
+            # ids, without which the move cannot be written back to the PMS at all.
+            slots = await _open_slots(
                 session, practice_obj,
                 procedure=procedure,
                 preferred_date=new_date,

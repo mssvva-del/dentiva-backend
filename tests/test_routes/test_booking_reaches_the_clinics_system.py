@@ -154,3 +154,44 @@ async def test_the_clinics_system_going_down_does_not_lose_the_booking(
 
     assert (await _book(client, "book-down", dob="1984-03-02"))["booked"] is True
     assert "pms_patient_not_in_pms" in alerts.recent_alerts()["by_kind"]
+
+
+async def test_a_move_is_offered_from_the_clinics_calendar_not_ours(
+    client, db_session, monkeypatch
+):
+    """Reschedule used to read our own book directly.
+
+    check_availability and book_appointment both prefer the PMS on a connected
+    practice — our table knows nothing about walk-ins or the front desk booking
+    directly, so on a connected clinic it is not an honest answer. Reschedule
+    called the native path, so it would move a patient into a Tuesday 10:00 that
+    our table shows empty and the practice's calendar shows occupied, and say so
+    confidently.
+    """
+    practice, _ = await seed_practice(
+        db_session, name="Move Bridge", clerk_org_id="org_mb1", clerk_user_id="u_mb1"
+    )
+    pms = _FakePMS(found="514156368")
+    await _connected(monkeypatch, pms)
+
+    # Book first, through the PMS-backed path.
+    await _book(client, "mv-book")
+
+    # Now move it. The only slot the PMS offers is the one the fake returns; if
+    # the handler were reading our own book it would pick some other time, and
+    # would carry no provider id for the write-back.
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": "mv-move",
+        "call": {"from_number": "+16205551111", "to_number": "+15559876543",
+                 "start_timestamp": 1748563200000},
+    })
+    body = (await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "mv-move",
+        "function_name": "reschedule_appointment",
+        "args": {"patient_phone": "+16205551111", "new_date": "2099-11-10"},
+    })).json()
+
+    assert body["rescheduled"] is True, body
+    assert body["appointment"]["time"] == "10:00", (
+        "the move was offered from our own book, not the clinic's calendar"
+    )
