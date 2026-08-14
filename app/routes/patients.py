@@ -120,6 +120,10 @@ async def list_patients(
         by_patient[b.patient_id].append(b)
 
     rows: list[PatientSummary] = []
+    # The searchable text per row, kept beside it rather than inside it: the
+    # response must stay redacted, but the SEARCH has to run against what the
+    # person typing actually knows — a full surname, a whole phone number.
+    haystacks: dict[str, str] = {}
     for p in patients:
         bks = by_patient.get(p.id, [])
         completed = [b for b in bks if b.status == "completed"]
@@ -141,6 +145,10 @@ async def list_patients(
         else:
             status = "active"
 
+        haystacks[str(p.id)] = " ".join(filter(None, (
+            p.first_name, p.last_name, p.phone,
+            "".join(ch for ch in (p.phone or "") if ch.isdigit()),
+        ))).lower()
         rows.append(
             PatientSummary(
                 patient_id=str(p.id),
@@ -155,8 +163,24 @@ async def list_patients(
         )
 
     if search:
+        # Against the real name and number, not the redacted display string.
+        #
+        # This filtered on name_redacted — "Nina R." — so typing a patient's
+        # SURNAME found nobody. The front desk searching "Reyes" for a patient
+        # sitting in the chair got "no patients match your search", and the only
+        # thing that ever worked was a first name. Phone search was worse: the
+        # masked form keeps four digits, so anything but the last four missed.
+        #
+        # The comparison happens in Python because names and phones are
+        # encrypted at rest; the roster is small enough that this is what the
+        # rest of this endpoint already does.
         needle = search.strip().lower()
-        rows = [r for r in rows if r.name_redacted and needle in r.name_redacted.lower()]
+        digits = "".join(ch for ch in needle if ch.isdigit())
+        rows = [
+            r for r in rows
+            if needle in haystacks.get(r.patient_id, "")
+            or (digits and digits in haystacks.get(r.patient_id, ""))
+        ]
 
     # Most recent activity first; patients with no visit date sink to the end.
     def _sort_key(r: PatientSummary) -> tuple[int, str]:
