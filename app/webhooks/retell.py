@@ -2309,6 +2309,41 @@ async def _update_and_read_emergency_flag(
             logger.warning(
                 "emergency lock ENGAGED: call=%s trigger_fn=%s", retell_call_id, fn
             )
+            # The lock's answer to the caller is "our team is being notified
+            # right now and will call you immediately." Until now nothing behind
+            # that sentence existed: the block wrote no callback, sent no page,
+            # and raised no alert. Whether anyone was actually told depended on
+            # the model going on to call create_callback_request — and the lock's
+            # entire premise is that the model cannot be trusted here, which is
+            # why it is a deterministic keyword scan and not a prompt.
+            #
+            # So the promise is kept where it is made. Not when the trigger IS
+            # create_callback_request: that handler creates its own row a moment
+            # later, and two rows means two pages for one bleeding patient.
+            if fn != "create_callback_request":
+                await set_tenant(session, call.practice_id)
+                caller = (
+                    args.get("patient_phone") or args.get("phone")
+                    or call.from_number or ""
+                )
+                session.add(CallbackRequest(
+                    id=uuid.uuid4(),
+                    practice_id=call.practice_id,
+                    call_id=call.id,
+                    patient_first_name=(
+                        args.get("patient_first_name") or args.get("first_name")
+                    ),
+                    reason="urgent symptoms mentioned on the call",
+                    phone=caller,
+                    urgent=True,
+                    status="pending",
+                ))
+                await session.commit()
+                await _page_clinic_urgent_callback(
+                    session, call.practice_id,
+                    args.get("patient_first_name") or args.get("first_name"),
+                    caller,
+                )
         await session.commit()
         return bool(call.emergency_active)
 

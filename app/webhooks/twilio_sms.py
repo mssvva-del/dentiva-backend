@@ -41,15 +41,19 @@ from app.config import get_settings
 from app.db import set_tenant
 from app.models.audit_log import AuditLog
 from app.models.enums import CANCELLED
+from app.models.patient import Patient
 from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
 from app.services.availability import slot_from_utc
 from app.services.sms import send_cancellation_notice, send_waitlist_opening
+from app.utils.crypto import phone_hmac
 from app.webhooks.retell import (
+    AMBIGUOUS,
     _backfill_from_waitlist,
     _find_patient_by_phone,
     _find_upcoming_booking,
     _resolve_practice,
+    _sync_booking_change_to_pms,
 )
 
 logger = logging.getLogger("dentiva.webhooks.twilio_sms")
@@ -227,23 +231,41 @@ async def _handle_sms(from_number: str, intent: str, to_number: str = "") -> Res
     async with _app_db.async_session_factory() as session:
         await set_tenant(session, practice_id)
         patient = await _find_patient_by_phone(session, practice_id, from_number)
-        if patient is None:
-            # Unknown number — acknowledge politely, do nothing.
-            return _twiml(
-                "Thanks for texting! We couldn't match your number to a record. "
-                "Please call the office and we'll be glad to help."
-            )
 
-        first_name = patient.first_name or "there"
-
+        # STOP is answered before anything else, and WITHOUT needing to know
+        # which person texted.
+        #
+        # Two patients on one number is routine in a dental practice — a parent
+        # and a child — and the lookup then returns AMBIGUOUS, a sentinel string.
+        # The old code checked only for None, so the next line called
+        # .sms_opt_out on a str, raised AttributeError, and the handler-wide
+        # except swallowed it into an empty 200. The MessageSid was already
+        # recorded, so Twilio's retry was dropped too: the opt-out was lost
+        # permanently and the texts kept coming, with the patient having received
+        # no reply at all.
+        #
+        # Under TCPA a revocation is per NUMBER, not per record — so every
+        # patient on that number is opted out, which is also what the person
+        # texting means.
         if intent == "stop":
-            patient.sms_opt_out = True
-            session.add(_audit(practice_id, "sms_opt_out", patient.id))
-            await session.commit()
+            stopped = await _opt_out_everyone_on(session, practice_id, from_number)
+            if stopped:
+                await session.commit()
             return _twiml(
                 "You're unsubscribed and won't get further texts. Reply START to "
                 "opt back in anytime."
             )
+
+        if patient is None or patient is AMBIGUOUS:
+            # Either nobody, or two people we cannot tell apart. Both mean we
+            # must not act on a record — but the person gets an answer rather
+            # than silence, which is what they got before.
+            return _twiml(
+                "Thanks for texting! We couldn't match your number to a single "
+                "record. Please call the office and we'll be glad to help."
+            )
+
+        first_name = patient.first_name or "there"
 
         if intent == "start":
             patient.sms_opt_out = False
@@ -312,7 +334,20 @@ async def _handle_sms(from_number: str, intent: str, to_number: str = "") -> Res
             except Exception:  # noqa: BLE001
                 logger.exception("twilio-sms: waitlist backfill failed")
             patient_opted_out = patient.sms_opt_out
+            booking_id_for_pms = booking.id
             await session.commit()
+
+            # Free the chair in the clinic's own calendar. The voice cancel path
+            # has always done this; the SMS one stopped at our database — and
+            # "reply CANCEL" on the reminder is the channel most cancellations
+            # will actually arrive through, so this was the common case, not an
+            # edge one.
+            #
+            # Without it the exact failure this product is sold to prevent: the
+            # patient is gone, the front desk still sees them booked, the hour
+            # stays blocked — and the waitlist text above has already invited a
+            # second patient into a slot the PMS still shows as taken.
+            await _sync_booking_change_to_pms(booking_id_for_pms, practice_id, "cancel")
 
             # Confirmation of cancellation (the inbound text already proves consent
             # to receive this one; opt-out still respected).
@@ -366,3 +401,27 @@ def _audit(
         resource_id=resource_id,
         audit_metadata=meta,
     )
+
+
+async def _opt_out_everyone_on(session, practice_id, phone: str) -> int:
+    """Opt out every patient reachable at this number. Returns how many.
+
+    Per number, not per record. Two patients on one household line is routine,
+    and the person texting STOP is speaking for the handset — opting out only the
+    row we happened to match would keep texting the other one from the same
+    practice, which is the violation they were trying to stop.
+
+    Phones are encrypted at rest, so the match is on the searchable HMAC sidecar.
+    """
+    h = phone_hmac(phone)
+    if not h:
+        return 0
+    rows = (await session.execute(
+        select(Patient).where(
+            Patient.practice_id == practice_id, Patient.phone_hmac == h
+        )
+    )).scalars().all()
+    for patient in rows:
+        patient.sms_opt_out = True
+        session.add(_audit(practice_id, "sms_opt_out", patient.id))
+    return len(rows)
