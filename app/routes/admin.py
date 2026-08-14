@@ -697,13 +697,23 @@ async def override_subscription(
                     raise HTTPException(status_code=422, detail="Unknown plan.")
                 setattr(sub, field, val)
                 changed[field] = val
-        # Keep the practice lifecycle in step with a pilot/suspend override.
-        if payload.status == "pilot":
-            p.status = "pilot"
-        elif payload.status == "suspended":
-            p.status = "suspended"
-        elif payload.status == "active":
-            p.status = "active"
+        # Keep the practice lifecycle in step with the subscription.
+        #
+        # "cancelled" was missing, and the admin screen offers it. An operator
+        # picked it, saw a success toast, and the clinic carried on answering
+        # calls — the subscription said cancelled and the practice said active.
+        # A control that reports success and changes nothing is worse than one
+        # that is greyed out, because nobody goes back to check.
+        #
+        # Cancelled maps to suspended on the practice: the row stays, the calls
+        # stop. There is no separate practice status for it, and inventing one
+        # would need every count, every list and every guard to learn it.
+        _LIFECYCLE = {
+            "pilot": "pilot", "suspended": "suspended", "active": "active",
+            "cancelled": "suspended",
+        }
+        if payload.status in _LIFECYCLE:
+            p.status = _LIFECYCLE[payload.status]
 
         await _audit(session, ctx, "admin_override_subscription",
                      practice_id=practice_id, meta=changed)
