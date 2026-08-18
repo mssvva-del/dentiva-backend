@@ -41,3 +41,10 @@ class AlertEvent(UUIDPKMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # NULL = nobody has dealt with it. Without this the admin list is every
+    # problem ever reported, which reads as noise by week three — the same as
+    # not having built the Report button at all.
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A name, not a user id: the row outlives staff accounts, and "resolved by a
+    # user that no longer exists" answers nothing.
+    resolved_by: Mapped[str | None] = mapped_column(Text)

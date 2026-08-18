@@ -24,7 +24,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,6 +62,7 @@ from app.models.pricing_plan import PricingPlan
 from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
 from app.models.user import User
+from app.observability.alerts import record_alert
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -458,6 +459,117 @@ async def edit_clinic(
         await session.commit()
     # Return the fresh detail (reuse the reader).
     return await clinic_detail(practice_id, ctx)  # type: ignore[arg-type]
+
+
+class ProvisionNumberRequest(BaseModel):
+    """Give this clinic its Dentovox number from the operator's side.
+
+    Empty body → buy one from Retell, same as the onboarding step does. With
+    ``number`` → attach a number that already exists (bought by hand in the
+    Retell dashboard, or recovered after a failed provisioning attempt).
+    """
+    number: str | None = Field(default=None, max_length=20)
+
+
+class ProvisionNumberResponse(BaseModel):
+    practice_id: str
+    ai_phone_number: str
+
+
+@router.post("/clinics/{practice_id}/provision-number",
+             response_model=ProvisionNumberResponse)
+async def admin_provision_number(
+    practice_id: uuid.UUID,
+    body: ProvisionNumberRequest,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_CLINIC_STATUS)),
+) -> ProvisionNumberResponse:
+    """The operator's path to a phone number, which did not exist.
+
+    ai_phone_number had exactly two writers: the onboarding wizard and the
+    canary bootstrap. When provisioning failed mid-onboarding — Retell down for
+    a minute, a missing env var — the clinic finished setup with no number, the
+    wizard never returns there, and the only repair was SQL against production.
+    Routing keys off this column, so a clinic without it is a clinic whose
+    calls reach nobody.
+
+    Idempotent the same way the onboarding step is: a practice that already has
+    a number gets it back unchanged, because clicking twice must never buy two.
+    """
+    from app.services.retell_admin import RetellError, RetellNotConfigured
+
+    # The E.164 normalizer, not the crypto one. There are two normalize_phone
+    # functions in this codebase: crypto's returns bare digits for the HMAC
+    # sidecar, sms's returns +1XXXXXXXXXX. Routing compares this column against
+    # Retell's E.164 to_number, so storing digits would make the number
+    # unreachable while looking perfectly fine on the screen.
+    from app.services.sms import normalize_phone
+    from app.services.telephony.provision import (
+        NotEntitledToNumber,
+        provision_number_for_practice,
+    )
+
+    async with _app_db.platform_session_factory() as session:
+        practice = (await session.execute(
+            select(Practice).where(Practice.id == practice_id).with_for_update()
+        )).scalar_one_or_none()
+        if practice is None:
+            raise HTTPException(status_code=404, detail="Clinic not found.")
+        if practice.ai_phone_number:
+            return ProvisionNumberResponse(
+                practice_id=str(practice_id),
+                ai_phone_number=practice.ai_phone_number,
+            )
+
+        if body.number:
+            normalized = normalize_phone(body.number)
+            if not normalized:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Not a usable US number. Ten digits, or +1 and ten.",
+                )
+            # The column is unique — routing keys off it, and two clinics
+            # answering one number is the cross-tenant failure this system
+            # spends most of its guards preventing. Say WHOSE it is, so the
+            # operator fixes the right row instead of hunting.
+            taken = (await session.execute(
+                select(Practice.name).where(
+                    Practice.ai_phone_number == normalized,
+                    Practice.id != practice_id,
+                )
+            )).scalar_one_or_none()
+            if taken:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"That number already routes to “{taken}”.",
+                )
+            practice.ai_phone_number = normalized
+        else:
+            try:
+                practice.ai_phone_number = await provision_number_for_practice(practice)
+            except NotEntitledToNumber as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Approve the clinic (pilot/active) before buying it "
+                           "a number — onboarding practices are not entitled.",
+                ) from exc
+            except RetellNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except RetellError as exc:
+                record_alert("number_provision_failed", f"practice={practice_id}")
+                raise HTTPException(
+                    status_code=502,
+                    detail="Retell refused to sell a number just now — try "
+                           "again, or attach one bought by hand.",
+                ) from exc
+
+        await _audit(session, ctx, "admin_provision_number",
+                     practice_id=practice_id,
+                     meta={"manual": bool(body.number)})
+        await session.commit()
+        return ProvisionNumberResponse(
+            practice_id=str(practice_id),
+            ai_phone_number=practice.ai_phone_number,
+        )
 
 
 class PmsCredentials(BaseModel):
@@ -2186,3 +2298,135 @@ async def set_voice_model(
         await session.commit()
     return VoiceModelState(model=payload.model,
                            allowed=list(ALLOWED_VOICE_MODELS), agent_id=agent_id)
+
+
+# ===========================================================================
+# Problems clinics reported themselves (the Report button on a broken screen)
+# ===========================================================================
+class ReportedProblem(BaseModel):
+    id: str
+    created_at: datetime
+    kind: str
+    # Parsed out of the alert detail when it fits our own format, raw otherwise.
+    practice_id: str | None = None
+    practice_name: str | None = None
+    screen: str | None = None
+    status_code: str | None = None
+    request_id: str | None = None
+    detail: str
+    resolved_at: datetime | None = None
+    resolved_by: str | None = None
+
+
+# Our own detail format: "practice=<uuid> screen=/calls status=500 request_id=abc".
+# Tolerant on purpose — a detail that does not match still shows up raw, because
+# an unparseable report is still a report and dropping it would be the worst
+# possible failure for a screen whose whole job is not losing them.
+_DETAIL_FIELD = re.compile(r"(\w+)=(\S+)")
+
+
+def _is_uuid(value: str | None) -> bool:
+    """A practice id from a parsed string is not a practice id until it parses.
+    Feeding a malformed one into an IN clause raises, and that would take the
+    whole list down over one bad row."""
+    if not value:
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+@router.get("/reports", response_model=list[ReportedProblem])
+async def list_reported_problems(
+    include_resolved: bool = False,
+    limit: int = 50,
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_SYSTEM_HEALTH)),
+) -> list[ReportedProblem]:
+    """What clinics told us was broken, newest first.
+
+    The Report button writes these into the alert stream, which pages us — good
+    for the first hour and useless for the second, because a stream has no
+    memory of what was dealt with. This is that memory.
+    """
+    from app.models.alert_event import AlertEvent
+
+    async with _app_db.platform_session_factory() as session:
+        query = (
+            select(AlertEvent)
+            .where(AlertEvent.kind == "clinic_reported_problem")
+            .order_by(AlertEvent.created_at.desc())
+            .limit(max(1, min(limit, 200)))
+        )
+        if not include_resolved:
+            query = query.where(AlertEvent.resolved_at.is_(None))
+        rows = (await session.execute(query)).scalars().all()
+
+        # One query for the names, not one per row.
+        parsed = [(row, dict(_DETAIL_FIELD.findall(row.detail or ""))) for row in rows]
+        ids = {
+            fields["practice"] for _row, fields in parsed
+            if _is_uuid(fields.get("practice"))
+        }
+        names: dict[str, str] = {}
+        if ids:
+            names = {
+                str(pid): name
+                for pid, name in (await session.execute(
+                    select(Practice.id, Practice.name).where(Practice.id.in_(ids))
+                )).all()
+            }
+
+    out: list[ReportedProblem] = []
+    for row, fields in parsed:
+        practice_id = fields.get("practice")
+        out.append(ReportedProblem(
+            id=str(row.id),
+            created_at=row.created_at,
+            kind=row.kind,
+            practice_id=practice_id,
+            # A clinic that has since been deleted still has reports worth
+            # reading; the id carries on alone rather than the row vanishing.
+            practice_name=names.get(practice_id or ""),
+            screen=fields.get("screen"),
+            status_code=fields.get("status"),
+            request_id=fields.get("request_id"),
+            detail=row.detail or "",
+            resolved_at=row.resolved_at,
+            resolved_by=row.resolved_by,
+        ))
+    return out
+
+
+@router.post("/reports/{report_id}/resolve", response_model=ReportedProblem)
+async def resolve_reported_problem(
+    report_id: uuid.UUID,
+    ctx: AdminContext = Depends(require_admin_permission(VIEW_SYSTEM_HEALTH)),
+) -> ReportedProblem:
+    """Mark one report dealt with. Idempotent — resolving twice is not an error,
+    and two operators clicking at once is the ordinary case, not a conflict."""
+    from app.models.alert_event import AlertEvent
+
+    async with _app_db.platform_session_factory() as session:
+        row = (await session.execute(
+            select(AlertEvent).where(AlertEvent.id == report_id)
+        )).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Report not found.")
+        if row.resolved_at is None:
+            row.resolved_at = datetime.now(tz=UTC)
+            row.resolved_by = ctx.user.email or str(ctx.user.id)
+            # No separate audit row. The provenance IS this record — who closed
+            # it and when, on the thing itself. An audit entry would need a
+            # practice_id it does not have, and the zero-uuid stand-in used
+            # elsewhere for staff actions buys nothing here.
+            await session.commit()
+        fields = dict(_DETAIL_FIELD.findall(row.detail or ""))
+        return ReportedProblem(
+            id=str(row.id), created_at=row.created_at, kind=row.kind,
+            practice_id=fields.get("practice"), screen=fields.get("screen"),
+            status_code=fields.get("status"), request_id=fields.get("request_id"),
+            detail=row.detail or "",
+            resolved_at=row.resolved_at, resolved_by=row.resolved_by,
+        )
