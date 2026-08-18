@@ -38,6 +38,7 @@ from app.routes import (
     practice,
     pricing,
     reactivation,
+    support,
     team,
     voice,
     waitlist,
@@ -156,6 +157,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this the browser RECEIVES the header but refuses to show it to
+    # JavaScript — CORS only exposes a safe-list by default. The whole point of
+    # echoing the request id is that the failing screen can display it and the
+    # Report button can send it back; unexposed, both silently read null.
+    expose_headers=["X-Request-ID"],
 )
 
 # Per-IP rate limiting (Security Sprint H2) — gated, generous, /health exempt.
@@ -372,6 +378,7 @@ app.include_router(leads.router)
 app.include_router(pricing.router)
 app.include_router(reactivation.router)
 app.include_router(dashboard.router)
+app.include_router(support.router)
 app.include_router(waitlist.router)
 app.include_router(voice.router)
 app.include_router(retell.router)
