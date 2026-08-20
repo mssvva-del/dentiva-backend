@@ -49,6 +49,21 @@ TEST_DB_URL = "postgresql+asyncpg://dentiva_app:dentiva_app@localhost:5432/denti
 OWNER_TEST_DB_URL = "postgresql+asyncpg://dentiva:dentiva@localhost:5432/dentiva_test"
 os.environ["DATABASE_URL"] = TEST_DB_URL
 
+# No per-IP rate limiting in the suite.
+#
+# The webhook limit is 120 requests a minute from one address. Every test comes
+# from 127.0.0.1, so the suite spends one shared budget — and once it grew past
+# that, tests began failing by POSITION rather than by behaviour: whoever ran
+# last got a 429 and a KeyError on a response that never happened. Different
+# tests failed on different runs, which reads exactly like flakiness and is the
+# fastest way to teach everyone to re-run a red suite instead of reading it.
+#
+# Nothing is lost: tests/test_ratelimit.py builds its own app with its own
+# middleware, so the limiter itself stays covered.
+from app.middleware.rate_limit import limiter  # noqa: E402
+
+limiter.enabled = False
+
 import app.db as app_db  # noqa: E402
 import app.dependencies as deps  # noqa: E402
 import app.models  # noqa: F401,E402  (register models on Base.metadata)
