@@ -1201,6 +1201,10 @@ class AuditRow(BaseModel):
     id: str
     practice_id: str | None
     user_id: str | None
+    # WHO, in a form a human recognises. A uuid answers "was it the same person
+    # twice" and nothing else — and the question this list gets opened for is
+    # "who approved this clinic", which a uuid cannot answer at all.
+    actor: str | None = None
     action: str
     resource_type: str
     created_at: datetime
@@ -1210,15 +1214,33 @@ class AuditRow(BaseModel):
 @router.get("/audit-logs", response_model=list[AuditRow])
 async def audit_logs(
     limit: int = 100,
+    practice_id: uuid.UUID | None = None,
     ctx: AdminContext = Depends(require_admin_permission(VIEW_AUDIT_LOGS)),
 ) -> list[AuditRow]:
+    """Who did what. Optionally to ONE clinic.
+
+    The global list answers "what happened lately"; this filter answers "why is
+    this clinic like this", which is the question actually being asked when
+    somebody opens a clinic that is behaving strangely. Without it that meant
+    reading every row of a 500-row list looking for one uuid.
+    """
     limit = max(1, min(limit, 500))
     async with _app_db.platform_session_factory() as session:
-        rows = (
-            await session.execute(
-                select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
-            )
-        ).scalars().all()
+        query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
+        if practice_id is not None:
+            query = query.where(AuditLog.practice_id == practice_id)
+        rows = (await session.execute(query)).scalars().all()
+
+        # One query for the names, not one per row.
+        actor_ids = {a.user_id for a in rows if a.user_id}
+        actors: dict[uuid.UUID, str] = {}
+        if actor_ids:
+            actors = {
+                uid: email
+                for uid, email in (await session.execute(
+                    select(User.id, User.email).where(User.id.in_(actor_ids))
+                )).all()
+            }
     zero = uuid.UUID(int=0)
     return [
         AuditRow(
@@ -1226,6 +1248,9 @@ async def audit_logs(
             practice_id=(str(a.practice_id) if a.practice_id and a.practice_id != zero
                          else None),
             user_id=str(a.user_id) if a.user_id else None,
+            # A deleted account still leaves its actions behind; the row stays,
+            # unnamed, rather than disappearing from the history.
+            actor=actors.get(a.user_id) if a.user_id else None,
             action=a.action, resource_type=a.resource_type,
             created_at=a.created_at, metadata=a.audit_metadata,
         )
