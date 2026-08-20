@@ -164,20 +164,6 @@ app.add_middleware(
     expose_headers=["X-Request-ID"],
 )
 
-# Per-IP rate limiting (Security Sprint H2) — gated, generous, /health exempt.
-_rl_settings = get_settings()
-if _rl_settings.rate_limit_enabled:
-    from app.middleware.ratelimit import RateLimitMiddleware
-
-    app.add_middleware(
-        RateLimitMiddleware,
-        per_minute=_rl_settings.rate_limit_per_minute,
-        webhook_per_minute=_rl_settings.rate_limit_webhook_per_minute,
-    )
-    logger.info("Rate limiting enabled (%s/min, webhooks %s/min)",
-                _rl_settings.rate_limit_per_minute,
-                _rl_settings.rate_limit_webhook_per_minute)
-
 # Outermost middleware: assign request_id before anything else runs, so every
 # log line (including rate-limit rejections) is correlated and the response
 # always carries X-Request-ID. Added last → wraps the whole stack.

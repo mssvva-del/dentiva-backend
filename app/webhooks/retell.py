@@ -2332,6 +2332,21 @@ async def _update_and_read_emergency_flag(
             # later, and two rows means two pages for one bleeding patient.
             if fn != "create_callback_request":
                 await set_tenant(session, call.practice_id)
+                # The DB row is the dedup key, not the in-memory flag. Two
+                # genuinely concurrent tool calls on one call both read the
+                # flag as False and both land here — the same race
+                # transfer_to_human already guards against with this exact
+                # query. One bleeding patient must page the clinic once.
+                already_queued = (await session.execute(
+                    select(CallbackRequest.id).where(
+                        CallbackRequest.call_id == call.id,
+                        CallbackRequest.urgent.is_(True),
+                        CallbackRequest.status == "pending",
+                    )
+                )).first()
+                if already_queued is not None:
+                    await session.commit()
+                    return bool(call.emergency_active)
                 caller = (
                     args.get("patient_phone") or args.get("phone")
                     or call.from_number or ""

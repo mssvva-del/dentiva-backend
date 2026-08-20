@@ -8,6 +8,11 @@ as "the dashboard isn't loading", which matches every log line and none.
 
 from __future__ import annotations
 
+import asyncio
+
+from sqlalchemy import select
+
+from app.models.alert_event import AlertEvent
 from app.observability import alerts
 from tests.conftest import seed_practice
 
@@ -26,11 +31,26 @@ async def test_a_report_lands_in_the_alert_stream(client, db_session):
     assert r.status_code == 200, r.text
     assert r.json() == {"received": True, "reference": "abc123def456"}
 
-    fired = alerts.recent_alerts()
-    assert "clinic_reported_problem" in fired["by_kind"]
-    # The detail carries the thread to pull — and nothing a patient said.
-    assert "abc123def456" in fired["last_detail"]
-    assert "/calls" in fired["last_detail"]
+    # The persist is fire-and-forget on purpose — an alert must never slow the
+    # request that raised it. Await the actual pending writes, not a guessed
+    # number of loop ticks: a real database round-trip outlives any guess.
+    await asyncio.gather(*alerts._WRITES)
+
+    # Durable — the admin reports screen is its inbox.
+    row = (await db_session.execute(
+        select(AlertEvent).where(AlertEvent.kind == "clinic_reported_problem")
+        .order_by(AlertEvent.created_at.desc())
+    )).scalars().first()
+    assert row is not None
+    assert "abc123def456" in row.detail
+    assert "/calls" in row.detail
+
+    # And NOT in the paging stream. /health/detailed turns any counted alert
+    # into "degraded", which the uptime monitor pages on — so this used to let
+    # one clinic click report the whole platform down for an hour, repeatably,
+    # on the loosest permission there is. The pager means "the system broke",
+    # never "a user spoke".
+    assert "clinic_reported_problem" not in alerts.recent_alerts()["by_kind"]
 
 
 async def test_a_report_without_a_reference_still_lands(client, db_session):
@@ -47,7 +67,12 @@ async def test_a_report_without_a_reference_still_lands(client, db_session):
         json={"screen": "/bookings"},
     )
     assert r.status_code == 200
-    assert "clinic_reported_problem" in alerts.recent_alerts()["by_kind"]
+    await asyncio.gather(*alerts._WRITES)
+    row = (await db_session.execute(
+        select(AlertEvent).where(AlertEvent.kind == "clinic_reported_problem")
+        .order_by(AlertEvent.created_at.desc())
+    )).scalars().first()
+    assert row is not None and "/bookings" in row.detail
 
 
 async def test_an_unauthenticated_report_is_refused(client):

@@ -337,9 +337,6 @@ class Settings(BaseSettings):
 
     # Security / ops hardening (Security Sprint — Block 0)
     enable_llm_relay: bool = False  # mount the Groq /ws/retell-llm relay only if true
-    rate_limit_enabled: bool = False  # in-process per-IP rate limiting (enable for real traffic)
-    rate_limit_per_minute: int = 240  # general endpoints, per client IP
-    rate_limit_webhook_per_minute: int = 600  # webhooks (a single call bursts many)
 
     # Outbound HTTP resilience (audit Addition 3). Connect fails fast; read gets
     # the longer budget. Retry applies ONLY to idempotent reads (GET) — writes are

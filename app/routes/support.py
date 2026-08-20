@@ -34,8 +34,13 @@ class ProblemReport(BaseModel):
     # The reference code from the failed response's X-Request-ID echo. Optional:
     # a screen that failed to render at all may not have one.
     request_id: str | None = Field(default=None, max_length=64)
-    # Which screen, as a route path ("/calls", "/admin/clinics"). Not free text.
-    screen: str = Field(min_length=1, max_length=120)
+    # Which screen, as a route path ("/calls", "/admin/clinics"). A PATTERN,
+    # not just a length cap: the value is interpolated into the alert detail,
+    # and the admin reports screen parses that back as key=value pairs where
+    # the LAST duplicate wins. A screen of "x practice=<other-uuid>" therefore
+    # re-attributed the report to a different clinic in the operator's view.
+    # No spaces and no "=" means no second key can ride in.
+    screen: str = Field(min_length=1, max_length=120, pattern=r"^/[A-Za-z0-9/_\-\[\]]*$")
     status_code: int | None = Field(default=None, ge=100, le=599)
 
 
