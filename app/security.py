@@ -128,14 +128,24 @@ def verify_security_config(settings: Settings) -> None:
             )
 
         # Rate limiting is the abuse backstop for the OUTBOUND-money endpoints
-        # (campaign launch fans out into TCPA-metered calls/SMS). It must not be an
-        # "oops we forgot the env var" — make it a deploy gate, not a soft default.
-        if not settings.rate_limit_enabled:
+        # (campaign launch fans out into TCPA-metered calls/SMS), so its absence
+        # fails the deploy rather than logging a warning nobody reads.
+        #
+        # The gate checks the LIMITER, not an env var. It used to require
+        # RATE_LIMIT_ENABLED, which switched on a SECOND, more generous limiter
+        # beside the always-on slowapi one — two independent counters for one
+        # job, and the deploy gate asserting the redundant one. The duplicate is
+        # deleted; what production must prove now is that the limiter actually
+        # answering requests is on. (The only thing that turns it off is the
+        # test suite, which is exactly the state this must never ship in.)
+        from app.middleware.rate_limit import limiter as _limiter
+
+        if not _limiter.enabled:
             raise RuntimeError(
-                "SECURITY VIOLATION: RATE_LIMIT_ENABLED is False in production. "
-                "Rate limiting is a required prod gate (a bug or stolen token could "
-                "otherwise fan out into thousands of billable/TCPA calls). Set "
-                "RATE_LIMIT_ENABLED=true in Railway."
+                "SECURITY VIOLATION: the rate limiter is disabled in production. "
+                "A bug or stolen token could fan out into thousands of billable/"
+                "TCPA calls. The limiter is on by default — something explicitly "
+                "disabled it."
             )
 
         # CORS with credentials must be pinned to the real dashboard origin(s). An

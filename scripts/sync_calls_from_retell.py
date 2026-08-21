@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import urllib.request
 import uuid
@@ -43,7 +42,6 @@ import psycopg2
 ROOT = Path(__file__).resolve().parents[1]          # dentiva-backend/
 REPO = ROOT.parent                                   # dentiva-starter/
 VOICE_ENV = REPO / "dentiva-voice" / ".env"
-DB_FILE = REPO / "_docs" / "_railway_db.txt"
 
 RETELL_BASE = "https://api.retellai.com"
 
@@ -69,11 +67,7 @@ def _resolve_db_url(cli: str | None) -> str:
         return cli
     if os.environ.get("DATABASE_URL"):
         return os.environ["DATABASE_URL"]
-    if DB_FILE.exists():
-        m = re.search(r"postgres(?:ql)?://[^\s\"']+", DB_FILE.read_text())
-        if m:
-            return m.group(0)
-    sys.exit("ERROR: no DB URL (pass --db, set DATABASE_URL, or fill _docs/_railway_db.txt)")
+    sys.exit("ERROR: no DB URL (pass --db or set DATABASE_URL)")
 
 
 def _retell_post(path: str, key: str, body: dict) -> object:

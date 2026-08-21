@@ -37,10 +37,25 @@ _WRITES: set = set()
 _WINDOW_S = 3600
 
 
+# Kinds that a CLINIC USER can generate at will. They are stored (the admin
+# reports screen is their inbox) but they must not page anyone or turn the
+# platform "degraded": /health/detailed reports degraded whenever the last-hour
+# count is non-zero, and the uptime monitor pages on that. Without this split,
+# one press of "Report a problem" — held by the loosest clinic permission —
+# reported the whole platform down for an hour, and could sustain it by
+# re-clicking. The pager has to mean "the system broke", not "a user spoke".
+NON_PAGING_KINDS = frozenset({"clinic_reported_problem"})
+
+
 def record_alert(kind: str, detail: str = "", *, now: float | None = None) -> None:
     """Record a critical operational failure. kind = short slug
     (e.g. 'twilio_send_failed', 'retell_tool_error', 'web_call_failed')."""
     ts = now if now is not None else time.time()
+    if kind in NON_PAGING_KINDS:
+        # Durable, visible in /admin/reports, invisible to the pager.
+        logger.warning("REPORT %s: %s", kind, detail[:200])
+        _persist(kind, detail[:200])
+        return
     with _LOCK:
         _RECENT.append((ts, kind, detail[:200]))
     logger.error("ALERT %s: %s", kind, detail[:200])  # Sentry captures ERROR logs
@@ -98,6 +113,9 @@ async def recent_alerts_stored(*, window_s: int = _WINDOW_S) -> dict | None:
             rows = (await session.execute(
                 select(AlertEvent.kind, AlertEvent.detail)
                 .where(AlertEvent.created_at >= cutoff)
+                # User-generated kinds live in /admin/reports; counting them
+                # here would let a clinic click the platform into "degraded".
+                .where(AlertEvent.kind.notin_(NON_PAGING_KINDS))
                 .order_by(AlertEvent.created_at)
             )).all()
     except Exception:  # noqa: BLE001 — the caller falls back to memory

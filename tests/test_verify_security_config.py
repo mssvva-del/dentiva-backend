@@ -15,6 +15,21 @@ from app.config import Settings
 from app.security import verify_db_security, verify_security_config
 
 
+@pytest.fixture(autouse=True)
+def _limiter_on_for_prod_checks():
+    """The suite disables the live limiter globally (it was failing tests by
+    their position in the queue). These tests simulate production, where the
+    limiter is on — without this, every one of them dies on the limiter gate
+    before reaching the check it is actually about."""
+    from app.middleware.rate_limit import limiter
+
+    limiter.enabled = True
+    try:
+        yield
+    finally:
+        limiter.enabled = False
+
+
 def _prod_settings(**overrides) -> Settings:
     base = dict(
         environment="production",
@@ -25,7 +40,6 @@ def _prod_settings(**overrides) -> Settings:
         encryption_key="enc_test",
         twilio_validate_signature=True,  # required in prod (inbound SMS webhook auth)
         twilio_auth_token="tw_test",     # required so signatures can actually verify
-        rate_limit_enabled=True,         # required prod gate (abuse backstop)
         cors_allowed_origins="https://app.dentovox.com",  # locked, non-localhost
         # Explicit empty Stripe so the base = "billing not live" regardless of any
         # STRIPE_* leaking in from .env; the Stripe tests set these deliberately.
@@ -66,9 +80,18 @@ def test_raises_when_twilio_token_missing_with_validation_on():
         verify_security_config(_prod_settings(twilio_auth_token=""))
 
 
-def test_raises_when_rate_limit_disabled_in_production():
-    with pytest.raises(RuntimeError, match="RATE_LIMIT_ENABLED"):
-        verify_security_config(_prod_settings(rate_limit_enabled=False))
+def test_raises_when_the_limiter_is_disabled_in_production():
+    """The gate checks the LIMITER now, not an env var — the env var switched on
+    a second, redundant limiter, and the deploy gate was asserting that one
+    while the limiter actually answering requests went unchecked."""
+    from app.middleware.rate_limit import limiter
+
+    limiter.enabled = False  # the autouse fixture turned it on; this test is
+    try:                     # about the one state prod must refuse to boot in
+        with pytest.raises(RuntimeError, match="rate limiter is disabled"):
+            verify_security_config(_prod_settings())
+    finally:
+        limiter.enabled = True  # hand the fixture back what it expects
 
 
 def test_raises_when_groq_relay_enabled_in_production():
