@@ -137,6 +137,21 @@ async def start_checkout(
     if get_plan(payload.plan) is None or payload.billing_cycle not in ("monthly", "annual"):
         raise HTTPException(status_code=422, detail="Unknown plan or billing cycle.")
     settings = get_settings()
+    if payload.plan == "growth" and not (
+        settings.retell_outbound_agent_id and settings.retell_from_number
+    ):
+        # Growth is the tier whose whole pitch is outbound — reactivation,
+        # recalls, confirmations. The engine is built, but until an outbound
+        # agent and number are configured in this deployment, no outbound call
+        # can be dialled. Selling the tier in that state is charging for a
+        # capability the product cannot deliver, discovered by the clinic as
+        # a silent nothing. The gate lifts itself the day the env is set.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The Growth plan includes outbound campaigns, which aren't "
+                   "enabled on this deployment yet. Choose Full-Time, or "
+                   "contact us to turn outbound on first.",
+        )
     base = settings.dashboard_base_url or "http://localhost:3000"
     try:
         url = await create_checkout_session(

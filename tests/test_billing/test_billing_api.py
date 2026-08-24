@@ -88,3 +88,29 @@ async def test_checkout_rejects_unknown_plan(client, db_session):
     r = await client.post("/api/billing/checkout", headers=_h("b_owner"),
                           json={"plan": "enterprise", "billing_cycle": "monthly"})
     assert r.status_code == 422
+
+
+async def test_growth_cannot_be_bought_while_outbound_is_dark(
+    client, db_session, monkeypatch
+):
+    """Growth's whole pitch is outbound — reactivation, recalls. The engine is
+    built, but with no outbound agent and number configured, no outbound call
+    can be dialled. Selling the tier in that state is charging for a capability
+    the clinic discovers as a silent nothing."""
+    from app import config
+    from tests.conftest import seed_practice
+
+    await seed_practice(
+        db_session, name="Gate Dental", clerk_org_id="org_gate1", clerk_user_id="u_gate1"
+    )
+    settings = config.get_settings()
+    monkeypatch.setattr(settings, "retell_outbound_agent_id", "")
+    monkeypatch.setattr(settings, "retell_from_number", "")
+
+    r = await client.post(
+        "/api/billing/checkout",
+        headers={"X-Dev-Clerk-User-Id": "u_gate1", "X-Dev-Clerk-Org-Id": "org_gate1"},
+        json={"plan": "growth", "billing_cycle": "monthly"},
+    )
+    assert r.status_code == 409
+    assert "outbound" in r.json()["error"]["message"].lower()
