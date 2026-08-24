@@ -54,7 +54,14 @@ ANNUAL_DISCOUNT = 0.15
 # It read 8 until today — less than half the truth — so every margin figure an
 # admin looked at was roughly double the real one, including while the plan grid
 # below was being set.
-ESTIMATED_COST_CENTS_PER_MIN = 17
+# Measured 2026-08: voice+telephony 14.8¢/min on Cartesia (was 17.3¢ on
+# ElevenLabs). Held at the conservative integer — this drives the admin margin
+# figures, and rounding our costs DOWN there would flatter every number a
+# pricing decision leans on. NOT in this figure: NexHealth per-request fees
+# (~$0.10/call × 4–6 calls per booked patient once the one-time free credit is
+# spent, ≈10¢/min on a five-minute call). Estimate, not a measure — revisit
+# when a per-location NexHealth deal replaces per-request billing.
+ESTIMATED_COST_CENTS_PER_MIN = 15
 
 
 @dataclass(frozen=True)
