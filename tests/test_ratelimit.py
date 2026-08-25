@@ -93,3 +93,26 @@ async def test_disabled_means_disabled():
     ) as client:
         for _ in range(10):
             assert (await client.get("/api/thing")).status_code == 200
+
+
+async def test_a_fleets_call_traffic_is_not_throttled_by_the_human_default(
+    _limiter_on, client, db_session
+):
+    """Every Retell request — each tool call inside each conversation, each
+    lifecycle event, the pre-answer inbound webhook — arrives from Retell's
+    egress IPs. Under the global default (120/minute per IP) a 200-clinic
+    morning is a 429 storm: the agent fails a tool while a patient is mid-
+    sentence, and dropped lifecycle events are calls that never got recorded.
+
+    The security control on these routes is the SIGNATURE. The rate limit is a
+    runaway backstop and has to sit far above a whole fleet's legitimate rate.
+
+    130 requests from one IP: past the 120/min default, well under the webhook
+    ceiling. Every one must be answered, none with 429."""
+    for i in range(130):
+        r = await client.post(
+            "/webhooks/retell/inbound",
+            json={"call_inbound": {"agent_id": None, "to_number": f"+1617555{i:04d}"}},
+        )
+        assert r.status_code != 429, f"throttled at request {i + 1}"
+        assert r.status_code == 200

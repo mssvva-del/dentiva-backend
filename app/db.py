@@ -23,7 +23,10 @@ class Base(DeclarativeBase):
 
 _settings = get_settings()
 
-engine = create_async_engine(_settings.database_url, echo=False, pool_pre_ping=True)
+engine = create_async_engine(
+    _settings.database_url, echo=False, pool_pre_ping=True,
+    pool_size=_settings.db_pool_size, max_overflow=_settings.db_max_overflow,
+)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -82,7 +85,10 @@ _platform_url = _settings.database_url_platform or _settings.database_url
 platform_engine = (
     engine
     if _platform_url == _settings.database_url
-    else create_async_engine(_platform_url, echo=False, pool_pre_ping=True)
+    else create_async_engine(
+        _platform_url, echo=False, pool_pre_ping=True,
+        pool_size=_settings.db_pool_size, max_overflow=_settings.db_max_overflow,
+    )
 )
 platform_session_factory = async_sessionmaker(platform_engine, expire_on_commit=False)
 

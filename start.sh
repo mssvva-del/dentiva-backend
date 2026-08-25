@@ -17,4 +17,13 @@ echo "[start] applying database migrations (alembic upgrade head)..."
 alembic upgrade head
 echo "[start] migrations done. launching uvicorn on 0.0.0.0:${PORT}"
 
-exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT}"
+# --proxy-headers: behind Railway's edge proxy, request.client.host is the
+# proxy's internal address unless uvicorn reads X-Forwarded-For. Without it the
+# per-IP rate limiter put EVERY caller — all clinics' dashboards, every Retell
+# tool call mid-conversation, every Stripe event — into one shared 120/minute
+# bucket. Invisible with one clinic; a platform-wide 429 storm with a fleet.
+# forwarded-allow-ips="*" is correct HERE because the app is only reachable
+# through Railway's proxy; on a host with a public direct port it would let
+# clients forge their IP.
+exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT}" \
+    --proxy-headers --forwarded-allow-ips="*"

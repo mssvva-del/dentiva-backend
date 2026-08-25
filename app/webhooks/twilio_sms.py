@@ -39,6 +39,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 import app.db as _app_db
 from app.config import get_settings
 from app.db import set_tenant
+from app.middleware.rate_limit import limit_webhook
 from app.models.audit_log import AuditLog
 from app.models.enums import CANCELLED
 from app.models.patient import Patient
@@ -135,7 +136,8 @@ def _classify(body: str) -> str:
 
 
 @router.post("/status")
-async def twilio_status_webhook(request: Request) -> Response:
+@limit_webhook("600/minute")
+async def twilio_status_webhook(request: Request, response: Response) -> Response:
     """Twilio message status callback (queued/sent/delivered/failed/undelivered).
 
     Configure as the StatusCallback URL on outbound messages to get delivery
@@ -156,7 +158,8 @@ async def twilio_status_webhook(request: Request) -> Response:
 
 
 @router.post("/sms")
-async def twilio_sms_webhook(request: Request) -> Response:
+@limit_webhook("600/minute")
+async def twilio_sms_webhook(request: Request, response: Response) -> Response:
     settings = get_settings()
     # Twilio sends application/x-www-form-urlencoded. Parse the raw body directly
     # so we don't need the python-multipart dependency.

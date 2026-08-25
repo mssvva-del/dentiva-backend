@@ -18,10 +18,11 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 
 import app.db as _app_db
 from app.config import get_settings
+from app.middleware.rate_limit import limit_webhook
 from app.services.clerk_provisioning import EVENT_HANDLERS
 from app.webhooks.svix_verify import SvixVerificationError, verify
 
@@ -63,8 +64,12 @@ def _verify(raw_body: bytes, svix_id, svix_timestamp, svix_signature) -> None:
 
 
 @router.post("/clerk", status_code=status.HTTP_200_OK)
+# A bulk staff import for a group practice is hundreds of user/membership
+# events at once; a dropped one is a person who cannot log in.
+@limit_webhook("600/minute")
 async def clerk_webhook(
     request: Request,
+    response: Response,
     svix_id: str | None = Header(default=None, alias="svix-id"),
     svix_timestamp: str | None = Header(default=None, alias="svix-timestamp"),
     svix_signature: str | None = Header(default=None, alias="svix-signature"),

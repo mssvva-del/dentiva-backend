@@ -23,7 +23,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +32,7 @@ import app.db as _app_db
 from app.billing.metering import record_call_usage
 from app.config import get_settings
 from app.db import set_tenant
+from app.middleware.rate_limit import limit_webhook
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
 from app.models.call import Call
@@ -2663,7 +2664,13 @@ async def _dispatch_guarded(
 
 
 @router.post("/retell")
-async def retell_webhook(request: Request) -> dict:
+# Every call lifecycle event AND every mid-conversation tool call from every
+# clinic arrives here, all from Retell's egress IPs. Under the global default
+# (120/min per IP) a fleet's ordinary morning becomes a 429 storm and the agent
+# fails tools while a patient is speaking. Signature verification is the
+# security control; this ceiling only stops a runaway.
+@limit_webhook("2400/minute")
+async def retell_webhook(request: Request, response: Response) -> dict:
     raw_body = await request.body()
     signature = request.headers.get("x-retell-signature")
     if not _verify_signature(raw_body, signature):
@@ -2754,7 +2761,10 @@ async def _resolve_practice_for_inbound(agent_id: str | None,
 
 
 @router.post("/retell/inbound", status_code=status.HTTP_200_OK)
-async def retell_inbound_webhook(request: Request) -> dict:
+# Called by Retell BEFORE answering each call — throttling this makes the agent
+# greet patients with the generic fallback instead of their own clinic.
+@limit_webhook("2400/minute")
+async def retell_inbound_webhook(request: Request, response: Response) -> dict:
     raw_body = await request.body()
     signature = request.headers.get("x-retell-signature")
     if not _verify_signature(raw_body, signature):
