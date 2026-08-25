@@ -63,7 +63,7 @@ from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.observability.alerts import record_alert
-from app.services.clerk_provisioning import PLACEHOLDER_EMAIL_SUFFIX
+from app.services.clerk_provisioning import is_placeholder_email
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -342,9 +342,7 @@ async def clinic_detail(
         # hears no further event, and this screen — the record that exists to
         # describe a clinic — then shows a machine id instead of the owner's
         # email. Asked for once, here, and stored so it is asked for once.
-        if owner is not None and owner_email and owner_email.endswith(
-            PLACEHOLDER_EMAIL_SUFFIX
-        ):
+        if owner is not None and is_placeholder_email(owner_email):
             from app.services.clerk_api import fetch_user_email
 
             real = await fetch_user_email(owner.clerk_user_id)
