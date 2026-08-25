@@ -44,7 +44,18 @@ _WINDOW_S = 3600
 # one press of "Report a problem" — held by the loosest clinic permission —
 # reported the whole platform down for an hour, and could sustain it by
 # re-clicking. The pager has to mean "the system broke", not "a user spoke".
-NON_PAGING_KINDS = frozenset({"clinic_reported_problem"})
+# Worth recording, never worth paging: things a person did ON PURPOSE, while
+# authenticated, with the result immediately visible on the screen they did it
+# from. Detaching a number is the case that taught us — an operator correcting a
+# wrong number turned /health to "degraded" and would have had the on-call
+# watchdog file an issue about somebody's own deliberate work. An alert that
+# fires on correct human action is how a team learns to ignore alerts.
+#
+# The audit log is where these belong, and they are still written there.
+NON_PAGING_KINDS = frozenset({
+    "clinic_reported_problem",
+    "clinic_number_detached",
+})
 
 
 def record_alert(kind: str, detail: str = "", *, now: float | None = None) -> None:

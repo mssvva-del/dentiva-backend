@@ -184,3 +184,18 @@ async def test_the_health_endpoint_prefers_what_was_stored(client, db_session):
     assert body["alerts"]["by_kind"].get("pms_write_conflict") == 1, (
         "the endpoint read the empty buffer instead of the stored alert"
     )
+
+
+def test_a_deliberate_correction_does_not_page():
+    """An operator removing a wrong number is doing their job, not reporting a
+    fault. The first time it happened /health went "degraded" and the hourly
+    watchdog would have filed an issue about somebody's own deliberate work —
+    which is exactly how a team learns to ignore alerts.
+
+    Recorded and durable, so the trail exists; simply not on the pager."""
+    from app.observability import alerts
+
+    alerts._RECENT.clear()
+    alerts.record_alert("clinic_number_detached", "practice=abc was=+15551110000")
+    assert alerts.recent_alerts()["count_last_hour"] == 0
+    assert not alerts._RECENT

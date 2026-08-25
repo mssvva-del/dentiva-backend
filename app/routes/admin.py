@@ -648,8 +648,11 @@ async def admin_detach_number(
         await _audit(session, ctx, "admin_detach_number",
                      practice_id=practice_id, meta={"was": current})
         await session.commit()
-    # Loud on purpose. A clinic with no number cannot receive a single call, and
-    # that state should never be reached quietly.
+    # Recorded, not paged (see NON_PAGING_KINDS). A clinic with no number cannot
+    # receive a call, so this must leave a trail — but an authenticated operator
+    # typing a number out to remove it is deliberate work, and the first time it
+    # happened it turned /health to "degraded" and would have had the on-call
+    # watchdog open an issue about somebody's own correction.
     record_alert("clinic_number_detached", f"practice={practice_id} was={current}")
     return ProvisionNumberResponse(practice_id=str(practice_id), ai_phone_number="")
 
