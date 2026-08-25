@@ -207,3 +207,43 @@ async def find_clerk_user_by_email(
             if ea.get("email_address", "").lower() == target:
                 return u["id"]
     return users[0]["id"] if users else None
+
+
+async def fetch_user_email(clerk_user_id: str) -> str | None:
+    """The user's primary email, straight from Clerk.
+
+    Needed because ``user.created`` can arrive before an address is attached,
+    and we store ``<clerk_id>@unknown.clerk`` to satisfy the NOT NULL column.
+    ``user.updated`` fixes that going forward, but a row already carrying the
+    placeholder never hears another event — and the admin screen then shows a
+    machine id where the practice owner's email belongs.
+
+    Returns None when Clerk is unconfigured or the call fails; the caller keeps
+    what it has rather than replacing a bad value with a worse one.
+    """
+    settings = get_settings()
+    if not settings.clerk_secret_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{_CLERK_API_BASE}/users/{clerk_user_id}",
+                headers={"Authorization": f"Bearer {settings.clerk_secret_key}"},
+            )
+        if resp.status_code >= 400:
+            logger.warning("Clerk user fetch failed (%s)", resp.status_code)
+            return None
+        data = resp.json()
+    except Exception:  # noqa: BLE001 — an admin page must not die on Clerk being slow
+        logger.warning("Clerk user fetch errored for %s", clerk_user_id[:12])
+        return None
+
+    primary_id = data.get("primary_email_address_id")
+    addresses = data.get("email_addresses") or []
+    for entry in addresses:
+        if entry.get("id") == primary_id and entry.get("email_address"):
+            return entry["email_address"]
+    for entry in addresses:
+        if entry.get("email_address"):
+            return entry["email_address"]
+    return None

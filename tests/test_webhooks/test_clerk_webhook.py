@@ -227,3 +227,60 @@ async def test_bad_signature_rejected_when_secret_set(client, monkeypatch):
     finally:
         monkeypatch.delenv("CLERK_WEBHOOK_SECRET", raising=False)
         get_settings.cache_clear()
+
+
+async def test_user_updated_learns_the_real_email(client, db_session):
+    """user.created can arrive before Clerk has an address, and we store
+    "<clerk_id>@unknown.clerk" to satisfy NOT NULL. Ignoring user.updated made
+    that placeholder permanent — the admin screen showed a machine id where the
+    practice owner's email belongs, and nobody could contact the clinic from the
+    record that exists to describe it."""
+    from app.models.user import User
+    from app.services.clerk_provisioning import (
+        handle_user_created,
+        handle_user_updated,
+    )
+
+    await handle_user_created(db_session, {"id": "user_late_email"})
+    await db_session.commit()
+    user = (await db_session.execute(
+        select(User).where(User.clerk_user_id == "user_late_email")
+    )).scalar_one()
+    assert user.email == "user_late_email@unknown.clerk"
+
+    result = await handle_user_updated(db_session, {
+        "id": "user_late_email",
+        "primary_email_address_id": "idn_1",
+        "email_addresses": [{"id": "idn_1", "email_address": "dr@harborside.example"}],
+    })
+    await db_session.commit()
+    await db_session.refresh(user)
+    assert result == "email_updated"
+    assert user.email == "dr@harborside.example"
+
+
+async def test_user_updated_never_moves_a_user_between_clinics(client, db_session):
+    """Deliberately narrow. A profile edit must not be able to change who a user
+    works for, or what they are allowed to do."""
+    from app.services.clerk_provisioning import handle_user_updated
+    from tests.conftest import seed_practice
+
+    practice, owner = await seed_practice(
+        db_session, name="Narrow Co", clerk_org_id="org_nar", clerk_user_id="u_nar"
+    )
+    before_role, before_practice = owner.role, owner.practice_id
+
+    await handle_user_updated(db_session, {
+        "id": "u_nar",
+        "primary_email_address_id": "idn_2",
+        "email_addresses": [{"id": "idn_2", "email_address": "new@example.com"}],
+        # Everything below must be ignored.
+        "public_metadata": {"dentiva_role": "support"},
+        "organization_memberships": [{"organization": {"id": "org_somewhere_else"}}],
+    })
+    await db_session.commit()
+    await db_session.refresh(owner)
+    assert owner.email == "new@example.com"
+    assert owner.role == before_role
+    assert owner.practice_id == before_practice
+    assert owner.is_internal is False

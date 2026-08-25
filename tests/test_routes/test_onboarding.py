@@ -218,3 +218,55 @@ async def test_pms_choice_pages_us_so_connecting_is_true(client, db_session):
     r2 = await client.put("/api/onboarding/pms", headers=h, json={"pms_system": "none"})
     assert r2.status_code == 200
     assert alerts.recent_alerts()["by_kind"].get("pms_connection_requested", 0) == after
+
+
+async def test_a_practice_can_name_its_own_system(client, db_session):
+    """The list used to be "Open Dental", "NexHealth", "Skip" — our two
+    integrations offered as if they were the whole world of dental software. A
+    practice running Eaglesoft found their system missing and drew the only
+    reasonable conclusion. NexHealth is a bridge to most of these, not a product
+    a clinic runs."""
+    await seed_practice(
+        db_session, name="Eagle Co", clerk_org_id="org_eag", clerk_user_id="u_eag"
+    )
+    h = {"X-Dev-Clerk-User-Id": "u_eag", "X-Dev-Clerk-Org-Id": "org_eag"}
+
+    r = await client.put("/api/onboarding/pms", headers=h, json={"pms_system": "eaglesoft"})
+    assert r.status_code == 200
+    assert r.json()["pms_system"] == "eaglesoft"
+
+
+async def test_an_unknown_system_is_still_refused(client, db_session):
+    """Widened, not opened: a free-text value would reach the adapter selector
+    and fall through to the mock, handing a real practice a fake calendar."""
+    await seed_practice(
+        db_session, name="Bogus Co", clerk_org_id="org_bog", clerk_user_id="u_bog"
+    )
+    r = await client.put(
+        "/api/onboarding/pms",
+        headers={"X-Dev-Clerk-User-Id": "u_bog", "X-Dev-Clerk-Org-Id": "org_bog"},
+        json={"pms_system": "definitely-not-a-pms"},
+    )
+    # 400, not 422: the app maps validation failures itself. What matters is
+    # that it is refused rather than stored.
+    assert r.status_code == 400
+
+
+def test_every_offered_system_reaches_a_real_adapter():
+    """Each value the wizard offers must be handled explicitly by the adapter
+    selector. An unlisted one falls to its unknown-value branch and returns the
+    MOCK adapter — a practice would be booked into a calendar that does not
+    exist, and every screen would look fine."""
+    from app.adapters.open_dental import MockOpenDentalAdapter, get_pms_adapter
+    from app.schemas.onboarding import PmsStep
+
+    offered = PmsStep.model_fields["pms_system"].annotation.__args__
+    for system in offered:
+        if system in ("none", "open_dental"):
+            continue  # 'none' is deliberate mock; open_dental needs a key.
+        adapter = get_pms_adapter(pms_system=system)
+        # They all route through the bridge today, so they must land on the same
+        # branch 'nexhealth' does — not on the unknown-value fallback.
+        assert isinstance(adapter, MockOpenDentalAdapter) is isinstance(
+            get_pms_adapter(pms_system="nexhealth"), MockOpenDentalAdapter
+        ), f"{system} does not behave like the bridged systems"
