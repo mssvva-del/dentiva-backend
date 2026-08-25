@@ -2109,6 +2109,7 @@ from app.services.retell_admin import (  # noqa: E402 — grouped with its secti
     get_llm,
     list_phone_numbers,
     publish_agent,
+    repin_numbers_to_published,
     set_llm_model,
 )
 
@@ -2316,10 +2317,28 @@ async def set_voice_model(
         await publish_agent(agent_id)
     except (RetellNotConfigured, RetellError) as exc:
         raise _retell_http(exc) from exc
+
+    # Publishing alone changes nothing a caller hears: each number keeps its pin.
+    # Move them, or the clinics that signed up first quietly keep the old model
+    # while every screen says otherwise.
+    #
+    # Its own try, AFTER the one above: by this point the model is changed and
+    # published, so failing the request would report "nothing happened" about
+    # something that did happen, and invite a retry of a completed change. The
+    # drift is not swallowed either — it pages, and the voice health check lists
+    # every number still serving an old version.
+    repinned: list[str] = []
+    try:
+        repinned = await repin_numbers_to_published(agent_id)
+    except (RetellNotConfigured, RetellError):
+        record_alert(
+            "agent_published_numbers_stale",
+            f"agent={agent_id[:24]} published but numbers keep their old pin",
+        )
     async with _app_db.platform_session_factory() as session:
         await _audit(session, ctx, "admin_set_voice_model",
                      meta={"before": before, "after": payload.model,
-                           "agent": agent_id[:24]})
+                           "agent": agent_id[:24], "numbers_repinned": len(repinned)})
         await session.commit()
     return VoiceModelState(model=payload.model,
                            allowed=list(ALLOWED_VOICE_MODELS), agent_id=agent_id)

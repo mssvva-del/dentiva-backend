@@ -141,3 +141,43 @@ async def test_baa_is_tenant_isolated(client, db_session):
     r = await client.get("/api/onboarding/baa", headers=_auth("org_baa6b", "user_baa6b"))
     assert r.json()["accepted"] is False
     assert p1 is not None
+
+
+async def test_signing_entitles_the_practice_to_a_number(client, db_session):
+    """Signing the BAA is what makes a sign-up a practice we serve — and the next
+    wizard step buys a phone number, which a status of 'onboarding' refuses. This
+    used to be an operator clicking Approve, so a clinic finishing setup at 9pm
+    sat on a dead step until somebody noticed."""
+    practice = await _fresh(db_session, slug="baaent")
+    h = _auth("org_baaent", "user_baaent")
+
+    r = await client.post("/api/onboarding/baa/accept", headers=h, json={
+        "signer_name": "Dr. Ada Poole", "signer_title": "Owner",
+    })
+    assert r.status_code == 200
+
+    p = (await db_session.execute(
+        select(Practice).where(Practice.id == practice.id)
+    )).scalar_one()
+    await db_session.refresh(p)
+    assert p.status == "trial"
+
+
+async def test_signing_never_revives_a_cancelled_practice(client, db_session):
+    """Only ever forward from 'onboarding'. A suspended or cancelled practice
+    accepting a new BAA version must not quietly reactivate itself."""
+    practice = await _fresh(db_session, slug="baacan")
+    p = (await db_session.execute(
+        select(Practice).where(Practice.id == practice.id)
+    )).scalar_one()
+    p.status = "cancelled"
+    await db_session.commit()
+
+    h = _auth("org_baacan", "user_baacan")
+    r = await client.post("/api/onboarding/baa/accept", headers=h, json={
+        "signer_name": "Dr. Ada Poole", "signer_title": "Owner",
+    })
+    assert r.status_code == 200
+
+    await db_session.refresh(p)
+    assert p.status == "cancelled"
