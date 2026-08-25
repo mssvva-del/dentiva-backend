@@ -52,6 +52,13 @@ _NO_PMS = {"", "none", "mock", "other"}
 REQUIRED_FIELDS = {
     "nexhealth": ("location_id",),
     "kolla": ("api_key",),  # plus one of consumer_id / connector_id, checked below
+    # A group running Open Dental had nowhere to put its per-practice customer
+    # key, so practice_credentials returned None for every one of its locations
+    # and the agent fell back to our own book — silently, with the clinic's real
+    # calendar sitting right there. The Open Dental client already refuses to
+    # start without an explicit customer key, so one location can never reach
+    # another's office; what was missing was the row to read the key from.
+    "open_dental": ("customer_key",),
 }
 
 
@@ -176,4 +183,15 @@ def pms_client_for(practice: Practice):
             subdomain=fields.get("subdomain") or None,
             location_id=fields.get("location_id") or None,
         )
+    if name == "open_dental":
+        from app.adapters.open_dental.client import OpenDentalClient
+
+        # No env fallback for the customer key, deliberately. The developer key
+        # identifies US to Open Dental and is shared; the customer key identifies
+        # the OFFICE, and falling back to the environment's would point one
+        # clinic's calls at whichever office that key belongs to.
+        customer_key = (fields.get("customer_key") or "").strip()
+        if not customer_key:
+            return None
+        return OpenDentalClient(customer_key=customer_key)
     return None

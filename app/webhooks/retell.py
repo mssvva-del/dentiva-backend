@@ -437,11 +437,32 @@ async def _resolve_practice(
         for column in (Practice.ai_phone_number, Practice.phone_number):
             if not to_number or to_number == "unknown":
                 break
-            practice = (await session.execute(
-                select(Practice).where(column == to_number)
-            )).scalars().first()
-            if practice is not None:
-                return practice
+            # TWO, not first(). ai_phone_number is UNIQUE so it can only ever
+            # return one — but practices.phone_number, the clinic's own line, is
+            # not, and at fleet scale it collides: a bulk import, a copy-paste
+            # across a group's locations, one central number listed on every
+            # site. first() then sends every call on that number to whichever
+            # row sorts first, and the other clinic's patients are recorded
+            # against a practice they never called.
+            #
+            # Ambiguous is treated exactly like unmatched: refuse. The caller
+            # hears the generic greeting, which is a bad minute; the alternative
+            # is one clinic's PHI filed under another, which is not recoverable.
+            matches = (await session.execute(
+                select(Practice).where(column == to_number).limit(2)
+            )).scalars().all()
+            if len(matches) > 1:
+                logger.critical(
+                    "inbound routing AMBIGUOUS: %s matches %d practices — refusing",
+                    to_number, len(matches),
+                )
+                record_alert(
+                    "inbound_number_ambiguous",
+                    f"number={to_number} matches={len(matches)}",
+                )
+                return None
+            if matches:
+                return matches[0]
 
         # Agent id, kept for web calls and for a clinic given its own agent later.
         # NOTHING writes practices.retell_agent_id today, so this matches nothing
