@@ -164,6 +164,26 @@ async def link_synced_locations() -> int:
     return 1
 
 
+async def check_billing_catalog() -> int:
+    """Page if Stripe would charge something other than what we sell.
+
+    Configuration bugs, not code bugs: a live key left beside test price ids, or
+    a price change in plans.py that nobody synced to Stripe. Both are invisible
+    until a clinic is at the checkout with a card in hand, so this asks Stripe
+    before anyone does. Returns the number of problems found.
+    """
+    from app.billing.catalog_check import verify_catalog
+
+    try:
+        problems = await verify_catalog()
+    except Exception:  # noqa: BLE001 — Stripe being down is not a catalog fault
+        logger.warning("maintenance: could not verify the Stripe catalog")
+        return 0
+    for problem in problems:
+        record_alert("billing_catalog_mismatch", problem)
+    return len(problems)
+
+
 async def maintenance_loop() -> None:
     """Run maintenance forever on a fixed interval."""
     interval = get_settings().maintenance_interval_seconds
@@ -180,6 +200,7 @@ async def maintenance_loop() -> None:
                     if scrubbed:
                         logger.info("maintenance: scrubbed PHI on %s expired calls", scrubbed)
                     await link_synced_locations()
+                    await check_billing_catalog()
         except asyncio.CancelledError:
             logger.info("maintenance loop cancelled — stopping")
             raise
