@@ -163,7 +163,10 @@ async def repin_numbers_to_published(agent_id: str, *, transport=None) -> list[s
         try:
             await _request(
                 "PATCH", f"/update-phone-number/{phone}",
-                {"inbound_agents": [{"agent_id": agent_id}]},
+                # Same required `weight` as provisioning — without it this
+                # silently degrades to "could not re-pin" on every number, and
+                # the clinics that signed up first keep hearing the old agent.
+                {"inbound_agents": [{"agent_id": agent_id, "weight": 1}]},
                 transport=transport,
             )
             repinned.append(phone)

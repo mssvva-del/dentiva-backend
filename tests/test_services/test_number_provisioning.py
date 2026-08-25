@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,7 +55,9 @@ async def test_provision_uses_clinic_area_code_and_binds_agent(monkeypatch):
     sent = calls[0]["payload"]
     assert calls[0]["path"] == "/create-phone-number"
     assert sent["area_code"] == 718                      # clinic's own area code
-    assert sent["inbound_agents"] == [{"agent_id": "agent_x"}]  # bound on creation
+    # Bound on creation, WITH the weight Retell requires — see the wire-shape
+    # test below for why that second half is not cosmetic.
+    assert sent["inbound_agents"] == [{"agent_id": "agent_x", "weight": 1}]
     # The inbound webhook must be OUR public origin, else the number answers with
     # no clinic context.
     assert sent["inbound_webhook_url"] == "https://api.example.com/webhooks/retell/inbound"
@@ -128,3 +132,52 @@ async def test_number_requires_a_commercial_commitment(monkeypatch):
     for status in ("suspended", "cancelled"):
         with pytest.raises(prov.NotEntitledToNumber):
             await prov.provision_number_for_practice(_P(phone="+17187864175", status=status))
+
+
+async def test_every_agent_binding_carries_a_weight(monkeypatch):
+    """Retell requires `weight` on each inbound_agents entry. They added it; our
+    payload did not, and every number purchase started returning 400 "must have
+    required property 'weight'" — nothing on our side had changed. The clinic saw
+    "Retell refused to sell a number just now", and the alert we raised recorded
+    only which practice it was, so the reason had to be found by probing Retell's
+    API by hand.
+
+    Asserted on the wire, not on a constant: this is the shape Retell validates,
+    and the same shape is sent again when a published agent is re-pinned."""
+    import httpx
+
+    from app.config import get_settings
+    from app.services.retell_admin import repin_numbers_to_published
+
+    monkeypatch.setattr(get_settings(), "retell_agent_id", "agent_x")
+    monkeypatch.setattr(get_settings(), "retell_api_key", "test-key")
+    monkeypatch.setattr(
+        get_settings(), "public_base_url", "https://api.example.com"
+    )
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/list-phone-numbers":
+            return httpx.Response(200, json=[
+                {"phone_number": "+15551110000",
+                 "inbound_agents": [{"agent_id": "agent_x"}]},
+            ])
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"phone_number": "+19785550123"})
+
+    transport = httpx.MockTransport(handler)
+    practice = SimpleNamespace(
+        id=uuid.uuid4(), name="Harborside Dental", status="active",
+        phone_number="+19782837200", transfer_phone_number=None,
+    )
+
+    await prov.provision_number_for_practice(practice, transport=transport)
+    await repin_numbers_to_published("agent_x", transport=transport)
+
+    assert len(sent) == 2
+    for body in sent:
+        for binding in body["inbound_agents"]:
+            assert binding.get("weight") is not None, (
+                "Retell rejects an agent binding without a weight"
+            )
+            assert binding["weight"] > 0, "a zero weight routes no calls to the agent"

@@ -78,7 +78,14 @@ async def provision_number_for_practice(
 
     payload: dict = {
         # Bind on creation: a number that rings with no agent is worse than none.
-        "inbound_agents": [{"agent_id": settings.retell_agent_id}],
+        #
+        # `weight` is REQUIRED by Retell — they added it, and without it every
+        # purchase returns 400 "must have required property 'weight'". Nothing on
+        # our side changed; buying a number simply stopped working one day, and
+        # the clinic saw "Retell refused to sell a number just now". It matters
+        # only when several agents share one number, splitting traffic between
+        # them; with a single agent any positive value routes everything to it.
+        "inbound_agents": [{"agent_id": settings.retell_agent_id, "weight": 1}],
         "nickname": f"Dentovox · {practice.name}"[:60],
         # Retell calls this BEFORE answering; we return this clinic's dynamic
         # variables so the agent greets with the right practice name and KB.
