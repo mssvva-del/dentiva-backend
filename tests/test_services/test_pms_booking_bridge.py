@@ -463,13 +463,38 @@ def test_a_clinics_own_key_is_never_mixed_with_the_environments_location(monkeyp
     assert client._location_id == "99"
 
 
-def test_a_practice_with_no_pms_is_still_refused_a_bridge(monkeypatch):
-    """Credentials do not override "this clinic has not connected a PMS" —
-    otherwise a stale row books a patient into a system nobody uses."""
+def test_a_complete_link_beats_a_skipped_wizard_answer(monkeypatch):
+    """This assertion used to run the other way, on the reasoning that a stale
+    credentials row must not book a patient into a system nobody uses. The first
+    real clinic showed the cost of that rule.
+
+    They run Eaglesoft. Our wizard offered "Open Dental", "NexHealth" and "Skip
+    for now", so they picked Skip — the only honest answer available to them.
+    That single answer would have kept the agent on our own book permanently,
+    with their NexHealth calendar connected, an operator-set location id on the
+    row, and every screen reporting success. Silent, and discovered by a patient
+    whose appointment never appeared in the practice's schedule.
+
+    The credentials are the stronger signal: `practice_credentials` returns a set
+    only when it is COMPLETE, which for NexHealth means a location id — a
+    specific calendar somebody deliberately linked to this specific clinic. A
+    wizard radio button is what the practice said about themselves once.
+
+    The stale-row risk is real but has a different remedy: disconnecting a
+    practice means CLEARING its credentials, not changing what they answered."""
     from app.adapters.bridge import bridge_name
 
     _configured(monkeypatch)
     practice = _with_credentials(
         _practice("none"), bridge="nexhealth", api_key="k", subdomain="s", location_id="1"
     )
-    assert bridge_name(practice) is None
+    assert bridge_name(practice) == "nexhealth"
+
+
+def test_no_credentials_and_no_system_is_still_refused(monkeypatch):
+    """The guard that matters still holds: nothing linked, nothing claimed, no
+    bridge — the agent uses our own book and says so."""
+    from app.adapters.bridge import bridge_name
+
+    _configured(monkeypatch)
+    assert bridge_name(_practice("none")) is None

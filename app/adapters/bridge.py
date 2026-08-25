@@ -123,11 +123,17 @@ def _env_credentials_are_for(practice: Practice) -> bool:
 
 def bridge_name(practice: Practice) -> str | None:
     """"kolla", "nexhealth", or None when nothing can answer for this practice."""
-    if (practice.pms_system or "").strip().lower() in _NO_PMS:
-        return None
     own = practice_credentials(practice)
     if own is not None:
+        # Credentials we were GIVEN outrank a wizard answer. pms_system is what
+        # the clinic told us they run; this is a working link somebody set up on
+        # purpose, pointing at a specific location. The first real clinic
+        # answered "skip" — their system was missing from the list — and that
+        # answer alone would have kept the agent on our own book forever, with a
+        # perfectly good calendar connected and every screen saying so.
         return own["bridge"]
+    if (practice.pms_system or "").strip().lower() in _NO_PMS:
+        return None
     if not _env_credentials_are_for(practice):
         # Another clinic's credentials are the only ones here. No PMS is the
         # correct answer: the agent falls back to our own book, which is honest,

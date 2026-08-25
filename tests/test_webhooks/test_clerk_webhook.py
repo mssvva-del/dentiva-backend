@@ -284,3 +284,16 @@ async def test_user_updated_never_moves_a_user_between_clinics(client, db_sessio
     assert owner.role == before_role
     assert owner.practice_id == before_practice
     assert owner.is_internal is False
+
+
+def test_both_placeholder_forms_are_recognised():
+    """Two paths invent an address: the webhook writes "@unknown.clerk", and a
+    user auto-created on their first authenticated request (a JWT carrying no
+    email claim) gets "@clerk.local". Healing only one is how the first real
+    clinic still showed a machine id after the fix shipped."""
+    from app.services.clerk_provisioning import is_placeholder_email
+
+    assert is_placeholder_email("user_abc@unknown.clerk")
+    assert is_placeholder_email("User_3lPZuR3GK0pO2W1Zi@clerk.local")
+    assert not is_placeholder_email("dr.roe@harborside-dental.com")
+    assert not is_placeholder_email(None)

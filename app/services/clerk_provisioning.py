@@ -281,6 +281,18 @@ async def handle_user_deleted(session: AsyncSession, data: dict) -> str:
 # Dispatch table: Clerk event type → handler.
 PLACEHOLDER_EMAIL_SUFFIX = "@unknown.clerk"
 
+# Two of them, written by two different paths, and healing only one is how the
+# first real clinic kept showing a machine id after the fix shipped: the webhook
+# writes "@unknown.clerk", while a user auto-created on their first authenticated
+# request (a JWT with no email claim) gets "@clerk.local". Anything that repairs
+# a placeholder has to know about both.
+PLACEHOLDER_EMAIL_SUFFIXES = ("@unknown.clerk", "@clerk.local")
+
+
+def is_placeholder_email(email: str | None) -> bool:
+    """True for an address we invented to satisfy NOT NULL, not one a person has."""
+    return bool(email) and email.endswith(PLACEHOLDER_EMAIL_SUFFIXES)
+
 
 async def handle_user_updated(session, data: dict) -> str:
     """Learn the real email address when Clerk finally has one.
@@ -309,7 +321,7 @@ async def handle_user_updated(session, data: dict) -> str:
         return "noop"
     # Never overwrite a real address with a placeholder — the guard above rules
     # out an empty one, and this rules out a regression from a partial payload.
-    if email.endswith(PLACEHOLDER_EMAIL_SUFFIX):
+    if is_placeholder_email(email):
         return "noop"
     user.email = email
     logger.info("clerk user.updated: learned email for %s", clerk_user_id[:12])
