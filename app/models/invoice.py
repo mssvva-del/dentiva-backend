@@ -47,3 +47,9 @@ class Invoice(UUIDPKMixin, TimestampMixin, Base):
     period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Stripe's own hosted invoice page and PDF. Stored rather than fetched on
+    # demand: a bookkeeper opening last quarter's receipt should not depend on
+    # our Stripe key still being valid, and these URLs are stable per invoice.
+    # Not PHI — an invoice line is a plan name and an amount, never a patient.
+    hosted_invoice_url: Mapped[str | None] = mapped_column(Text)
+    invoice_pdf_url: Mapped[str | None] = mapped_column(Text)

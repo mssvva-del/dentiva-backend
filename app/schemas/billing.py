@@ -37,6 +37,11 @@ class InvoiceOut(BaseModel):
     period_end: datetime | None
     paid_at: datetime | None
     created_at: datetime
+    # Stripe's hosted invoice page and PDF. Null on invoices recorded before we
+    # started storing them, and on any invoice that never came from Stripe — the
+    # UI shows the row without a link rather than a link that goes nowhere.
+    hosted_invoice_url: str | None = None
+    invoice_pdf_url: str | None = None
 
 
 class BillingSummary(BaseModel):

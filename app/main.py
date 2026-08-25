@@ -316,6 +316,21 @@ async def health_detailed() -> JSONResponse:
             "take_payment": bool(
                 settings.stripe_secret_key and settings.stripe_price_growth_monthly
             ),
+            # take_payment needs BOTH, so its False says nothing about which is
+            # missing — and the fix differs: one is a key to paste, the other is
+            # running the catalog sync against the right Stripe mode. Splitting
+            # it turns "billing is off" into an instruction.
+            "billing_key": bool(settings.stripe_secret_key),
+            "billing_prices": all((
+                settings.stripe_price_after_hours_monthly,
+                settings.stripe_price_after_hours_annual,
+                settings.stripe_price_full_time_monthly,
+                settings.stripe_price_full_time_annual,
+                settings.stripe_price_growth_monthly,
+                settings.stripe_price_growth_annual,
+                settings.stripe_price_multi_monthly,
+                settings.stripe_price_multi_annual,
+            )),
             "billing_webhook": bool(settings.stripe_webhook_secret),
             "identity_webhook": bool(settings.clerk_webhook_secret),
             "outbound_calls": bool(

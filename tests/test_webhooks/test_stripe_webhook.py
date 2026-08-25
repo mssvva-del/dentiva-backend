@@ -199,3 +199,40 @@ async def test_duplicate_event_id_is_ignored(client, db_session):
     r2 = await client.post("/webhooks/stripe", content=await _event_id(
         "checkout.session.completed", obj, "evt_dup_1"))  # same event id
     assert r2.json()["status"] == "duplicate"
+
+
+async def test_invoice_keeps_its_receipt_across_redelivery(client, db_session):
+    """A billing row of date + amount is not something a practice's bookkeeper can
+    file. Stripe puts a hosted page and a PDF on every invoice and we were
+    dropping both — and a later webhook for the same invoice can carry neither,
+    so storing must not blank what the clinic already had."""
+    practice, _ = await seed_practice(
+        db_session, name="StripeDoc", clerk_org_id="org_stdoc", clerk_user_id="u_stdoc"
+    )
+    await client.post("/webhooks/stripe", content=await _event(
+        "checkout.session.completed",
+        {"customer": "cus_doc", "subscription": "sub_doc",
+         "metadata": {"practice_id": str(practice.id), "plan": "starter"}},
+    ))
+    await client.post("/webhooks/stripe", content=await _event(
+        "invoice.paid",
+        {"customer": "cus_doc", "subscription": "sub_doc", "id": "in_doc",
+         "amount_paid": 24900,
+         "hosted_invoice_url": "https://invoice.stripe.com/i/in_doc",
+         "invoice_pdf": "https://invoice.stripe.com/i/in_doc.pdf"},
+    ))
+    inv = (await db_session.execute(
+        select(Invoice).where(Invoice.practice_id == practice.id)
+    )).scalar_one()
+    await db_session.refresh(inv)
+    assert inv.invoice_pdf_url == "https://invoice.stripe.com/i/in_doc.pdf"
+    assert inv.hosted_invoice_url == "https://invoice.stripe.com/i/in_doc"
+
+    # Redelivery without the links must not take the receipt away.
+    await client.post("/webhooks/stripe", content=await _event(
+        "invoice.paid",
+        {"customer": "cus_doc", "subscription": "sub_doc", "id": "in_doc",
+         "amount_paid": 24900},
+    ))
+    await db_session.refresh(inv)
+    assert inv.invoice_pdf_url == "https://invoice.stripe.com/i/in_doc.pdf"

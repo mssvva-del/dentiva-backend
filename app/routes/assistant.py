@@ -20,10 +20,10 @@ from pydantic import BaseModel, Field
 from app.auth.permissions import VIEW_DASHBOARD, require_permission
 from app.config import get_settings
 from app.dependencies import get_current_practice
-from app.middleware.rate_limit import limit_authenticated
+from app.middleware.rate_limit import limit_authenticated, limit_public
 from app.models.practice import Practice
 from app.models.user import User
-from app.services.assistant.knowledge import SYSTEM_PROMPT
+from app.services.assistant.knowledge import PUBLIC_SYSTEM_PROMPT, SYSTEM_PROMPT
 
 logger = logging.getLogger("dentiva.assistant")
 
@@ -47,6 +47,84 @@ class AskRequest(BaseModel):
 
 class AskResponse(BaseModel):
     reply: str
+
+
+async def _ask_claude(system: str, messages: list[dict], *, max_tokens: int) -> str:
+    """One call to the model, with the failure handling both endpoints need."""
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": settings.anthropic_api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "claude-sonnet-5",
+                    "max_tokens": max_tokens,
+                    "system": system,
+                    "messages": messages,
+                },
+            )
+        if resp.status_code >= 400:
+            logger.warning("assistant: anthropic %s", resp.status_code)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="The assistant is having trouble — please try again.",
+            )
+        blocks = resp.json().get("content") or []
+        return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("assistant: request failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The assistant is having trouble — please try again.",
+        ) from exc
+
+
+@router.post("/public-ask", response_model=AskResponse)
+# Far tighter than the signed-in limit, and per IP: this endpoint is open to the
+# internet and every question costs tokens. A visitor asking six questions a
+# minute is already an unusually engaged visitor.
+@limit_public("6/minute")
+async def public_ask(
+    request: Request,
+    response: Response,  # slowapi writes its headers here
+    body: AskRequest,
+) -> AskResponse:
+    """Answer a product question for a visitor on the marketing site.
+
+    Unauthenticated by design — the whole point is that a dentist evaluating us
+    at 11pm can ask something without signing up. It therefore gets NO practice
+    context at all: not a name, not an id. The signed-in assistant passes a
+    clinic name so answers read naturally; there is nobody to name here, and an
+    open endpoint that accepted one would let a stranger address any clinic.
+
+    Same curated product document as the in-app assistant, so the site cannot
+    start promising things the product does not do.
+    """
+    settings = get_settings()
+    if not settings.anthropic_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The assistant isn't available right now.",
+        )
+
+    messages = [
+        {"role": t.role, "content": t.content} for t in body.history[-_MAX_TURNS:]
+    ]
+    messages.append({"role": "user", "content": body.message})
+    reply = await _ask_claude(PUBLIC_SYSTEM_PROMPT, messages, max_tokens=400)
+
+    if not reply.strip():
+        reply = (
+            "I didn't catch that — could you rephrase? For anything I can't "
+            "answer, email support@dentovox.com."
+        )
+    return AskResponse(reply=reply.strip())
 
 
 @router.post("/ask", response_model=AskResponse)
@@ -76,37 +154,7 @@ async def ask(
     ]
     messages.append({"role": "user", "content": body.message})
 
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": settings.anthropic_api_key,
-                    "anthropic-version": "2023-06-01",
-                },
-                json={
-                    "model": "claude-sonnet-5",
-                    "max_tokens": 600,
-                    "system": system,
-                    "messages": messages,
-                },
-            )
-        if resp.status_code >= 400:
-            logger.warning("assistant: anthropic %s", resp.status_code)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="The assistant is having trouble — please try again.",
-            )
-        blocks = resp.json().get("content") or []
-        reply = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("assistant: request failed")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="The assistant is having trouble — please try again.",
-        ) from exc
+    reply = await _ask_claude(system, messages, max_tokens=600)
 
     if not reply.strip():
         reply = (
