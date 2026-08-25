@@ -99,3 +99,77 @@ async def test_history_is_capped(client, db_session, monkeypatch):
         "/api/assistant/ask", json={"message": "and now?", "history": history}, headers=_HDR)
     assert r.status_code == 200
     assert len(sent["messages"]) <= 13  # 12 kept turns + the new question
+
+
+def _stub_anthropic(monkeypatch, sent: dict, text: str = "Yes — it books into your calendar."):
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"content": [{"type": "text", "text": text}]}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            sent.update(json or {})
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _Client())
+
+
+async def test_public_ask_needs_no_account(client, monkeypatch):
+    """The whole point: a dentist evaluating us at 11pm can ask something without
+    signing up first."""
+    import app.routes.assistant as mod
+
+    monkeypatch.setattr(mod, "get_settings", lambda: type("S", (), {"anthropic_api_key": "k"})())
+    sent: dict = {}
+    _stub_anthropic(monkeypatch, sent)
+
+    r = await client.post(
+        "/api/assistant/public-ask",
+        json={"message": "does it work with Eaglesoft?", "history": []},
+    )
+    assert r.status_code == 200
+    assert r.json()["reply"]
+
+
+async def test_public_ask_carries_no_clinic_identity(client, db_session, monkeypatch):
+    """An open endpoint that accepted a practice name would let a stranger address
+    any clinic. There is nobody to name here, so nothing about any practice may
+    reach the prompt."""
+    import app.routes.assistant as mod
+    from app.services.assistant.knowledge import PUBLIC_SYSTEM_PROMPT
+
+    practice, _ = await seed_practice(
+        db_session, name="Nameable Dental", clerk_org_id="org_pub", clerk_user_id="u_pub"
+    )
+    await db_session.commit()
+
+    monkeypatch.setattr(mod, "get_settings", lambda: type("S", (), {"anthropic_api_key": "k"})())
+    sent: dict = {}
+    _stub_anthropic(monkeypatch, sent)
+
+    await client.post(
+        "/api/assistant/public-ask",
+        json={"message": "who am I?", "history": []},
+        # Even WITH a clinic's headers, the public endpoint must stay anonymous.
+        headers={"X-Dev-Clerk-User-Id": "u_pub", "X-Dev-Clerk-Org-Id": "org_pub"},
+    )
+    assert sent["system"] == PUBLIC_SYSTEM_PROMPT
+    assert "Nameable Dental" not in sent["system"]
+    assert str(practice.id) not in sent["system"]
+
+
+async def test_public_ask_degrades_without_key(client, monkeypatch):
+    import app.routes.assistant as mod
+
+    monkeypatch.setattr(mod, "get_settings", lambda: type("S", (), {"anthropic_api_key": ""})())
+    r = await client.post("/api/assistant/public-ask", json={"message": "hi"})
+    assert r.status_code == 503

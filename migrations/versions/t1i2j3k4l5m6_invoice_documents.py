@@ -6,8 +6,8 @@ already puts both a hosted page and a PDF on every invoice object — we were
 receiving them in the webhook and dropping them, so the only way to get a
 receipt was to ask us for one.
 
-Revision ID: a2v3w4x5y6z7
-Revises: z1u2v3w4x5y6
+Revision ID: t1i2j3k4l5m6
+Revises: s0h1i2j3k4l5
 Create Date: 2026-08-25
 """
 from collections.abc import Sequence
@@ -15,8 +15,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = 'a2v3w4x5y6z7'
-down_revision: str | None = 'z1u2v3w4x5y6'
+revision: str = 't1i2j3k4l5m6'
+down_revision: str | None = 's0h1i2j3k4l5'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
