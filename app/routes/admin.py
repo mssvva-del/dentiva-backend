@@ -593,6 +593,67 @@ async def admin_provision_number(
         )
 
 
+class DetachNumberRequest(BaseModel):
+    # The operator types the number they are removing. Not a checkbox: the whole
+    # point is that this cannot be done by clicking through, because the usual
+    # case for a number being wrong is that somebody clicked through once already.
+    confirm_number: str
+
+
+@router.delete("/clinics/{practice_id}/number", response_model=ProvisionNumberResponse)
+async def admin_detach_number(
+    practice_id: uuid.UUID,
+    body: DetachNumberRequest,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_CLINIC_STATUS)),
+) -> ProvisionNumberResponse:
+    """Take a wrong number off a clinic.
+
+    ai_phone_number was write-once: set it, and the provision endpoint returned
+    it unchanged forever. That guard is right about the danger — swapping a live
+    number from a form silently stops a practice's calls — but it left no way to
+    undo a mistake, and the first real clinic made one: the practice's OWN line
+    was attached as their Dentovox number. Nothing routes there, so no call could
+    arrive, and had they forwarded to it the line would have called itself.
+
+    A guard that prevents accidents must not also prevent corrections. This is
+    the correction: deliberate, typed out, and audited.
+
+    What it does NOT do is release the number at Retell. If we bought it, we
+    still own it, and a delete here must not be able to destroy a number another
+    clinic might be answering. Releasing is a separate, visible act in the Retell
+    dashboard.
+    """
+    # The E.164 normalizer, not the crypto one — same reason as provisioning:
+    # the other returns bare digits, which would never equal a stored +1 number
+    # and would make this confirmation impossible to satisfy.
+    from app.services.sms import normalize_phone
+
+    async with _app_db.platform_session_factory() as session:
+        practice = (await session.execute(
+            select(Practice).where(Practice.id == practice_id).with_for_update()
+        )).scalar_one_or_none()
+        if practice is None:
+            raise HTTPException(status_code=404, detail="Clinic not found.")
+        current = practice.ai_phone_number
+        if not current:
+            raise HTTPException(
+                status_code=409, detail="This clinic has no number attached."
+            )
+        if normalize_phone(body.confirm_number) != current:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Type the number being removed exactly: {current}",
+            )
+        practice.ai_phone_number = None
+        await _audit(session, ctx, "admin_detach_number",
+                     practice_id=practice_id, meta={"was": current})
+        await session.commit()
+    # Loud on purpose. A clinic with no number cannot receive a single call, and
+    # that state should never be reached quietly.
+    record_alert("clinic_number_detached", f"practice={practice_id} was={current}")
+    return ProvisionNumberResponse(practice_id=str(practice_id), ai_phone_number="")
+
+
 class PmsCredentials(BaseModel):
     """What links a clinic to its calendar. Write-only: nothing reads it back.
 
