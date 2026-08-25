@@ -187,6 +187,13 @@ class Settings(BaseSettings):
     # the dashboard stays current even when web/test calls fire no webhook.
     # Disabled by default; enable on the server with CALL_SYNC_ENABLED=true.
     call_sync_enabled: bool = False
+    # SQLAlchemy pool per engine (two engines: RLS app role + platform owner).
+    # The library default (5 held + 10 overflow) fits one clinic; a fleet's
+    # webhook burst queues on the pool and every queued request is a patient
+    # holding. 15+15 per engine = 60 max against Postgres's usual 100.
+    db_pool_size: int = 15
+    db_max_overflow: int = 15
+
     call_sync_interval_seconds: int = 300
     call_sync_limit: int = 20
 

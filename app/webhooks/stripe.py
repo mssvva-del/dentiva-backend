@@ -23,13 +23,14 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import app.db as _app_db
 from app.config import get_settings
 from app.db import set_tenant
+from app.middleware.rate_limit import limit_webhook
 from app.models.invoice import Invoice
 from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
@@ -295,8 +296,13 @@ _HANDLERS = {
 
 
 @router.post("/stripe", status_code=status.HTTP_200_OK)
+# On a fleet's renewal day Stripe delivers hundreds of invoice events in a
+# burst, plus retries for anything we 429 — which the default limit would
+# guarantee, turning one throttled minute into hours of redelivery.
+@limit_webhook("600/minute")
 async def stripe_webhook(
     request: Request,
+    response: Response,
     stripe_signature: str | None = Header(default=None, alias="stripe-signature"),
 ) -> dict:
     raw_body = await request.body()
