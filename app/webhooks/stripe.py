@@ -138,7 +138,8 @@ async def _handle_checkout_completed(session, obj: dict) -> str:
 async def _upsert_invoice(
     session, practice_id, *, stripe_id: str | None, amount_cents: int, status_: str,
     paid_at: datetime | None, period_start: datetime | None = None,
-    period_end: datetime | None = None,
+    period_end: datetime | None = None, hosted_url: str | None = None,
+    pdf_url: str | None = None,
 ) -> None:
     """Idempotently record an invoice. Stripe REDELIVERS webhooks, so we upsert on
     stripe_invoice_id (partial-unique) instead of blind-inserting, which used to
@@ -154,6 +155,15 @@ async def _upsert_invoice(
         ),
         "paid_at": paid_at,
         "period_start": period_start, "period_end": period_end,
+        # COALESCE, not overwrite: a later webhook for the same invoice (a retry,
+        # or payment_failed following paid) can carry these as null, and blanking
+        # them would take the receipt away from a clinic that already had it.
+        "hosted_invoice_url": text(
+            "COALESCE(excluded.hosted_invoice_url, invoices.hosted_invoice_url)"
+        ),
+        "invoice_pdf_url": text(
+            "COALESCE(excluded.invoice_pdf_url, invoices.invoice_pdf_url)"
+        ),
         "updated_at": datetime.now(UTC),
     }
     if not stripe_id:
@@ -162,6 +172,7 @@ async def _upsert_invoice(
             id=uuid.uuid4(), practice_id=practice_id, stripe_invoice_id=None,
             amount_cents=amount_cents, status=status_, paid_at=paid_at,
             period_start=period_start, period_end=period_end,
+            hosted_invoice_url=hosted_url, invoice_pdf_url=pdf_url,
         ))
         return
     stmt = (
@@ -170,6 +181,7 @@ async def _upsert_invoice(
             id=uuid.uuid4(), practice_id=practice_id, stripe_invoice_id=stripe_id,
             amount_cents=amount_cents, status=status_, paid_at=paid_at,
             period_start=period_start, period_end=period_end,
+            hosted_invoice_url=hosted_url, invoice_pdf_url=pdf_url,
         )
         .on_conflict_do_update(
             index_elements=["stripe_invoice_id"],
@@ -193,6 +205,8 @@ async def _handle_invoice_paid(session, obj: dict) -> str:
         paid_at=datetime.now(UTC),
         period_start=_epoch(obj.get("period_start")),
         period_end=_epoch(obj.get("period_end")),
+        hosted_url=obj.get("hosted_invoice_url"),
+        pdf_url=obj.get("invoice_pdf"),
     )
     # A successful payment clears any suspension/past-due.
     await reactivate_practice(session, practice)
@@ -210,6 +224,8 @@ async def _handle_payment_failed(session, obj: dict) -> str:
         amount_cents=int(obj.get("amount_due") or 0),
         status_="open",
         paid_at=None,
+        hosted_url=obj.get("hosted_invoice_url"),
+        pdf_url=obj.get("invoice_pdf"),
     )
     # Grace period: Stripe will retry. We mark past_due but do NOT suspend yet —
     # suspension happens on customer.subscription.deleted (Stripe gave up).

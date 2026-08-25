@@ -122,6 +122,8 @@ async def billing_summary(
                 id=str(i.id), amount_cents=i.amount_cents, status=i.status,
                 period_start=i.period_start, period_end=i.period_end,
                 paid_at=i.paid_at, created_at=i.created_at,
+                hosted_invoice_url=i.hosted_invoice_url,
+                invoice_pdf_url=i.invoice_pdf_url,
             )
             for i in invoices
         ],
