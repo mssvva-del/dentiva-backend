@@ -97,7 +97,16 @@ class PhoneStep(BaseModel):
 # ── Step 4: PMS ──────────────────────────────────────────────────────────────
 class PmsStep(BaseModel):
     # 'none' = skip for now (mock adapter); real connectors land later.
-    pms_system: Literal["open_dental", "nexhealth", "none"]
+    # The systems a practice can actually name, not the two integrations we
+    # happen to have built. A dentist running Eaglesoft was offered "Open
+    # Dental", "NexHealth" and "Skip" — none of which is their software — and
+    # correctly concluded we do not support them. NexHealth is a BRIDGE to most
+    # of these, so naming the real system costs nothing and tells us the truth
+    # about who we are serving.
+    pms_system: Literal[
+        "eaglesoft", "dentrix", "dentrix_ascend", "dentrix_enterprise",
+        "denticon", "curve", "cloud9", "open_dental", "other", "none",
+    ]
 
 
 # ── Step 5: Agent ────────────────────────────────────────────────────────────

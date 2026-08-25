@@ -279,8 +279,46 @@ async def handle_user_deleted(session: AsyncSession, data: dict) -> str:
 
 
 # Dispatch table: Clerk event type → handler.
+PLACEHOLDER_EMAIL_SUFFIX = "@unknown.clerk"
+
+
+async def handle_user_updated(session, data: dict) -> str:
+    """Learn the real email address when Clerk finally has one.
+
+    user.created can arrive before the address is attached and verified — and
+    when it does, we store ``<clerk_id>@unknown.clerk`` so the NOT NULL column
+    has something. Clerk then sends user.updated with the real address, which we
+    ignored, so the placeholder became permanent: the admin screen showed a
+    machine id where the practice owner's email belongs, and nobody could
+    contact the clinic from the record that exists to describe it.
+
+    Deliberately narrow: this refreshes the email and nothing else. Role,
+    practice and internal-staff status are decided by membership events, and a
+    profile edit must never be able to move a user between clinics.
+    """
+    clerk_user_id = data.get("id")
+    if not clerk_user_id:
+        return "noop"
+    email = _primary_email(data)
+    if not email:
+        return "noop"
+    user = (
+        await session.execute(select(User).where(User.clerk_user_id == clerk_user_id))
+    ).scalar_one_or_none()
+    if user is None or user.email == email:
+        return "noop"
+    # Never overwrite a real address with a placeholder — the guard above rules
+    # out an empty one, and this rules out a regression from a partial payload.
+    if email.endswith(PLACEHOLDER_EMAIL_SUFFIX):
+        return "noop"
+    user.email = email
+    logger.info("clerk user.updated: learned email for %s", clerk_user_id[:12])
+    return "email_updated"
+
+
 EVENT_HANDLERS = {
     "user.created": handle_user_created,
+    "user.updated": handle_user_updated,
     "organization.created": handle_organization_created,
     "organizationMembership.created": handle_membership_created,
     "user.deleted": handle_user_deleted,

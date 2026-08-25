@@ -35,7 +35,16 @@ def get_pms_adapter(
                 "open_dental per-practice adapter requires an explicit customer_key"
             )
         return OpenDentalClient(customer_key=customer_key)
-    if pms_system in (None, "mock", "none", "nexhealth"):
+    # Everything reached through the NexHealth bridge behaves the same here as
+    # "nexhealth" always has — the bridge itself is selected from the practice's
+    # pms_credentials, not from this field. Listing them explicitly keeps a new
+    # system from silently falling to the unknown-value branch below, which
+    # would hand a real practice the mock adapter.
+    if pms_system in (
+        None, "mock", "none", "nexhealth", "eaglesoft", "dentrix",
+        "dentrix_ascend", "dentrix_enterprise", "denticon", "curve", "cloud9",
+        "other",
+    ):
         # Global setting decides when no per-practice real OD is requested.
         adapter = get_settings().pms_adapter
         if adapter == "open_dental_real":

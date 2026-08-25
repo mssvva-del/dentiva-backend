@@ -63,6 +63,7 @@ from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.observability.alerts import record_alert
+from app.services.clerk_provisioning import PLACEHOLDER_EMAIL_SUFFIX
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -330,10 +331,27 @@ async def clinic_detail(
         users = (await session.execute(
             select(func.count()).select_from(User).where(User.practice_id == practice_id)
         )).scalar_one()
-        owner_email = (await session.execute(
-            select(User.email).where(User.practice_id == practice_id, User.role == "owner")
+        owner = (await session.execute(
+            select(User).where(User.practice_id == practice_id, User.role == "owner")
             .limit(1)
         )).scalar_one_or_none()
+        owner_email = owner.email if owner else None
+        # Self-heal a placeholder. user.created can land before Clerk has an
+        # address, and we store "<clerk_id>@unknown.clerk" to satisfy NOT NULL;
+        # user.updated fixes new rows, but one already carrying the placeholder
+        # hears no further event, and this screen — the record that exists to
+        # describe a clinic — then shows a machine id instead of the owner's
+        # email. Asked for once, here, and stored so it is asked for once.
+        if owner is not None and owner_email and owner_email.endswith(
+            PLACEHOLDER_EMAIL_SUFFIX
+        ):
+            from app.services.clerk_api import fetch_user_email
+
+            real = await fetch_user_email(owner.clerk_user_id)
+            if real:
+                owner.email = real
+                owner_email = real
+                await session.commit()
         # PHI tables (calls) are RLS-protected; bind the tenant just for these
         # COUNTs (no PHI columns selected). This read is audited below.
         from app.db import set_tenant
