@@ -46,7 +46,9 @@ async def test_publishing_moves_every_number_to_the_new_version():
     method, path, body = seen[0]
     assert method == "PATCH"
     assert path == "/update-phone-number/+15551110000"
-    assert body == {"inbound_agents": [{"agent_id": "agent_ours"}]}
+    # No agent VERSION — omitting it is what makes Retell bind to current
+    # published. The weight is required by their API on every binding.
+    assert body == {"inbound_agents": [{"agent_id": "agent_ours", "weight": 1}]}
 
 
 async def test_one_unreachable_number_does_not_strand_the_rest():

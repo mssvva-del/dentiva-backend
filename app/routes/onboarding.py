@@ -293,7 +293,12 @@ async def step_phone(
             logger.info("phone step: %s not entitled to a number yet", p.id)
         except (RetellError, RetellNotConfigured) as exc:
             logger.warning("phone step: provisioning failed for %s: %s", p.id, exc)
-            record_alert("number_provision_failed", f"practice={p.id}")
+            # The REASON, not just the fact. Without it the alert said only which
+            # practice failed, and diagnosing a Retell API change meant probing
+            # their API by hand to find out what our own alert had already seen.
+            record_alert(
+                "number_provision_failed", f"practice={p.id} error={str(exc)[:160]}"
+            )
 
     _advance(p, 3)
     await _audit(db, p, user, "onboarding_step",
@@ -349,7 +354,12 @@ async def provision_phone_number(
             detail="Phone numbers aren't available right now — we'll email yours shortly.",
         ) from exc
     except RetellError as exc:
-        record_alert("number_provision_failed", f"practice={p.id}")
+        # The REASON, not just the fact. Without it the alert named only which
+        # practice failed, and diagnosing a Retell API change meant probing their
+        # API by hand for what our own alert had already been told.
+        record_alert(
+            "number_provision_failed", f"practice={p.id} error={str(exc)[:160]}"
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="We couldn't get a number just now — we'll email yours shortly.",

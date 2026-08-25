@@ -571,7 +571,12 @@ async def admin_provision_number(
             except RetellNotConfigured as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             except RetellError as exc:
-                record_alert("number_provision_failed", f"practice={practice_id}")
+                # Carry the reason. "Retell refused" is what the operator sees;
+                # the alert is the only place the actual message can land.
+                record_alert(
+                    "number_provision_failed",
+                    f"practice={practice_id} error={str(exc)[:160]}",
+                )
                 raise HTTPException(
                     status_code=502,
                     detail="Retell refused to sell a number just now — try "
