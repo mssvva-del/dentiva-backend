@@ -127,3 +127,65 @@ async def test_a_clinic_user_cannot_give_numbers(client, db_session):
         json={"number": "+16205550133"},
     )
     assert r.status_code in (401, 403)
+
+
+async def test_a_wrong_number_can_be_taken_off(client, db_session):
+    """ai_phone_number was write-once: set it, and provisioning returned it
+    unchanged forever. The first real clinic showed the cost — their OWN practice
+    line was attached as the Dentovox number, so nothing could route there, and
+    had they forwarded to it the line would have called itself. The guard is
+    right about the danger; it just had no correction path."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Detach Co", clerk_org_id="org_det", clerk_user_id="u_det"
+    )
+    practice.ai_phone_number = "+19782837200"
+    await db_session.commit()
+
+    r = await client.request(
+        "DELETE", f"/api/admin/clinics/{practice.id}/number",
+        headers=_h("sa_num"), json={"confirm_number": "(978) 283-7200"},
+    )
+    assert r.status_code == 200
+    await db_session.refresh(practice)
+    assert practice.ai_phone_number is None
+
+
+async def test_detaching_needs_the_number_typed_out(client, db_session):
+    """Not a checkbox. The usual reason a number is wrong is that somebody
+    clicked through once already."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Confirm Co", clerk_org_id="org_cnf", clerk_user_id="u_cnf"
+    )
+    practice.ai_phone_number = "+16175550100"
+    await db_session.commit()
+
+    r = await client.request(
+        "DELETE", f"/api/admin/clinics/{practice.id}/number",
+        headers=_h("sa_num"), json={"confirm_number": "+16175559999"},
+    )
+    assert r.status_code == 422
+    await db_session.refresh(practice)
+    assert practice.ai_phone_number == "+16175550100"
+
+
+async def test_detaching_frees_the_row_for_the_right_number(client, db_session):
+    """The whole point of the correction."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Redo Co", clerk_org_id="org_redo", clerk_user_id="u_redo"
+    )
+    practice.ai_phone_number = "+19782837200"
+    await db_session.commit()
+
+    await client.request(
+        "DELETE", f"/api/admin/clinics/{practice.id}/number",
+        headers=_h("sa_num"), json={"confirm_number": "+19782837200"},
+    )
+    r = await client.post(
+        f"/api/admin/clinics/{practice.id}/provision-number",
+        headers=_h("sa_num"), json={"number": "+19785550143"},
+    )
+    assert r.status_code == 200
+    assert r.json()["ai_phone_number"] == "+19785550143"
