@@ -28,6 +28,7 @@ from app.db import set_tenant
 from app.models.call import Call
 from app.models.practice import Practice
 from app.models.processed_webhook_event import ProcessedWebhookEvent
+from app.observability.alerts import record_alert
 from app.services.worker_lock import advisory_tick_lock
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,76 @@ async def scrub_expired_transcripts(
     return scrubbed
 
 
+async def link_synced_locations() -> int:
+    """Connect a clinic to its own calendar the moment NexHealth finishes syncing.
+
+    The clinic's setup screen promises "this page will say connected on its own —
+    you do not need to tell us". That was only true if a human was watching the
+    admin panel and pasted the location id in; nobody automated the last inch, so
+    the promise depended on us noticing. This is that inch.
+
+    A practice is WAITING when it has an installer key (someone ran, or is
+    running, the Synchronizer) and no location id yet. A location is UNCLAIMED
+    when no practice already points at it.
+
+    Links only the unambiguous case: exactly one waiting practice, exactly one
+    unclaimed location. Anything else pages an admin to pick instead of guessing.
+    Guessing here means reading one clinic's calendar aloud to another clinic's
+    patient and writing an appointment into the wrong practice — matching two
+    similar names by string distance is not worth that. Two clinics installing
+    on the same day is normal; it just means a human picks, once.
+
+    Returns the number of practices linked (0 or 1 today, by construction).
+    """
+    from app.adapters.nexhealth.client import NexHealthClient
+
+    if not get_settings().nexhealth_api_key:
+        return 0
+
+    async with app_db.platform_session_factory() as session:
+        practices = (await session.execute(select(Practice))).scalars().all()
+        waiting, claimed = [], set()
+        for p in practices:
+            creds = p.pms_credentials if isinstance(p.pms_credentials, dict) else {}
+            location_id = str(creds.get("location_id") or "").strip()
+            if location_id:
+                claimed.add(location_id)
+            elif str(creds.get("product_key") or "").strip():
+                waiting.append(p)
+
+        if not waiting:
+            return 0
+
+        locations = await NexHealthClient().list_locations()
+        unclaimed = [
+            loc for loc in locations
+            if str(loc.get("id") or "").strip()
+            and str(loc.get("id")).strip() not in claimed
+        ]
+        if not unclaimed:
+            # The normal state while the clinic's IT has not run the installer.
+            return 0
+
+        if len(waiting) > 1 or len(unclaimed) > 1:
+            record_alert(
+                "pms_autolink_ambiguous",
+                f"waiting={len(waiting)} unclaimed={len(unclaimed)} — link manually",
+            )
+            return 0
+
+        practice, location = waiting[0], unclaimed[0]
+        # Merge: the installer key stays. It is what the clinic reads off its own
+        # screen, and a re-run of the installer needs it after this point too.
+        practice.pms_credentials = {
+            **(practice.pms_credentials or {}),
+            "location_id": str(location["id"]).strip(),
+        }
+        await session.commit()
+
+    logger.info("maintenance: auto-linked practice %s to its PMS location", practice.id)
+    return 1
+
+
 async def maintenance_loop() -> None:
     """Run maintenance forever on a fixed interval."""
     interval = get_settings().maintenance_interval_seconds
@@ -108,6 +179,7 @@ async def maintenance_loop() -> None:
                     scrubbed = await scrub_expired_transcripts()
                     if scrubbed:
                         logger.info("maintenance: scrubbed PHI on %s expired calls", scrubbed)
+                    await link_synced_locations()
         except asyncio.CancelledError:
             logger.info("maintenance loop cancelled — stopping")
             raise

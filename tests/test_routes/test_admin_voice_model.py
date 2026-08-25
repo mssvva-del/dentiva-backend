@@ -35,7 +35,7 @@ async def _bind_agent(db_session, practice_id, agent_id="agent_vm_1"):
 
 
 def _fake_retell(monkeypatch, *, model="gpt-4.1"):
-    calls = {"set": [], "publish": []}
+    calls = {"set": [], "publish": [], "repinned": []}
 
     async def _agent(agent_id, **_kw):
         return {"agent_id": agent_id, "response_engine": {"llm_id": "llm_vm"}}
@@ -54,7 +54,13 @@ def _fake_retell(monkeypatch, *, model="gpt-4.1"):
     monkeypatch.setattr(admin_mod, "get_agent", _agent)
     monkeypatch.setattr(admin_mod, "get_llm", _llm)
     monkeypatch.setattr(admin_mod, "set_llm_model", _set)
+    async def _repin(agent_id, **_kw):
+        # Publishing does not move a number's pin; the route moves it after.
+        calls["repinned"].append(agent_id)
+        return ["+15551110000"]
+
     monkeypatch.setattr(admin_mod, "publish_agent", _pub)
+    monkeypatch.setattr(admin_mod, "repin_numbers_to_published", _repin)
     return calls
 
 
@@ -366,3 +372,34 @@ async def test_a_number_on_the_published_version_is_not_flagged(
     body = (await client.get("/api/admin/voice/live-config",
                              headers=_h("eng_pin2"))).json()
     assert body["drift"] == []
+
+
+async def test_a_failed_repin_does_not_report_a_failed_switch(
+    client, db_session, monkeypatch
+):
+    """The model is changed and published by the time re-pinning runs. Failing the
+    request there would report "nothing happened" about something that did, and
+    invite a retry of a completed change — so it pages instead."""
+    from app.observability import alerts
+    from app.services.retell_admin import RetellError
+
+    await _internal(db_session, clerk_id="sa_vm_stale", role="super_admin")
+    practice, _ = await seed_practice(db_session, name="VMStale",
+                                      clerk_org_id="o_vmstale", clerk_user_id="u_vmstale")
+    await _bind_agent(db_session, practice.id, "agent_vm_stale")
+    _fake_retell(monkeypatch)
+
+    async def _boom(agent_id, **_kw):
+        raise RetellError("Retell 500: boom", status_code=500)
+
+    monkeypatch.setattr(admin_mod, "repin_numbers_to_published", _boom)
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(alerts, "record_alert", lambda k, d="", **_: seen.append((k, d)))
+    monkeypatch.setattr(admin_mod, "record_alert", alerts.record_alert)
+
+    r = await client.put("/api/admin/voice/model", headers=_h("sa_vm_stale"),
+                         json={"model": "claude-4.5-haiku"})
+    assert r.status_code == 200
+    assert r.json()["model"] == "claude-4.5-haiku"
+    assert any(kind == "agent_published_numbers_stale" for kind, _ in seen)

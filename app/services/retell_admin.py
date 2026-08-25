@@ -10,9 +10,13 @@ when Retell adds models; an unknown value 422s before any API call.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 _RETELL_API = "https://api.retellai.com"
 
@@ -133,3 +137,36 @@ async def get_agent_versions(agent_id: str, *, transport=None) -> list[dict]:
 async def publish_agent(agent_id: str, *, transport=None) -> dict:
     return await _request("POST", f"/publish-agent/{agent_id}", {},
                           transport=transport)
+
+
+async def repin_numbers_to_published(agent_id: str, *, transport=None) -> list[str]:
+    """Point every number bound to this agent at the version just published.
+
+    Publishing does not move a number's pin — the number keeps serving whatever
+    version it was bound to. With one number that was a footgun we hit once. With
+    a number per clinic it is worse and quieter: a fix ships, the dashboard shows
+    the new version everywhere, and the clinics that signed up earliest keep
+    hearing the old agent indefinitely. Nobody would think to check.
+
+    Sending inbound_agents WITHOUT a version rebinds to current published.
+    Returns the numbers re-pinned. Per-number failures are collected rather than
+    raised: one unreachable number must not leave the rest stale.
+    """
+    repinned: list[str] = []
+    for number in await list_phone_numbers(transport=transport):
+        if not any(
+            a.get("agent_id") == agent_id
+            for a in (number.get("inbound_agents") or [])
+        ):
+            continue
+        phone = number.get("phone_number")
+        try:
+            await _request(
+                "PATCH", f"/update-phone-number/{phone}",
+                {"inbound_agents": [{"agent_id": agent_id}]},
+                transport=transport,
+            )
+            repinned.append(phone)
+        except RetellError:
+            logger.warning("could not re-pin %s to the published agent", phone)
+    return repinned

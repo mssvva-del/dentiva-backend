@@ -491,8 +491,18 @@ async def accept_baa(
             )
         )
         await db.execute(stmt)
+        # Signing the BAA is what turns a sign-up into a practice we can serve,
+        # so it is also what entitles them to a phone number — the next wizard
+        # step buys one, and a status of 'onboarding' refuses. This used to be an
+        # operator clicking Approve, which meant a clinic finishing setup at 9pm
+        # sat on a dead step until someone noticed. Only ever forward from
+        # 'onboarding': a suspended or cancelled practice re-accepting a new BAA
+        # version must not quietly reactivate itself.
+        if p.status == "onboarding":
+            p.status = "trial"
         await _audit(db, p, user, "baa_accepted",
-                     {"version": BAA_VERSION, "signer": payload.signer_name.strip()})
+                     {"version": BAA_VERSION, "signer": payload.signer_name.strip(),
+                      "status": p.status})
         await db.commit()
         await db.refresh(p)
     return _state(p)
