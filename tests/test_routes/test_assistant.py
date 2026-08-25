@@ -173,3 +173,18 @@ async def test_public_ask_degrades_without_key(client, monkeypatch):
     monkeypatch.setattr(mod, "get_settings", lambda: type("S", (), {"anthropic_api_key": ""})())
     r = await client.post("/api/assistant/public-ask", json={"message": "hi"})
     assert r.status_code == 503
+
+
+def test_knowledge_does_not_deny_bridged_systems():
+    """The assistant told a visitor Eaglesoft "isn't supported" — while our first
+    clinic runs Eaglesoft, reached through NexHealth. On the website that answer
+    is a lost customer and an untrue claim, so the document has to name the
+    bridge rather than list two vendor names and stop."""
+    from app.services.assistant.knowledge import PRODUCT_KB
+
+    kb = PRODUCT_KB.lower()
+    assert "eaglesoft" in kb
+    assert "bridge" in kb
+    # The old wording enumerated the two integrations as if they were the whole
+    # world of dental software.
+    assert "supported: open dental and nexhealth" not in kb

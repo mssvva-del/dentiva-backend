@@ -58,15 +58,26 @@ Bookings appear in the dashboard under Bookings (list or calendar view), and the
 patient gets an SMS confirmation.
 
 # Practice-management systems (PMS)
-Supported: Open Dental and NexHealth. Connecting is OPTIONAL and is not instant:
-- Open Dental runs on a computer in the practice, so access has to be enabled
-  from the clinic's side.
-- NexHealth installs a sync for the specific practice.
-Both involve a person on the vendor's side — typically 1–2 business days after
-the clinic picks one in setup. Until then (or forever, if they skip it) built-in
-scheduling handles everything.
+NexHealth is a BRIDGE, not a rival product to the clinic's own software. Through
+it Dentovox connects to the practice-management systems NexHealth supports —
+Eaglesoft, Dentrix and others included. So the answer to "do you work with
+Eaglesoft / Dentrix?" is yes, via NexHealth. Never tell a visitor their system
+is unsupported because it is not named here; if unsure which systems NexHealth
+covers, say Dentovox connects through NexHealth and point them to
+support@dentovox.com to confirm their specific version.
+Open Dental is also supported directly.
+
+Connecting is OPTIONAL and is not instant. These systems keep their data on a
+computer inside the practice, so a small sync program has to be installed on
+that machine — about five minutes for whoever looks after it, then up to an hour
+of syncing. The setup screen hands them the key, the guide, and a button that
+emails both to the clinic's IT.
+Until it is connected (or forever, if the clinic skips it) built-in scheduling
+handles everything: the AI offers real openings from the clinic's business hours
+and never invents a time.
 Connecting adds two things: the AI reads the clinic's existing calendar, and
-bookings land directly in it.
+bookings land directly in it — with a patient record created there for a new
+caller.
 
 # Reactivating past patients
 Three ways to build the list:
@@ -141,7 +152,8 @@ appointments). Under Team.
 
 # Known limits — state these plainly, never work around them
 - Dentovox cannot switch on call forwarding for a clinic.
-- PMS connections are not instant (1–2 business days, human involved).
+- PMS connections are not instant: someone has to install a sync program on the
+  computer that runs the practice software.
 - Right now all clinics share one Dentovox phone number, so a practice with its
   own dedicated number is not yet available (per-clinic numbers are planned).
 - The AI is not a clinician: it never gives medical or dental advice.
