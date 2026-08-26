@@ -54,10 +54,20 @@ async def test_links_the_unambiguous_case(db_session, monkeypatch):
     assert p.pms_credentials["product_key"] == "PK-123"
 
 
-async def test_two_waiting_clinics_link_nothing(db_session, monkeypatch):
-    """Ambiguity is not a coin flip. Two clinics installing the same day means a
-    human picks — the alternative is one clinic's patients booked into another's
-    schedule."""
+async def test_two_waiting_clinics_are_matched_by_name(db_session, monkeypatch):
+    """This assertion used to run the other way.
+
+    The original rule was "exactly one waiting, exactly one unclaimed" — refuse
+    otherwise. Safe, and useless the moment a group practice rolls out: with a
+    fleet installing over the same fortnight it never fires once.
+
+    Names decide now, and only when unambiguous on both sides. Here two clinics
+    wait, "Bright Smiles" and "Bright Smile Dental"; one location arrives named
+    "Bright Smiles". It belongs to exactly one of them, and the other keeps
+    waiting for its own — which is the answer a human would have given.
+
+    Identical names are still deferred; that case has its own test in
+    tests/test_scale/."""
     await _only_these_practices_have_pms(db_session)
     a = await _waiting(db_session, name="Bright Smiles", org="org_amb1", key="PK-A")
     b = await _waiting(db_session, name="Bright Smile Dental", org="org_amb2", key="PK-B")
@@ -71,10 +81,13 @@ async def test_two_waiting_clinics_link_nothing(db_session, monkeypatch):
     )
     monkeypatch.setattr(maintenance.get_settings(), "nexhealth_api_key", "test-key")
 
-    assert await maintenance.link_synced_locations() == 0
-    for p in (a, b):
-        await db_session.refresh(p)
-        assert "location_id" not in (p.pms_credentials or {})
+    assert await maintenance.link_synced_locations() == 1
+    await db_session.refresh(a)
+    await db_session.refresh(b)
+    assert a.pms_credentials["location_id"] == "801"
+    assert "location_id" not in (b.pms_credentials or {}), (
+        "the clinic whose location has not arrived must keep waiting"
+    )
 
 
 async def test_already_claimed_location_is_never_stolen(

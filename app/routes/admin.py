@@ -63,6 +63,7 @@ from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.observability.alerts import record_alert
+from app.services.bulk_onboarding import MAX_ROWS as BULK_MAX_ROWS
 from app.services.clerk_provisioning import is_placeholder_email
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -310,6 +311,93 @@ async def create_clinic(
             clerk_role="org:admin",
         )
     return row
+
+
+class BulkClinicRow(BaseModel):
+    """One line of a group's own spreadsheet.
+
+    Only two fields are required. Everything else is optional and ABSENT MEANS
+    UNCHANGED — a group re-sending a sheet with just the column they corrected
+    must not have the rest of each clinic wiped by what they left out.
+    """
+
+    # Their id for this location. Required, because it is the only thing that
+    # makes a second import an update rather than a second copy of the estate.
+    external_ref: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=200)
+    timezone: str | None = None
+    address: str | None = None
+    phone_number: str | None = None
+    transfer_phone_number: str | None = None
+    pms_system: str | None = None
+    # Straight into pms_credentials when present — a group that has already run
+    # the installers arrives with these and should not need a second pass.
+    location_id: str | None = None
+    customer_key: str | None = None
+    subdomain: str | None = None
+
+
+class BulkImportRequest(BaseModel):
+    clinics: list[BulkClinicRow] = Field(min_length=1, max_length=BULK_MAX_ROWS)
+
+
+class BulkRowOutcome(BaseModel):
+    index: int
+    external_ref: str
+    outcome: str
+    practice_id: str | None = None
+    reason: str | None = None
+
+
+class BulkImportResponse(BaseModel):
+    created: int
+    updated: int
+    failed: int
+    rows: list[BulkRowOutcome]
+
+
+@router.post("/clinics/bulk", response_model=BulkImportResponse)
+async def bulk_import_clinics(
+    body: BulkImportRequest,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_CLINIC_STATUS)),
+) -> BulkImportResponse:
+    """Stand up a group practice's estate from their own list.
+
+    Returns 200 even when rows fail, and that is deliberate. At two hundred rows
+    a partial failure is the normal outcome — one bad timezone, a duplicate
+    number, Clerk rate-limiting halfway through — and a 4xx would tell the
+    operator "the import failed" about a run that created 180 working clinics.
+    The per-row outcomes are the answer; the status code cannot carry it.
+
+    Deliberately NOT here: buying phone numbers. Two hundred numbers is a real
+    monthly bill and a deliberate act, so it stays its own step.
+    """
+    from app.services.bulk_onboarding import import_practices
+    from app.services.clerk_api import create_organization
+
+    async with _app_db.platform_session_factory() as session:
+        report = await import_practices(
+            session,
+            [row.model_dump() for row in body.clinics],
+            create_organization=create_organization,
+        )
+        # One audit entry for the run, not two hundred: the per-clinic detail is
+        # in the response and in each practice's own row, and a bulk action is
+        # one decision by one operator.
+        await _audit(
+            session, ctx, "admin_bulk_import_clinics",
+            meta={"submitted": len(body.clinics), "created": report.created,
+                  "updated": report.updated, "failed": report.failed},
+        )
+        await session.commit()
+
+    if report.failed:
+        logger.warning("bulk import: %s of %s rows failed",
+                       report.failed, len(body.clinics))
+    return BulkImportResponse(
+        created=report.created, updated=report.updated, failed=report.failed,
+        rows=[BulkRowOutcome(**vars(r)) for r in report.rows],
+    )
 
 
 @router.get("/clinics/{practice_id}", response_model=ClinicDetail)

@@ -13,6 +13,12 @@ class Practice(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "practices"
 
     clerk_org_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    # The GROUP's own id for this location, when a clinic arrived through a bulk
+    # import rather than signing itself up. It is what makes re-sending the
+    # spreadsheet an update instead of a second copy of every practice — with a
+    # second Clerk organisation each, and no way to tell which one the phone
+    # number belongs to. Nullable: self-signup clinics have no such id.
+    external_ref: Mapped[str | None] = mapped_column(Text)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     # Street address (single free-text line). Collected in onboarding step 1;
     # nullable because existing practices predate it and it's not load-bearing.

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
@@ -95,25 +96,24 @@ async def scrub_expired_transcripts(
 
 
 async def link_synced_locations() -> int:
-    """Connect a clinic to its own calendar the moment NexHealth finishes syncing.
+    """Connect clinics to their own calendars as their installers finish.
 
     The clinic's setup screen promises "this page will say connected on its own —
     you do not need to tell us". That was only true if a human was watching the
-    admin panel and pasted the location id in; nobody automated the last inch, so
-    the promise depended on us noticing. This is that inch.
+    admin panel and pasted the location id in.
 
-    A practice is WAITING when it has an installer key (someone ran, or is
-    running, the Synchronizer) and no location id yet. A location is UNCLAIMED
-    when no practice already points at it.
+    A practice is WAITING when it has an installer key and no location id yet. A
+    location is UNCLAIMED when no practice already points at it. Waiting and
+    unclaimed are matched by NAME, and only where that name is unambiguous on
+    BOTH sides — both names are written by the same people, so this is a key
+    rather than a similarity score.
 
-    Links only the unambiguous case: exactly one waiting practice, exactly one
-    unclaimed location. Anything else pages an admin to pick instead of guessing.
-    Guessing here means reading one clinic's calendar aloud to another clinic's
-    patient and writing an appointment into the wrong practice — matching two
-    similar names by string distance is not worth that. Two clinics installing
-    on the same day is normal; it just means a human picks, once.
+    Anything the names cannot settle one-to-one is left for a human and reported
+    once per tick. Guessing here means reading one clinic's calendar aloud to
+    another clinic's patient and writing an appointment into the wrong practice;
+    a near-match is not a smaller version of that mistake.
 
-    Returns the number of practices linked (0 or 1 today, by construction).
+    Returns the number of practices linked.
     """
     from app.adapters.nexhealth.client import NexHealthClient
 
@@ -144,24 +144,80 @@ async def link_synced_locations() -> int:
             # The normal state while the clinic's IT has not run the installer.
             return 0
 
-        if len(waiting) > 1 or len(unclaimed) > 1:
-            record_alert(
-                "pms_autolink_ambiguous",
-                f"waiting={len(waiting)} unclaimed={len(unclaimed)} — link manually",
-            )
-            return 0
+        # ── Matching ────────────────────────────────────────────────────
+        #
+        # The original rule was "exactly one waiting, exactly one unclaimed".
+        # Safe, and useless the moment a group practice rolls out: with a fleet
+        # installing over the same fortnight it never fires once, and every
+        # clinic waits for a human to paste an id.
+        #
+        # So: match on the NAME, and only where the name is unambiguous on BOTH
+        # sides. Both names come from the same people — the group names the
+        # location in NexHealth as they name it to us — so this is a real key,
+        # not a similarity score. Two clinics genuinely called the same thing
+        # (a brand with an office in two towns) match nothing and fall back to a
+        # human, which is the right answer for a case a machine cannot tell
+        # apart from a mix-up.
+        #
+        # Nothing here is fuzzy on purpose. A near-match that links one clinic
+        # to another's calendar is not a smaller version of the same mistake.
+        by_name: dict[str, list] = {}
+        for loc in unclaimed:
+            by_name.setdefault(_norm_name(loc.get("name")), []).append(loc)
+        waiting_by_name: dict[str, list] = {}
+        for p in waiting:
+            waiting_by_name.setdefault(_norm_name(p.name), []).append(p)
 
-        practice, location = waiting[0], unclaimed[0]
-        # Merge: the installer key stays. It is what the clinic reads off its own
-        # screen, and a re-run of the installer needs it after this point too.
-        practice.pms_credentials = {
-            **(practice.pms_credentials or {}),
-            "location_id": str(location["id"]).strip(),
-        }
+        linked: list[str] = []
+        for name, practices in waiting_by_name.items():
+            candidates = by_name.get(name) or []
+            if len(practices) != 1 or len(candidates) != 1 or not name:
+                continue
+            practice = practices[0]
+            # Merge: the installer key stays. It is what the clinic reads off
+            # its own screen, and a re-run of the installer needs it after this.
+            practice.pms_credentials = {
+                **(practice.pms_credentials or {}),
+                "location_id": str(candidates[0]["id"]).strip(),
+            }
+            linked.append(practice.name)
+
+        # Whatever the names could not settle. Reported once per tick with the
+        # counts, because an operator needs to know a queue exists — not to be
+        # paged once per unmatched clinic every hour.
+        unmatched_practices = len(waiting) - len(linked)
+        unmatched_locations = len(unclaimed) - len(linked)
+        if unmatched_practices and unmatched_locations:
+            record_alert(
+                "pms_autolink_needs_a_human",
+                f"waiting={unmatched_practices} unclaimed={unmatched_locations} "
+                "— names did not match one-to-one; link these by hand",
+            )
+
+        if not linked:
+            return 0
         await session.commit()
 
-    logger.info("maintenance: auto-linked practice %s to its PMS location", practice.id)
-    return 1
+    logger.info("maintenance: auto-linked %s practice(s): %s",
+                len(linked), ", ".join(sorted(linked)))
+    return len(linked)
+
+
+def _norm_name(value: str | None) -> str:
+    """A practice name reduced to what two systems can agree on.
+
+    Case, punctuation and the words a group adds in one place and not the other
+    ("LLC", "PC", "Dental"). Deliberately conservative: it removes noise, it
+    never guesses that two different names are the same clinic.
+    """
+    text = _NAME_PUNCT.sub(" ", (value or "").strip().lower())
+    words = [w for w in text.split() if w not in _NAME_NOISE]
+    return " ".join(words)
+
+
+_NAME_PUNCT = re.compile(r"[^a-z0-9 ]+")
+_NAME_NOISE = frozenset({"llc", "pc", "pa", "inc", "the", "dds", "dmd"})
+
 
 
 async def check_billing_catalog() -> int:

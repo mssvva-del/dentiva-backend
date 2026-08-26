@@ -189,14 +189,13 @@ async def test_bulk_onboarding_never_hands_two_clinics_one_number(db_session):
     await db_session.rollback()
 
 
-async def test_the_autolink_states_its_own_limit(db_session, monkeypatch):
-    """Written for one clinic at a time: it links only when exactly one practice
-    is waiting and exactly one location is unclaimed. That is right for safety
-    and useless for a rollout — with a fleet onboarding together it will never
-    fire, and every clinic waits for a human.
+async def test_the_autolink_connects_a_whole_wave(db_session, monkeypatch):
+    """Written for one clinic at a time, it linked only when exactly one practice
+    was waiting and one location was unclaimed — which with a fleet installing
+    over the same fortnight means it never fires once, and every clinic waits
+    for a human to paste an id.
 
-    This test pins the CURRENT behaviour so the limitation is a decision on
-    record rather than a surprise during a 200-clinic install."""
+    Names are the key: both sides are written by the same people."""
     from app.services import maintenance
 
     fleet = await _fleet(db_session, n=3, prefix="auto")
@@ -206,16 +205,53 @@ async def test_the_autolink_states_its_own_limit(db_session, monkeypatch):
 
     class FakeClient:
         async def list_locations(self):
-            return [{"id": f"90{i}", "name": p.name} for i, p in enumerate(fleet)]
+            # Same names, written the way a group writes them in the other system.
+            return [{"id": f"90{i}", "name": f"{p.name}, LLC"}
+                    for i, p in enumerate(fleet)]
 
     monkeypatch.setattr(
         "app.adapters.nexhealth.client.NexHealthClient", lambda *a, **k: FakeClient()
     )
     monkeypatch.setattr(maintenance.get_settings(), "nexhealth_api_key", "test-key")
 
-    linked = await maintenance.link_synced_locations()
-    assert linked == 0, "ambiguity must never be resolved by guessing"
-    for practice in fleet:
+    assert await maintenance.link_synced_locations() == 3
+    for i, practice in enumerate(fleet):
+        await db_session.refresh(practice)
+        assert practice.pms_credentials["location_id"] == f"90{i}"
+        # The installer key survives — the clinic still reads it off its screen.
+        assert practice.pms_credentials["product_key"] == "pk"
+
+
+async def test_two_clinics_with_one_name_are_left_for_a_human(
+    db_session, monkeypatch
+):
+    """A brand with an office in two towns. A machine cannot tell that apart
+    from a mix-up, and linking the wrong one reads a patient somebody else's
+    calendar."""
+    from app.services import maintenance
+
+    twins = []
+    for suffix in ("x", "y"):
+        practice, _ = await seed_practice(
+            db_session, name="Bayview Dental",
+            clerk_org_id=f"org_bay_{suffix}", clerk_user_id=f"u_bay_{suffix}",
+        )
+        practice.pms_credentials = {"bridge": "nexhealth", "product_key": "pk"}
+        twins.append(practice)
+    await db_session.commit()
+
+    class FakeClient:
+        async def list_locations(self):
+            return [{"id": "801", "name": "Bayview Dental"},
+                    {"id": "802", "name": "Bayview Dental"}]
+
+    monkeypatch.setattr(
+        "app.adapters.nexhealth.client.NexHealthClient", lambda *a, **k: FakeClient()
+    )
+    monkeypatch.setattr(maintenance.get_settings(), "nexhealth_api_key", "test-key")
+
+    assert await maintenance.link_synced_locations() == 0
+    for practice in twins:
         await db_session.refresh(practice)
         assert "location_id" not in (practice.pms_credentials or {})
 
