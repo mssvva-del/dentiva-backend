@@ -189,3 +189,80 @@ async def test_detaching_frees_the_row_for_the_right_number(client, db_session):
     )
     assert r.status_code == 200
     assert r.json()["ai_phone_number"] == "+19785550143"
+
+
+async def test_an_operator_can_fill_knowledge_and_hours(client, db_session):
+    """Both lived only behind the clinic's own login. That is right for a
+    practice that signs itself up, and impossible for the two ways we actually
+    onboard: a busy dentist who sends their insurances in a message, and a group
+    whose 200 locations will never each open a wizard."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Fill Co", clerk_org_id="org_fill", clerk_user_id="u_fill"
+    )
+
+    r = await client.put(
+        f"/api/admin/clinics/{practice.id}/profile-fill",
+        headers=_h("sa_num"),
+        json={
+            "knowledge_base": {
+                "providers": [{"name": "Dr. Sergey Zemlyansky", "type": "general"}],
+                "insurances": ["Delta Dental", "MassHealth"],
+                "appointment_types": [{"name": "Cleaning", "minutes": 45,
+                                       "provider_type": "hygienist"}],
+            },
+            "business_hours": {
+                "mon": {"open": "09:00", "close": "18:00"},
+                "tue": {"open": "09:00", "close": "18:00"},
+                "wed": None, "thu": {"open": "09:00", "close": "16:30"},
+                "fri": {"open": "09:00", "close": "16:30"},
+                "sat": None, "sun": None,
+            },
+        },
+    )
+    assert r.status_code == 200
+
+    await db_session.refresh(practice)
+    assert practice.knowledge_base["insurances"] == ["Delta Dental", "MassHealth"]
+    assert practice.knowledge_base["providers"][0]["name"] == "Dr. Sergey Zemlyansky"
+    assert practice.business_hours["thu"] == {"open": "09:00", "close": "16:30"}
+    assert practice.business_hours["wed"] is None
+
+
+async def test_the_operator_path_validates_exactly_like_the_clinics_own(
+    client, db_session
+):
+    """Reusing the clinic-facing schemas is the point: a second, looser validator
+    is how two paths to one column start disagreeing, and the disagreement shows
+    up as an agent saying something the clinic never configured."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Strict Co", clerk_org_id="org_strict", clerk_user_id="u_strict"
+    )
+
+    r = await client.put(
+        f"/api/admin/clinics/{practice.id}/profile-fill",
+        headers=_h("sa_num"),
+        # 25:00 is not a time; the clinic's own endpoint refuses it too.
+        json={"business_hours": {"mon": {"open": "09:00", "close": "25:00"},
+                                 "tue": None, "wed": None, "thu": None,
+                                 "fri": None, "sat": None, "sun": None}},
+    )
+    assert r.status_code in (400, 422)
+    await db_session.refresh(practice)
+    assert practice.business_hours.get("mon") != {"open": "09:00", "close": "25:00"}
+
+
+async def test_filling_nothing_is_refused_rather_than_silently_accepted(
+    client, db_session
+):
+    """An empty PUT that returns 200 reads as "saved" to whoever sent it."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Empty Co", clerk_org_id="org_empty", clerk_user_id="u_empty"
+    )
+    r = await client.put(
+        f"/api/admin/clinics/{practice.id}/profile-fill",
+        headers=_h("sa_num"), json={},
+    )
+    assert r.status_code == 422
