@@ -63,6 +63,8 @@ from app.models.subscription import Subscription
 from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.observability.alerts import record_alert
+from app.schemas.knowledge_base import KnowledgeBase
+from app.schemas.onboarding import DayHours
 from app.services.bulk_onboarding import MAX_ROWS as BULK_MAX_ROWS
 from app.services.clerk_provisioning import is_placeholder_email
 
@@ -743,6 +745,72 @@ async def admin_detach_number(
     # watchdog open an issue about somebody's own correction.
     record_alert("clinic_number_detached", f"practice={practice_id} was={current}")
     return ProvisionNumberResponse(practice_id=str(practice_id), ai_phone_number="")
+
+
+class ClinicProfileFill(BaseModel):
+    """What an operator fills in on a clinic's behalf.
+
+    Both fields reuse the clinic-facing schemas verbatim, so a managed setup
+    cannot store anything the practice could not have stored themselves — a
+    second, looser validator is how two paths to one column start disagreeing.
+    """
+
+    knowledge_base: KnowledgeBase | None = None
+    business_hours: dict[str, DayHours | None] | None = None
+
+
+@router.put("/clinics/{practice_id}/profile-fill", response_model=ClinicDetail)
+async def admin_fill_clinic_profile(
+    practice_id: uuid.UUID,
+    body: ClinicProfileFill,
+    ctx: AdminContext = Depends(require_admin_permission(MANAGE_CLINIC_STATUS)),
+) -> ClinicDetail:
+    """Set a clinic's knowledge base and hours from the operator side.
+
+    Until now both lived ONLY behind the clinic's own login. That is right for a
+    practice that signs itself up, and impossible for the two ways we actually
+    onboard: a busy dentist who sends their insurances and appointment lengths in
+    a message and expects us to handle it, and a group whose two hundred
+    locations will never each open a wizard.
+
+    The alternative in front of us was asking the owner to type it, which is how
+    a launch slips a week over data we were already holding.
+
+    Deliberately narrow — knowledge and hours only. Nothing here touches the
+    phone number, the PMS link, the BAA or billing: those either cost money, move
+    PHI, or are a signature, and none of them is ours to do on somebody's behalf.
+    """
+    async with _app_db.platform_session_factory() as session:
+        practice = (await session.execute(
+            select(Practice).where(Practice.id == practice_id)
+        )).scalar_one_or_none()
+        if practice is None:
+            raise HTTPException(status_code=404, detail="Clinic not found.")
+
+        changed: list[str] = []
+        if body.knowledge_base is not None:
+            # Same full-replace semantics as the clinic's own PUT: omitted
+            # sections are not merged, so what an operator sees is what is
+            # stored. exclude_none keeps the JSON compact.
+            practice.knowledge_base = (
+                body.knowledge_base.model_dump(exclude_none=True) or None
+            )
+            changed.append("knowledge_base")
+        if body.business_hours is not None:
+            practice.business_hours = {
+                day: (None if v is None else {"open": v.open, "close": v.close})
+                for day, v in body.business_hours.items()
+            }
+            changed.append("business_hours")
+        if not changed:
+            raise HTTPException(
+                status_code=422, detail="Nothing to set — send hours, knowledge, or both."
+            )
+
+        await _audit(session, ctx, "admin_fill_clinic_profile",
+                     practice_id=practice_id, meta={"fields": changed})
+        await session.commit()
+    return await clinic_detail(practice_id, ctx)  # type: ignore[arg-type]
 
 
 class PmsCredentials(BaseModel):
