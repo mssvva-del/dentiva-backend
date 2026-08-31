@@ -24,7 +24,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -230,6 +230,20 @@ class ClinicEdit(BaseModel):
     languages_enabled: list[str] | None = None
     agent_name: str | None = None
     agent_greeting: str | None = None
+    # Validated exactly as the clinic's own PATCH validates them — an operator
+    # must not be able to store a mode the practice could not have chosen, or a
+    # ring count no carrier will accept.
+    answer_mode: str | None = None
+    rings_before_ai: int | None = Field(default=None, ge=1, le=10)
+
+    @field_validator("answer_mode")
+    @classmethod
+    def _known_mode(cls, v: str | None) -> str | None:
+        from app.services.call_routing import ANSWER_MODES
+
+        if v is not None and v not in ANSWER_MODES:
+            raise ValueError(f"answer_mode must be one of {ANSWER_MODES}")
+        return v
 
 
 class CreateClinicRequest(BaseModel):
@@ -546,7 +560,11 @@ async def edit_clinic(
             raise HTTPException(status_code=404, detail="Clinic not found.")
         changed: list[str] = []
         for field in ("name", "timezone", "phone_number", "transfer_phone_number",
-                      "business_hours", "languages_enabled"):
+                      "business_hours", "languages_enabled",
+                      # Both are a RECORD of what the clinic asked their carrier
+                      # for, not a control over it: the network forwards a call
+                      # before we see it. They drive the instruction we generate.
+                      "answer_mode", "rings_before_ai"):
             val = getattr(payload, field)
             if val is not None and val != getattr(p, field):
                 setattr(p, field, val)
