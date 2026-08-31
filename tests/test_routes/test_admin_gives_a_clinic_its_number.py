@@ -266,3 +266,56 @@ async def test_filling_nothing_is_refused_rather_than_silently_accepted(
         headers=_h("sa_num"), json={},
     )
     assert r.status_code == 422
+
+
+async def test_an_operator_can_set_when_the_agent_answers(client, db_session):
+    """Both fields were readable everywhere and settable nowhere: the API took
+    them, neither UI offered a control, so the forwarding instruction a clinic
+    reads to their carrier could never be changed after onboarding."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Mode Co", clerk_org_id="org_mode", clerk_user_id="u_mode"
+    )
+
+    r = await client.patch(
+        f"/api/admin/clinics/{practice.id}",
+        headers=_h("sa_num"),
+        json={"answer_mode": "after_hours", "rings_before_ai": 5},
+    )
+    assert r.status_code == 200
+    await db_session.refresh(practice)
+    assert practice.answer_mode == "after_hours"
+    assert practice.rings_before_ai == 5
+
+
+async def test_an_operator_cannot_invent_an_answer_mode(client, db_session):
+    """Same validation as the clinic's own PATCH. A mode nothing understands
+    would produce an instruction nobody can follow, and routing that silently
+    falls back to a default the clinic never chose."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Bad Mode Co", clerk_org_id="org_bmode", clerk_user_id="u_bmode"
+    )
+    before = practice.answer_mode
+
+    r = await client.patch(
+        f"/api/admin/clinics/{practice.id}",
+        headers=_h("sa_num"), json={"answer_mode": "whenever"},
+    )
+    assert r.status_code in (400, 422)
+    await db_session.refresh(practice)
+    assert practice.answer_mode == before
+
+
+async def test_rings_stay_inside_what_a_carrier_will_accept(client, db_session):
+    """Twenty rings is ~two minutes of a patient listening to a phone nobody
+    answers, and most carriers refuse it outright."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Rings Co", clerk_org_id="org_rings", clerk_user_id="u_rings"
+    )
+    r = await client.patch(
+        f"/api/admin/clinics/{practice.id}",
+        headers=_h("sa_num"), json={"rings_before_ai": 20},
+    )
+    assert r.status_code in (400, 422)
