@@ -4,6 +4,8 @@ Note: these tests use the `client` fixture which ensures a fresh DB engine,
 so each test gets a clean connection pool via _prepare_database.
 """
 
+import pytest
+
 from tests.conftest import seed_practice
 
 
@@ -77,3 +79,35 @@ async def test_a_rejected_webhook_is_recorded_not_swallowed(client, monkeypatch)
     # The heartbeat is deliberately non-paging: it fires on every healthy
     # webhook and would otherwise train everyone to ignore the alert list.
     assert "webhook_event_seen" in alert_store.NON_PAGING_KINDS
+
+
+async def test_a_failing_lifecycle_handler_names_itself(client, monkeypatch):
+    """Retell retries a 5xx. If the handler fails the same way five times and
+    says nothing, the call sits frozen at "in progress" and the alert list stays
+    empty — which is exactly what happened for three months.
+
+    The alert carries the exception TYPE and the frame, never the message: a
+    call_ended payload is full of patient data.
+    """
+    from app.webhooks import retell as retell_mod
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        retell_mod, "record_alert", lambda k, d="", **kw: seen.append((k, d))
+    )
+    monkeypatch.setattr(retell_mod, "_verify_signature", lambda *a, **k: True)
+
+    async def boom(_payload):
+        raise ValueError("Jane Doe +16175551234")
+
+    monkeypatch.setattr(retell_mod, "_handle_call_ended", boom)
+
+    with pytest.raises(ValueError):
+        await client.post("/webhooks/retell", json={"event": "call_ended"})
+
+    failures = [d for k, d in seen if k == "webhook_handler_failed"]
+    assert failures, seen
+    assert "exc=ValueError" in failures[0]
+    assert "event=call_ended" in failures[0]
+    # The payload's contents must not travel with the alert.
+    assert "Jane" not in failures[0] and "6175551234" not in failures[0]
