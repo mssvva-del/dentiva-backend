@@ -148,7 +148,11 @@ async def repin_numbers_to_published(agent_id: str, *, transport=None) -> list[s
     the new version everywhere, and the clinics that signed up earliest keep
     hearing the old agent indefinitely. Nobody would think to check.
 
-    Sending inbound_agents WITHOUT a version rebinds to current published.
+    Sending inbound_agents WITHOUT a version clears the pin entirely — verified
+    against the live account: the number afterwards reports no agent_version and
+    serves whatever is currently published. That is stronger than re-pinning to
+    today's version, because the NEXT publish reaches it too, with nobody having
+    to remember this function exists.
     Returns the numbers re-pinned. Per-number failures are collected rather than
     raised: one unreachable number must not leave the rest stale.
     """
