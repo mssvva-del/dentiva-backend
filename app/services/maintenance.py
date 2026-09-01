@@ -240,6 +240,34 @@ async def check_billing_catalog() -> int:
     return len(problems)
 
 
+async def billing_catalog_loop() -> None:
+    """Its own loop, on its own interval.
+
+    This ran on the daily maintenance tick, which made the alert almost useless
+    in practice: it says our prices and Stripe's disagree, somebody corrects the
+    configuration in minutes, and then has no way to confirm the correction for
+    twenty-four hours. An alert nobody can close is one people learn to ignore.
+
+    Eight Stripe reads an hour is nothing, and the failure it catches — a clinic
+    billed a price we do not sell — is expensive and silent.
+    """
+    interval = get_settings().billing_catalog_interval_seconds
+    logger.info("billing catalog loop started (every %ss)", interval)
+    while True:
+        try:
+            async with advisory_tick_lock("billing_catalog") as leader:
+                if leader:
+                    problems = await check_billing_catalog()
+                    if problems:
+                        logger.warning("billing catalog: %s problem(s)", problems)
+        except asyncio.CancelledError:
+            logger.info("billing catalog loop cancelled — stopping")
+            raise
+        except Exception:  # noqa: BLE001 — never let the loop die on a transient error
+            logger.exception("billing catalog check failed; will retry next tick")
+        await asyncio.sleep(interval)
+
+
 async def maintenance_loop() -> None:
     """Run maintenance forever on a fixed interval."""
     interval = get_settings().maintenance_interval_seconds
@@ -256,7 +284,6 @@ async def maintenance_loop() -> None:
                     if scrubbed:
                         logger.info("maintenance: scrubbed PHI on %s expired calls", scrubbed)
                     await link_synced_locations()
-                    await check_billing_catalog()
         except asyncio.CancelledError:
             logger.info("maintenance loop cancelled — stopping")
             raise
