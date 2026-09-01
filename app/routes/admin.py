@@ -199,7 +199,14 @@ class ClinicDetail(BaseModel):
     onboarding_step: int = 0
     created_at: datetime | None = None
     owner_email: str | None = None
-    # Knowledge-base coverage (counts only — no PHI): shows how "trained" the agent is.
+    # The knowledge base itself, not just its counts.
+    #
+    # It carries no PHI — providers are staff, insurances are plan names,
+    # policies are house rules. Withholding it meant an operator could see THAT
+    # a clinic had three insurances and never which three, so correcting one
+    # meant asking the clinic to read their own settings aloud.
+    knowledge_base: dict | None = None
+    # Coverage counts, kept for the list view and the readiness card.
     kb_providers: int = 0
     kb_insurances: int = 0
     kb_has_policies: bool = False
@@ -618,6 +625,7 @@ async def clinic_detail(
         kb_has_emergency=bool(kb.get("emergency")),
         pms_bridge=bridge,
         pms_credentials_own=_practice_credentials(p) is not None,
+        knowledge_base=kb or None,
         readiness=_readiness(p, kb=kb, has_baa=has_baa, pms_bridge=bridge),
     )
 
