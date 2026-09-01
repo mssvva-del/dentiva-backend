@@ -59,6 +59,12 @@ NON_PAGING_KINDS = frozenset({
     # event, so "the vendor stopped sending call_ended" and "we started
     # rejecting it" stop looking identical from the outside.
     "webhook_event_seen",
+    # Also not a failure: the client filled in a subdomain the credentials did
+    # not carry, and worked. It is recorded so the value can be written into
+    # those credentials and stop costing a request — but it fires on every
+    # healthy client, and an alert that fires on correct behaviour is how a team
+    # learns to scroll past the list.
+    "pms_subdomain_resolved",
 })
 
 
