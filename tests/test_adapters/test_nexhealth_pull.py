@@ -200,3 +200,71 @@ async def test_401_triggers_token_refresh():
     recs = await _client(handler).pull_reactivation_records()
     assert len(recs) == 1
     assert state["auth_calls"] == 2  # re-authenticated after the 401
+
+
+async def test_find_slots_fills_in_the_providers_when_the_caller_names_none():
+    """pids[] is REQUIRED by NexHealth, and we were not sending it.
+
+    Every availability question during a live call went out without it, came
+    back 400, and the caller silently fell back to our own calendar. A clinic
+    whose PMS was connected and healthy was still offered times from our book,
+    and no booking ever reached its real calendar — pms_external_id was NULL on
+    every appointment the product has ever taken.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        seen.append(request.url.path)
+        if request.url.path == "/providers":
+            return httpx.Response(200, json={"data": [
+                {"id": 11}, {"id": 12, "inactive": True}, {"id": 13},
+            ]})
+        assert request.url.params.get_list("pids[]") == ["11", "13"], (
+            "the slot query went out without providers"
+        )
+        return httpx.Response(200, json={"data": [
+            {"lid": 42, "pid": 11, "slots": [{"time": "2026-07-06T13:00:00-05:00",
+                                              "end_time": "x", "operatory_id": 3}]},
+        ]})
+
+    client = _client(handler)
+    slots = await client.find_appointment_slots(start_date="2026-07-06", days=5)
+    assert slots and slots[0].provider_id == "11"
+    assert "/providers" in seen
+
+    # The roster is asked for once, not on every question in a call.
+    await client.find_appointment_slots(start_date="2026-07-07", days=5)
+    assert seen.count("/providers") == 1
+
+
+async def test_no_providers_means_no_slot_query_at_all():
+    """Nobody bookable is an answer, not a 400. Asking anyway wastes a request
+    mid-call and returns an error the caller would read as a PMS outage."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        if request.url.path == "/providers":
+            return httpx.Response(200, json={"data": []})
+        raise AssertionError("asked for slots with no providers")
+
+    assert await _client(handler).find_appointment_slots(
+        start_date="2026-07-06", days=5) == []
+
+
+async def test_first_provider_id_shares_the_same_roster():
+    """It used to make its own /providers request with a different page size.
+    Two lookups of one fact drift; this one is used to attach a new patient."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"data": [{"id": 99}]})
+
+    client = _client(handler)
+    assert await client.first_provider_id() == "99"
+    assert await client.first_provider_id() == "99"
+    assert calls.count("/providers") == 1
