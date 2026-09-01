@@ -68,6 +68,24 @@ def _balance_to_cents(balance: object) -> int:
     return _money_to_cents(balance)
 
 
+# Paths whose request carries no patient data, so a 4xx body can be quoted back
+# into an alert. Everything else stays status-and-path only.
+_BODY_SAFE_PATHS = frozenset({"/providers", "/locations", "/appointment_slots"})
+
+
+def _why(resp: httpx.Response) -> str:
+    """NexHealth's own explanation of a 4xx, trimmed. Never raises."""
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 — a non-JSON error page is not a crash
+        return resp.text[:120]
+    for key in ("description", "error", "message"):
+        val = payload.get(key) if isinstance(payload, dict) else None
+        if val:
+            return str(val)[:200]
+    return str(payload)[:200]
+
+
 class NexHealthError(Exception):
     """Non-recoverable NexHealth error (4xx) — caller decides fallback."""
 
@@ -180,8 +198,19 @@ class NexHealthClient(ReactivationSource):
             if resp.status_code >= 500:
                 raise NexHealthUnavailable(f"NexHealth {resp.status_code}")
             if resp.status_code >= 400:
-                # PHI-safe: status + path only, never the body.
-                raise NexHealthError(f"NexHealth {resp.status_code} on GET {path}")
+                # Status + path is enough to know something is wrong and not
+                # enough to fix it: two different 400s on /providers and
+                # /appointment_slots cost a deploy cycle each to tell apart.
+                #
+                # NexHealth answers a 4xx with {"description": "..."} naming the
+                # parameter it objected to. That is safe to keep ONLY where the
+                # request carried no patient data — a 400 from /patients could
+                # echo the phone number we searched on. Hence the allow-list:
+                # these three are asked with a subdomain, a location and dates.
+                raise NexHealthError(
+                    f"NexHealth {resp.status_code} on GET {path}"
+                    + (f" — {_why(resp)}" if path in _BODY_SAFE_PATHS else "")
+                )
             return resp
 
         if self._retry_attempts > 1:
