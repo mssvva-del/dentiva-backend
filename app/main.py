@@ -88,6 +88,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     if settings.maintenance_enabled:
         tasks.append(asyncio.create_task(maintenance_loop()))
+        # Separate loop: the catalog check is about being able to CLOSE an alert,
+        # which a daily cadence makes impossible.
+        from app.services.maintenance import billing_catalog_loop
+
+        tasks.append(asyncio.create_task(billing_catalog_loop()))
         logger.info("Maintenance background task started")
 
     if settings.reactivation_enabled:

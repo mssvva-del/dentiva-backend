@@ -362,6 +362,13 @@ class Settings(BaseSettings):
     # very safe TTL that keeps the table small. Runs daily; on by default (cheap).
     maintenance_enabled: bool = True
     maintenance_interval_seconds: int = 86_400  # once a day
+
+    # The billing catalog check runs on its OWN cadence, not the daily
+    # maintenance tick it started on. Its whole value is immediacy: it fires when
+    # our prices and Stripe's disagree, and the first thing anyone does is fix
+    # the mismatch — then waits a day to learn whether the fix worked. Hourly
+    # costs eight Stripe GETs and makes the alert a signal you can act on.
+    billing_catalog_interval_seconds: int = 3_600
     processed_event_ttl_days: int = 90
     # PHI data-minimization: after this many days, scrub call transcripts +
     # recording paths (keep the call row's metadata for analytics/billing). 0 = off.
