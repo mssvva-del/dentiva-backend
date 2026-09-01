@@ -130,6 +130,8 @@ class NexHealthClient(ReactivationSource):
         self._retry_attempts = s.http_retry_attempts
         self._retry_base_delay = s.http_retry_base_delay
         self._token: str | None = None  # cached bearer token (fetched lazily)
+        # Provider roster for this location, resolved once per client.
+        self._provider_ids: list[str] | None = None
 
     # ── auth ──────────────────────────────────────────────────────────────────
     async def _client(self) -> httpx.AsyncClient:
@@ -275,18 +277,29 @@ class NexHealthClient(ReactivationSource):
         """Open slots from start_date over N days (used for the anti-double-book
         re-check before writing an appointment back).
 
-        CONFIRMED against sandbox 2026-06-26: requires ``lids[]`` (location) +
+        ``pids[]`` is REQUIRED, not optional. Without it NexHealth answers 400
+        and every caller fell back to our own calendar — so a clinic whose PMS
+        was connected and healthy was still offered times from our book, and no
+        booking ever reached its real calendar. It is filled in from the
+        location's own providers when the caller does not name one.
+
+        Requires ``lids[]`` (location), ``pids[]`` (providers) and
         ``slot_length`` in addition to ``start_date``/``days``; returns
         ``data: [{lid, pid, slots: [{time, end_time, operatory_id}]}]`` — exactly
         what _slots_from parses."""
+        pids = provider_ids or await self.provider_ids()
+        if not pids:
+            # No provider, no question worth asking. Returning [] rather than
+            # raising keeps this "the clinic has nobody bookable", which the
+            # caller handles by falling back to our own book.
+            return []
         params: dict = {
             "start_date": start_date,
             "days": days,
             "lids[]": self._location_id,
+            "pids[]": pids,
             "slot_length": slot_length,
         }
-        if provider_ids:
-            params["pids[]"] = provider_ids
         return self._slots_from((await self._get("/appointment_slots", params)).json())
 
     async def create_appointment(
@@ -399,6 +412,33 @@ class NexHealthClient(ReactivationSource):
                 })
         return out
 
+    async def provider_ids(self) -> list[str]:
+        """Every bookable provider at this location.
+
+        Cached for the life of the client: one phone call asks for availability
+        several times as the caller changes their mind, and the roster does not
+        change between those questions.
+        """
+        if self._provider_ids is not None:
+            return self._provider_ids
+        try:
+            payload = (await self._get("/providers", {"per_page": 100})).json()
+        except (NexHealthError, NexHealthUnavailable) as exc:
+            record_alert("pms_providers_error", f"{type(exc).__name__}: {str(exc)[:120]}")
+            return []
+        rows = payload.get("data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("providers") or []
+        ids = [
+            str(row["id"])
+            for row in rows
+            if isinstance(row, dict) and row.get("id") is not None and not row.get("inactive")
+        ]
+        if not ids:
+            record_alert("pms_providers_empty", f"rows={len(rows)}")
+        self._provider_ids = ids
+        return ids
+
     async def first_provider_id(self) -> str | None:
         """Any provider at this location — a patient cannot be created without one.
 
@@ -407,25 +447,8 @@ class NexHealthClient(ReactivationSource):
         caller was actually offered. Taking the first keeps a phone call from
         having to ask "and which dentist would you like on your file?".
         """
-        try:
-            payload = (await self._get("/providers", {"per_page": 5})).json()
-        except (NexHealthError, NexHealthUnavailable) as exc:
-            # Returning None here reads downstream as "this clinic has no
-            # providers", which is a very different thing from "we could not
-            # ask". The caller then alerts pms_no_provider and a booking never
-            # reaches the practice's own calendar. Names of clinicians are not
-            # PHI, but nothing from the body travels here anyway — only the
-            # status code and path in NexHealth's own message.
-            record_alert("pms_providers_error", f"{type(exc).__name__}: {str(exc)[:120]}")
-            return None
-        rows = payload.get("data") or []
-        if isinstance(rows, dict):
-            rows = rows.get("providers") or []
-        for row in rows:
-            if isinstance(row, dict) and row.get("id") is not None and not row.get("inactive"):
-                return str(row["id"])
-        record_alert("pms_providers_empty", f"rows={len(rows)}")
-        return None
+        ids = await self.provider_ids()
+        return ids[0] if ids else None
 
     async def create_patient(
         self,
