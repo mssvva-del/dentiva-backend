@@ -2741,14 +2741,34 @@ async def retell_webhook(request: Request, response: Response) -> dict:
             payload["name"], retell_call_id, payload.get("args", {}) or {}, agent_id
         )
 
-    if event == "call_started":
-        return await _handle_call_started(payload)
-
-    if event == "call_ended":
-        return await _handle_call_ended(payload)
-
-    if event == "call_analyzed":
-        return await _handle_call_analyzed(payload)
+    if event in ("call_started", "call_ended", "call_analyzed"):
+        handler = {
+            "call_started": _handle_call_started,
+            "call_ended": _handle_call_ended,
+            "call_analyzed": _handle_call_analyzed,
+        }[event]
+        try:
+            return await handler(payload)
+        except Exception as exc:  # noqa: BLE001 — re-raised below, see comment
+            # A lifecycle handler that raises returns 500, Retell retries, and
+            # the retries fail the same way — five deliveries, no row updated,
+            # and nothing anywhere naming the reason. That is how every call
+            # since 1 June ended up frozen at "in progress" with no transcript
+            # and no metered minutes while /health reported ok.
+            #
+            # Exception TYPE and the frame it came from only. The message can
+            # carry a patient's name or number and must not reach an alert.
+            tb = exc.__traceback__
+            while tb is not None and tb.tb_next is not None:
+                tb = tb.tb_next
+            where = (
+                f"{tb.tb_frame.f_code.co_name}:{tb.tb_lineno}" if tb else "unknown"
+            )
+            record_alert(
+                "webhook_handler_failed",
+                f"event={event} exc={type(exc).__name__} at={where}",
+            )
+            raise
 
     if event == "function_call":
         call_obj = payload.get("call", {}) or {}
