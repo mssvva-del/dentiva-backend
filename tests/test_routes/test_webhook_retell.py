@@ -52,3 +52,28 @@ def test_spoken_slot_names_the_weekday():
     assert _spoken_slot("2026-09-03", "12:00") == "Thursday, September 3 at 12:00 PM"
     # Junk degrades to the raw values instead of raising mid-call.
     assert _spoken_slot("not-a-date", "10:00") == "not-a-date 10:00"
+
+
+async def test_a_rejected_webhook_is_recorded_not_swallowed(client, monkeypatch):
+    """A webhook we refuse must leave a trace.
+
+    Every call since 1 June sat at status "in_progress" — no duration, no
+    transcript, no metered minutes — because the call lifecycle events stopped
+    landing. From the outside "the vendor went quiet" and "we started rejecting
+    a valid signature" looked exactly the same, and that ambiguity cost hours.
+    """
+    from app.observability import alerts as alert_store
+    from app.webhooks import retell as retell_mod
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        retell_mod, "record_alert", lambda k, d="", **kw: seen.append((k, d))
+    )
+    monkeypatch.setattr(retell_mod, "_verify_signature", lambda *a, **k: False)
+
+    r = await client.post("/webhooks/retell", json={"event": "call_ended"})
+    assert r.status_code == 401
+    assert any(k == "webhook_signature_rejected" for k, _ in seen), seen
+    # The heartbeat is deliberately non-paging: it fires on every healthy
+    # webhook and would otherwise train everyone to ignore the alert list.
+    assert "webhook_event_seen" in alert_store.NON_PAGING_KINDS

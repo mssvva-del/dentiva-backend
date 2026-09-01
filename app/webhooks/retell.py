@@ -2710,12 +2710,21 @@ async def retell_webhook(request: Request, response: Response) -> dict:
     raw_body = await request.body()
     signature = request.headers.get("x-retell-signature")
     if not _verify_signature(raw_body, signature):
+        # Silent before this: a rejected webhook looked identical to one that was
+        # never sent, and the difference is the whole diagnosis. Every call since
+        # 1 June has been stuck "in progress" — no duration, no transcript, no
+        # metered minutes — because call_started/call_ended stopped landing, and
+        # there was no way to tell a wrong secret from a vendor that had gone
+        # quiet. It is also the signal a forged webhook would raise.
+        record_alert("webhook_signature_rejected",
+                     f"present={bool(signature)} bytes={len(raw_body)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Bad webhook signature."
         )
 
     payload = await request.json()
     event = payload.get("event")
+    record_alert("webhook_event_seen", f"event={event or payload.get('name') or 'tool'}")
 
     # Retell custom function tools (general_tools type=custom) POST a DIFFERENT
     # shape than lifecycle webhooks: {"call": {...}, "name": "...", "args": {...}}

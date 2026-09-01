@@ -55,6 +55,10 @@ _WINDOW_S = 3600
 NON_PAGING_KINDS = frozenset({
     "clinic_reported_problem",
     "clinic_number_detached",
+    # Not a failure — a heartbeat. Records that Retell reached us and with which
+    # event, so "the vendor stopped sending call_ended" and "we started
+    # rejecting it" stop looking identical from the outside.
+    "webhook_event_seen",
 })
 
 
