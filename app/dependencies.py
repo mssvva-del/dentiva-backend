@@ -6,11 +6,12 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.impersonation import impersonated_practice_id
 from app.config import get_settings
 from app.db import async_session_factory, set_tenant
 from app.middleware.auth import AuthClaims, authenticate
@@ -197,16 +198,32 @@ async def get_current_user(
 
 
 async def get_current_practice(
+    request: Request,
     user: User = Depends(get_current_user),
 ) -> Practice:
+    """The clinic this request acts on.
+
+    Normally the caller's own practice. Dentovox staff holding
+    ``impersonate_clinic`` may point a GET at another clinic with the
+    ``X-Dentovox-View-As`` header — that is how an operator opens the clinic's
+    own screens during a support call. The header is refused on writes and for
+    everyone else; see app/auth/impersonation.py.
+    """
+    viewing_as = await impersonated_practice_id(request, user)
+    target_id = viewing_as or user.practice_id
     async with async_session_factory() as session:
         result = await session.execute(
-            select(Practice).where(Practice.id == user.practice_id)
+            select(Practice).where(Practice.id == target_id)
         )
         practice = result.scalar_one_or_none()
     if practice is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Practice not found."
+        )
+    if viewing_as is not None:
+        logger.info(
+            "view-as: staff user=%s viewing practice=%s path=%s",
+            user.id, practice.id, request.url.path,
         )
     return practice
 
