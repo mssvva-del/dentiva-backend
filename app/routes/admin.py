@@ -210,6 +210,101 @@ class ClinicDetail(BaseModel):
     # this screen. None here means every call falls back to our own book.
     pms_bridge: str | None = None
     pms_credentials_own: bool = False
+    # Can this clinic take a real patient call, and if not, what is missing.
+    #
+    # Every fact below is already on this model, spread across three cards and
+    # six fields. Assembling it here is not a convenience: onboarding a clinic
+    # means reading a screen and deciding, and a person doing that on a call
+    # with the dentist gets it wrong. At a group's scale nobody does it at all.
+    readiness: list[ReadinessItem] = []
+
+
+class ReadinessItem(BaseModel):
+    """One thing that must be true before a clinic answers a live patient."""
+
+    key: str
+    label: str
+    done: bool
+    # Empty when done. Otherwise the sentence an operator reads out to the
+    # clinic — phrased as the action, not the deficiency.
+    todo: str = ""
+    # Blocking items stop live calls. The rest degrade the agent without
+    # stopping it, and saying so is the difference between "we cannot launch"
+    # and "the agent will not name your hygienist yet".
+    blocking: bool = True
+
+
+def _readiness(practice: Practice, *, kb: dict, has_baa: bool,
+               pms_bridge: str | None) -> list[ReadinessItem]:
+    """What still has to be true. Order is the order to do them in."""
+    hours = practice.business_hours or {}
+    hours_set = any(v for v in hours.values())
+    providers = len(kb.get("providers") or [])
+    insurances = len(kb.get("insurances") or [])
+    appt_types = len(kb.get("appointment_types") or [])
+    emergency = (kb.get("emergency") or {})
+
+    return [
+        ReadinessItem(
+            key="baa", label="Terms & BAA signed", done=has_baa,
+            todo="The clinic signs it in their own setup — we cannot do it for "
+                 "them, and no live call is allowed until they have.",
+        ),
+        ReadinessItem(
+            key="number", label="Dentovox number", done=bool(practice.ai_phone_number),
+            todo="Buy one on this page. Without it nothing can ring.",
+        ),
+        ReadinessItem(
+            key="hours", label="Business hours", done=hours_set,
+            todo="Set the opening hours — the agent offers slots from them and "
+                 "will offer nothing without them.",
+        ),
+        ReadinessItem(
+            key="practice_phone", label="Practice phone on file",
+            done=bool(practice.phone_number), blocking=False,
+            todo="Their own line. Only used to buy a number in their area code "
+                 "and to show on this screen.",
+        ),
+        ReadinessItem(
+            key="emergency", label="Emergency transfer number",
+            done=bool(practice.transfer_phone_number
+                      or emergency.get("on_call_number")),
+            blocking=False,
+            todo="Where a 9pm call about facial swelling should go. Until it is "
+                 "set the agent says \"go to the ER\" — safe, and a patient the "
+                 "practice loses.",
+        ),
+        ReadinessItem(
+            key="providers", label="Providers named", done=providers > 0,
+            blocking=False,
+            todo="The agent cannot say who the patient will see.",
+        ),
+        ReadinessItem(
+            key="insurances", label="Insurances listed", done=insurances > 0,
+            blocking=False,
+            todo="\"Do you take Delta Dental?\" is the most common question on a "
+                 "dental front desk. Unanswerable without this.",
+        ),
+        ReadinessItem(
+            key="appointment_types", label="Appointment lengths", done=appt_types > 0,
+            blocking=False,
+            todo="Without these the agent books generic slots and the schedule "
+                 "drifts from reality.",
+        ),
+        ReadinessItem(
+            key="pms", label="Calendar connected", done=bool(pms_bridge),
+            blocking=False,
+            todo="Bookings land in our own book until the practice software is "
+                 "linked. Calls still work.",
+        ),
+        ReadinessItem(
+            key="forwarding", label="Forwarding live at the carrier", done=False,
+            blocking=False,
+            todo="Only the clinic's phone provider can switch this on, so we "
+                 "cannot see it from here — confirm by calling their line and "
+                 "letting it ring.",
+        ),
+    ]
 
 
 class BaaHistoryRow(BaseModel):
@@ -487,6 +582,11 @@ async def clinic_detail(
     _s = _gs()
     agent = p.agent_settings or {}
     kb = p.knowledge_base or {}
+    # onboarding_step 0 is only reachable through the go-live endpoint, which
+    # hard-gates on a signed current-version BAA — so it is the cheapest honest
+    # proxy for "they signed", without a second query on every card open.
+    has_baa = p.onboarding_step == 0
+    bridge = _bridge_name(p)
     return ClinicDetail(
         id=str(p.id), name=p.name, status=p.status, timezone=p.timezone,
         pms_system=p.pms_system, languages_enabled=list(p.languages_enabled),
@@ -516,8 +616,9 @@ async def clinic_detail(
         kb_insurances=len(kb.get("insurances") or []),
         kb_has_policies=bool(any((kb.get("policies") or {}).values())),
         kb_has_emergency=bool(kb.get("emergency")),
-        pms_bridge=_bridge_name(p),
+        pms_bridge=bridge,
         pms_credentials_own=_practice_credentials(p) is not None,
+        readiness=_readiness(p, kb=kb, has_baa=has_baa, pms_bridge=bridge),
     )
 
 
