@@ -319,3 +319,69 @@ async def test_rings_stay_inside_what_a_carrier_will_accept(client, db_session):
         headers=_h("sa_num"), json={"rings_before_ai": 20},
     )
     assert r.status_code in (400, 422)
+
+
+async def test_readiness_names_what_is_missing(client, db_session):
+    """Onboarding a clinic means reading a screen and deciding whether it can
+    take a real patient call. Every fact needed for that was already on this
+    card — spread across three sections and six fields — and a person doing it
+    live on a call with the dentist gets it wrong. At a group's scale nobody
+    does it at all."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Ready Co", clerk_org_id="org_rdy", clerk_user_id="u_rdy"
+    )
+    practice.ai_phone_number = None
+    practice.transfer_phone_number = None
+    practice.knowledge_base = None
+    practice.onboarding_step = 3
+    await db_session.commit()
+
+    r = await client.get(f"/api/admin/clinics/{practice.id}", headers=_h("sa_num"))
+    assert r.status_code == 200
+    items = {i["key"]: i for i in r.json()["readiness"]}
+
+    # The two that stop a live call outright.
+    assert items["baa"]["done"] is False and items["baa"]["blocking"] is True
+    assert items["number"]["done"] is False and items["number"]["blocking"] is True
+    # The ones that degrade the agent without stopping it. Saying which is which
+    # is the difference between "we cannot launch" and "it will not name your
+    # hygienist yet".
+    assert items["insurances"]["blocking"] is False
+    assert items["emergency"]["blocking"] is False
+    # Every unfinished item carries the sentence to read to the clinic.
+    for item in items.values():
+        if not item["done"]:
+            assert item["todo"], f"{item['key']} says what is missing but not what to do"
+
+
+async def test_a_finished_clinic_shows_what_only_the_carrier_knows(client, db_session):
+    """Forwarding is switched on inside the clinic's phone provider. We cannot
+    see it and must not imply we can — it stays listed, permanently unticked,
+    with the way to check it by hand."""
+    await _staff(db_session)
+    practice, _ = await seed_practice(
+        db_session, name="Done Co", clerk_org_id="org_done", clerk_user_id="u_done"
+    )
+    practice.ai_phone_number = "+16175550123"
+    practice.phone_number = "+19782837200"
+    practice.transfer_phone_number = "+19785551111"
+    practice.onboarding_step = 0
+    practice.business_hours = {"mon": {"open": "09:00", "close": "17:00"},
+                               "tue": None, "wed": None, "thu": None,
+                               "fri": None, "sat": None, "sun": None}
+    practice.knowledge_base = {
+        "providers": [{"name": "Dr. A"}], "insurances": ["Delta Dental"],
+        "appointment_types": [{"name": "Cleaning", "minutes": 45}],
+    }
+    await db_session.commit()
+
+    r = await client.get(f"/api/admin/clinics/{practice.id}", headers=_h("sa_num"))
+    items = {i["key"]: i for i in r.json()["readiness"]}
+
+    assert items["baa"]["done"] and items["number"]["done"] and items["hours"]["done"]
+    assert items["providers"]["done"] and items["insurances"]["done"]
+    assert items["emergency"]["done"]
+    # The one thing that is never green from here.
+    assert items["forwarding"]["done"] is False
+    assert "phone provider" in items["forwarding"]["todo"].lower()

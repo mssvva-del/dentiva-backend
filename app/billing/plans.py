@@ -81,10 +81,24 @@ ESTIMATED_COST_CENTS_PER_MIN = 15
 # allowances later. If it is too low and we priced on 15¢, every busy clinic
 # loses us money and we find out from a quarter's accounts.
 #
-# It comes down two ways, both being worked: a per-location NexHealth deal
-# (~$75/location discussed, unsigned), and direct Open Dental at a published
-# $15/$30/$35 per location per month — flat, so it dilutes toward zero per
-# minute as a clinic talks more, the exact opposite of per-request billing.
+# It comes down two ways. One is a per-location NexHealth deal (~$75/location
+# discussed, unsigned). The other is now CONFIRMED IN WRITING by Open Dental's
+# VP of Development, 2026-08-07:
+#
+#   * read-only GET access: free
+#   * $30 per location per month for our exact use — creating and updating
+#     patients and appointments, excluding payments
+#   * no flat fees, no monthly minimums, volume discounts available
+#
+# Flat is the word that matters. NexHealth charges per REQUEST, so its cost
+# climbs with every call; $30 a month dilutes toward zero per minute as a clinic
+# talks more. On this grid an Open Dental clinic runs 4-9 points better gross
+# margin than a NexHealth one, and the gap widens with usage rather than
+# narrowing — the opposite of the shape we have today.
+#
+# 25c is kept as the pricing basis because it is the PESSIMISTIC case, and the
+# first clinic is on NexHealth. Open Dental practices simply come in above
+# target, which is the right direction for an estimate to be wrong in.
 PRICING_COST_CENTS_PER_MIN = 25
 
 # Gross margin the grid must hold at FULL utilisation — the worst case, where a
