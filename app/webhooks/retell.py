@@ -1190,6 +1190,24 @@ async def _open_slots(session, practice, *, procedure, preferred_date, preferred
     )
 
 
+def _spoken_slot(date_iso: str, time_hhmm: str) -> str:
+    """'2026-09-03', '10:00' → 'Thursday, September 3 at 10:00 AM'.
+
+    Falls back to the raw values rather than raising: a slot the agent can read
+    imperfectly still beats a tool call that 500s mid-conversation.
+    """
+    try:
+        d = datetime.strptime(date_iso, "%Y-%m-%d").date()
+        h, m = (int(x) for x in str(time_hhmm).split(":")[:2])
+        suffix = "AM" if h < 12 else "PM"
+        return (
+            f"{d.strftime('%A')}, {d.strftime('%B')} {d.day} "
+            f"at {h % 12 or 12}:{m:02d} {suffix}"
+        )
+    except (TypeError, ValueError):
+        return f"{date_iso} {time_hhmm}".strip()
+
+
 async def _handle_check_availability(retell_call_id: str, args: dict) -> dict:
     """Offer REAL openings from the clinic's own hours minus its booked slots.
 
@@ -1214,7 +1232,20 @@ async def _handle_check_availability(retell_call_id: str, args: dict) -> dict:
         )
     return {
         "available_slots": [
-            {"date": s.date, "time": s.time, "provider": s.provider} for s in slots
+            {
+                "date": s.date,
+                "time": s.time,
+                "provider": s.provider,
+                # Say this, don't compute it. Given "2026-09-03" / "10:00" the
+                # agent has to work out the weekday itself, and it gets it wrong:
+                # in a scripted replay it offered a Thursday slot as "Wednesday
+                # the third", and told a caller asking for Thursday at ten that
+                # Thursday at ten was unavailable — while holding exactly that
+                # slot. A caller cannot catch that error; they hear a confident
+                # wrong day and arrive on it.
+                "spoken": _spoken_slot(s.date, s.time),
+            }
+            for s in slots
         ]
     }
 

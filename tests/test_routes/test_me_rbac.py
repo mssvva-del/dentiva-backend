@@ -5,6 +5,7 @@ and require_permission / require_admin_permission enforce the boundary.
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -80,9 +81,12 @@ async def test_require_permission_allows_and_denies():
     dep = require_permission(perms.MANAGE_BILLING)
     owner = User(clerk_user_id="x", email="o@x", role="owner")
     staff = User(clerk_user_id="y", email="s@x", role="staff")
-    assert await dep(user=owner) is owner          # owner has MANAGE_BILLING
+    # An ordinary request: no "view as clinic" header, so the caller is judged
+    # by their own clinic role. The impersonation path has its own tests.
+    req = SimpleNamespace(method="GET", headers={})
+    assert await dep(req, user=owner) is owner      # owner has MANAGE_BILLING
     with pytest.raises(HTTPException) as ei:
-        await dep(user=staff)                       # staff does not
+        await dep(req, user=staff)                  # staff does not
     assert ei.value.status_code == 403
 
 

@@ -38,3 +38,17 @@ async def test_call_started_ack(client, db_session):
     )
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+def test_spoken_slot_names_the_weekday():
+    # The agent must not derive the weekday from an ISO date itself — in a
+    # scripted replay it offered a Thursday slot as "Wednesday the third" and
+    # then told the caller Thursday at ten was unavailable while holding it.
+    from app.webhooks.retell import _spoken_slot
+
+    assert _spoken_slot("2026-09-03", "10:00") == "Thursday, September 3 at 10:00 AM"
+    assert _spoken_slot("2026-09-03", "14:00") == "Thursday, September 3 at 2:00 PM"
+    assert _spoken_slot("2026-09-03", "00:30") == "Thursday, September 3 at 12:30 AM"
+    assert _spoken_slot("2026-09-03", "12:00") == "Thursday, September 3 at 12:00 PM"
+    # Junk degrades to the raw values instead of raising mid-call.
+    assert _spoken_slot("not-a-date", "10:00") == "not-a-date 10:00"

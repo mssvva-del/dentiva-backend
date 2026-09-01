@@ -21,7 +21,7 @@ Design rules:
 
 from __future__ import annotations
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 
 from app.models.user import User
 
@@ -168,11 +168,30 @@ def require_permission(permission: str):
     # it can depend on get_current_user (which validates the Clerk JWT) and so the
     # 403 fires during request resolution, before the handler body — a decorator
     # couldn't inject the resolved User or compose with the other Depends().
+    from app.auth.impersonation import (
+        IMPERSONATION_PERMISSIONS,
+        impersonated_practice_id,
+    )
     from app.dependencies import get_current_user
 
     # WHY user.role: the role lives on OUR users row (set at provisioning), not in
     # the Clerk token — Clerk org roles are mapped to clinic roles once, at login.
-    async def dependency(user: User = Depends(get_current_user)) -> User:
+    async def dependency(
+        request: Request, user: User = Depends(get_current_user)
+    ) -> User:
+        # Staff viewing a clinic read-only are judged by the impersonation set,
+        # NOT by their own clinic role. An internal user whose users row happens
+        # to say "owner" must not gain owner rights over someone else's clinic.
+        if await impersonated_practice_id(request, user) is not None:
+            if permission not in IMPERSONATION_PERMISSIONS:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"'{permission}' is not available while viewing a clinic. "
+                        "Use the admin area, under your own name."
+                    ),
+                )
+            return user
         if not has_clinic_permission(user.role, permission):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
