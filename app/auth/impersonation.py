@@ -45,6 +45,26 @@ from app.models.user import User
 
 VIEW_AS_HEADER = "X-Dentovox-View-As"
 
+# Reads that have to be POSTs. Both search on a phone number, and a phone number
+# in a URL lands in access logs and browser history — so the query travels in the
+# body instead. Refusing them by verb alone broke the clinic's own Calls and
+# Patients screens for the operator looking at them, which is the entire feature.
+#
+# Kept as an explicit list rather than a rule about verbs: /api/voice/web-call is
+# also a POST gated by a view permission, and it PLACES A CALL as the clinic.
+# Nothing about the method distinguishes the three.
+READ_ONLY_POST_PATHS: frozenset[str] = frozenset({
+    "/api/calls/search",
+    "/api/patients/search",
+})
+
+
+def _is_read(request: Request) -> bool:
+    return request.method == "GET" or (
+        request.method == "POST"
+        and request.url.path.rstrip("/") in READ_ONLY_POST_PATHS
+    )
+
 # What an impersonating operator may see. Deliberately narrower than the clinic
 # owner's set: read everything the clinic reads, change nothing.
 IMPERSONATION_PERMISSIONS: frozenset[str] = frozenset({
@@ -71,7 +91,7 @@ async def impersonated_practice_id(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Viewing as a clinic is for Dentovox staff only.",
         )
-    if request.method != "GET":
+    if not _is_read(request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
