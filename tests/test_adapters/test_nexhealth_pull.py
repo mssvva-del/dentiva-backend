@@ -9,8 +9,9 @@ from __future__ import annotations
 from datetime import date
 
 import httpx
+import pytest
 
-from app.adapters.nexhealth.client import NexHealthClient
+from app.adapters.nexhealth.client import NexHealthClient, NexHealthError
 from app.adapters.nexhealth.mock import MockReactivationSource
 
 
@@ -268,3 +269,30 @@ async def test_first_provider_id_shares_the_same_roster():
     assert await client.first_provider_id() == "99"
     assert await client.first_provider_id() == "99"
     assert calls.count("/providers") == 1
+
+
+async def test_a_4xx_quotes_nexhealth_only_where_the_request_had_no_patient_data():
+    """Status and path alone cost a deploy cycle per guess: a 400 on
+    /appointment_slots and a 400 on /providers are different bugs and read
+    identically. NexHealth names the parameter it objected to — worth keeping,
+    but only where we did not send a patient's details to begin with.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        return httpx.Response(400, json={"description": "Missing parameter: pids"})
+
+    with pytest.raises(NexHealthError) as ei:
+        await _client(handler)._get("/providers", {})
+    assert "Missing parameter: pids" in str(ei.value)
+
+    # /patients is searched BY phone number: its error body may echo it back.
+    def phone_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        return httpx.Response(400, json={"description": "bad number +16175551234"})
+
+    with pytest.raises(NexHealthError) as ei2:
+        await _client(phone_handler)._get("/patients", {"phone_number": "+16175551234"})
+    assert "6175551234" not in str(ei2.value)
+    assert "NexHealth 400 on GET /patients" in str(ei2.value)
