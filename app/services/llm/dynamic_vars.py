@@ -35,11 +35,20 @@ def build_dynamic_variables(practice: Practice) -> dict[str, str]:
     langs = ", ".join(practice.languages_enabled or []) or "en"
     status, eta = office_status(practice, now=now)
 
-    # Per-practice agent persona (onboarding step 5 / doctor panel). The prompt's
-    # canonical opening (incl. the MANDATORY AI-disclosure + recording line) stays
-    # hard-coded in the prompt — the clinic only customizes the assistant's NAME
-    # and an OPTIONAL extra welcome line, so no custom text can strip the legal
-    # disclosure. Keys must always be present (Retell substitutes only provided
+    # Per-practice agent persona (onboarding step 5 / doctor panel). The canonical
+    # opening lives in the Retell agent's begin_message, NOT here, and carries two
+    # disclosures a clinic must not be able to remove: that the caller is talking
+    # to an AI, and that the call is recorded. The clinic customizes only the
+    # assistant's NAME and an OPTIONAL extra line, both substituted INTO that
+    # sentence, so no custom text can strip either disclosure.
+    #
+    # This comment previously claimed the AI disclosure was already there. It was
+    # not — the live greeting said only "this call may be recorded" until it was
+    # corrected. A comment asserting a legal control that does not exist is worse
+    # than no comment: the next person reads it and does not check.
+    # Recording consent is all-party in some states (Massachusetts among them,
+    # where the first clinic operates), which is why the wording is "is recorded"
+    # rather than "may be". Keys must always be present (Retell substitutes only provided
     # vars — a missing key would leave a literal "{{agent_name}}" spoken aloud).
     agent = practice.agent_settings or {}
     agent_name = (str(agent.get("agent_name") or "").strip() or "Alex")[:60]
