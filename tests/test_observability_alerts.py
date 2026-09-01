@@ -199,3 +199,21 @@ def test_a_deliberate_correction_does_not_page():
     alerts.record_alert("clinic_number_detached", "practice=abc was=+15551110000")
     assert alerts.recent_alerts()["count_last_hour"] == 0
     assert not alerts._RECENT
+
+
+def test_signals_that_fire_on_healthy_work_do_not_page():
+    """An alert that fires when everything is working is how a team learns to
+    scroll past the alert list — and the real one then arrives into that habit.
+
+    Both of these fire on every healthy call: one records that the vendor
+    reached us, the other that a client filled in a subdomain and carried on.
+    They stay durable and visible; they must not hold the system at "degraded".
+    """
+    from app.observability.alerts import NON_PAGING_KINDS
+
+    assert "webhook_event_seen" in NON_PAGING_KINDS
+    assert "pms_subdomain_resolved" in NON_PAGING_KINDS
+    # And the ones that mean a patient could not be booked still do page.
+    for paging in ("pms_no_open_slots", "pms_providers_error", "call_unroutable",
+                   "webhook_handler_failed", "webhook_signature_rejected"):
+        assert paging not in NON_PAGING_KINDS
