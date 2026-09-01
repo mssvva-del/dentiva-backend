@@ -81,7 +81,7 @@ async def test_a_stale_amount_is_caught(monkeypatch):
     wrong — the pricing page reads our number, the invoice carries Stripe's, and
     only the customer ever sees both."""
     _prices(monkeypatch)
-    target = PLANS["after_hours"]
+    target = PLANS["overflow"]
 
     def handler(request):
         plan, cycle = _lookup(request.url.path)
@@ -111,14 +111,14 @@ async def test_a_price_stripe_does_not_have_is_caught(monkeypatch):
 
 async def test_an_unconfigured_price_is_named(monkeypatch):
     _prices(monkeypatch)
-    monkeypatch.setattr(get_settings(), "stripe_price_growth_annual", "")
+    monkeypatch.setattr(get_settings(), "stripe_price_revenue_annual", "")
 
     def handler(request):
         plan, cycle = _lookup(request.url.path)
         return httpx.Response(200, json=_price_body(plan, cycle, livemode=False))
 
     problems = await verify_catalog(transport=_stripe(handler))
-    assert problems == ["growth/annual: no Stripe price configured"]
+    assert problems == ["revenue/annual: no Stripe price configured"]
 
 
 async def test_billing_switched_off_is_not_a_problem(monkeypatch):

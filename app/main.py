@@ -314,7 +314,7 @@ async def health_detailed() -> JSONResponse:
         "pms_credentials_ambiguous": pms_ambiguous,
         "capabilities": {
             "take_payment": bool(
-                settings.stripe_secret_key and settings.stripe_price_growth_monthly
+                settings.stripe_secret_key and settings.stripe_price_front_desk_monthly
             ),
             # take_payment needs BOTH, so its False says nothing about which is
             # missing — and the fix differs: one is a key to paste, the other is
@@ -322,12 +322,12 @@ async def health_detailed() -> JSONResponse:
             # it turns "billing is off" into an instruction.
             "billing_key": bool(settings.stripe_secret_key),
             "billing_prices": all((
-                settings.stripe_price_after_hours_monthly,
-                settings.stripe_price_after_hours_annual,
-                settings.stripe_price_full_time_monthly,
-                settings.stripe_price_full_time_annual,
-                settings.stripe_price_growth_monthly,
-                settings.stripe_price_growth_annual,
+                settings.stripe_price_overflow_monthly,
+                settings.stripe_price_overflow_annual,
+                settings.stripe_price_front_desk_monthly,
+                settings.stripe_price_front_desk_annual,
+                settings.stripe_price_revenue_monthly,
+                settings.stripe_price_revenue_annual,
                 settings.stripe_price_multi_monthly,
                 settings.stripe_price_multi_annual,
             )),

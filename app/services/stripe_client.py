@@ -25,7 +25,12 @@ class BillingNotConfigured(Exception):
 
 # Deprecated → current tier, so an old checkout link (starter/practice/group)
 # still resolves to a live price instead of a hard failure.
-_LEGACY_PLAN_ALIASES = {"starter": "after_hours", "practice": "full_time", "group": "multi"}
+_LEGACY_PLAN_ALIASES = {
+    "starter": "overflow", "practice": "front_desk", "group": "multi",
+    # The 2026-08 keys. No practice was on a paid plan when the grid changed;
+    # these are for stale checkout links and demo rows, not a migration.
+    "after_hours": "overflow", "full_time": "front_desk", "growth": "revenue",
+}
 
 
 def _price_id(plan_key: str, billing_cycle: str) -> str:
@@ -33,12 +38,12 @@ def _price_id(plan_key: str, billing_cycle: str) -> str:
     s = get_settings()
     key = _LEGACY_PLAN_ALIASES.get(plan_key, plan_key)
     table = {
-        ("after_hours", "monthly"): s.stripe_price_after_hours_monthly,
-        ("after_hours", "annual"): s.stripe_price_after_hours_annual,
-        ("full_time", "monthly"): s.stripe_price_full_time_monthly,
-        ("full_time", "annual"): s.stripe_price_full_time_annual,
-        ("growth", "monthly"): s.stripe_price_growth_monthly,
-        ("growth", "annual"): s.stripe_price_growth_annual,
+        ("overflow", "monthly"): s.stripe_price_overflow_monthly,
+        ("overflow", "annual"): s.stripe_price_overflow_annual,
+        ("front_desk", "monthly"): s.stripe_price_front_desk_monthly,
+        ("front_desk", "annual"): s.stripe_price_front_desk_annual,
+        ("revenue", "monthly"): s.stripe_price_revenue_monthly,
+        ("revenue", "annual"): s.stripe_price_revenue_annual,
         ("multi", "monthly"): s.stripe_price_multi_monthly,
         ("multi", "annual"): s.stripe_price_multi_annual,
     }

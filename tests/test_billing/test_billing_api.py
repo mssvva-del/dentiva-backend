@@ -38,7 +38,7 @@ async def test_plans_visible_to_manager_not_staff(client, db_session):
     ok = await client.get("/api/billing/plans", headers=_h("b_manager"))
     assert ok.status_code == 200
     keys = {p["key"] for p in ok.json()}
-    assert keys == {"after_hours", "full_time", "growth", "multi"}
+    assert keys == {"overflow", "front_desk", "revenue", "multi"}
     # staff lacks VIEW_BILLING
     assert (await client.get("/api/billing/plans", headers=_h("b_staff"))).status_code == 403
 
@@ -50,7 +50,7 @@ async def test_summary_no_subscription_shows_zeros(client, db_session):
     body = r.json()
     assert body["plan"] is None
     assert body["usage"]["minutes_used"] == 0
-    assert body["usage"]["included_minutes"] == 1500  # after_hours default fallback
+    assert body["usage"]["included_minutes"] == 400  # overflow default fallback
     assert body["invoices"] == []
 
 
@@ -67,7 +67,7 @@ async def test_summary_reflects_subscription_and_usage(client, db_session):
     r = await client.get("/api/billing/summary", headers=_h("b_owner"))
     body = r.json()
     assert body["plan"] == "full_time"
-    assert body["included_minutes"] == 2500
+    assert body["included_minutes"] == 650
     assert body["usage"]["minutes_used"] == 10
     assert body["usage"]["calls_count"] == 1
 

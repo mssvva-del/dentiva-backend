@@ -174,12 +174,16 @@ class Settings(BaseSettings):
     database_url_platform: str = ""
     # Stripe Price IDs per tier × cycle (ADM7 grid). Created by
     # scripts/sync_stripe_catalog.py; paste its output into these env vars.
-    stripe_price_after_hours_monthly: str = ""
-    stripe_price_after_hours_annual: str = ""
-    stripe_price_full_time_monthly: str = ""
-    stripe_price_full_time_annual: str = ""
-    stripe_price_growth_monthly: str = ""
-    stripe_price_growth_annual: str = ""
+    # One pair per plan key in billing/plans.py. Renamed with the 2026-09 grid;
+    # the Stripe catalog must be regenerated to match (scripts/
+    # sync_stripe_catalog.py), and billing/catalog_check.py alerts until it is —
+    # a stale price id is how a clinic gets billed last quarter's number.
+    stripe_price_overflow_monthly: str = ""
+    stripe_price_overflow_annual: str = ""
+    stripe_price_front_desk_monthly: str = ""
+    stripe_price_front_desk_annual: str = ""
+    stripe_price_revenue_monthly: str = ""
+    stripe_price_revenue_annual: str = ""
     stripe_price_multi_monthly: str = ""
     stripe_price_multi_annual: str = ""
 
