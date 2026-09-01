@@ -1,9 +1,12 @@
 """Create/verify the Stripe Product+Price catalog for the ADM7 grid.
 
-Idempotent: prices are keyed by a stable Stripe `lookup_key`
-(dentovox_<plan>_<cycle>), so re-running finds the existing price instead of
-making a duplicate. Prints the STRIPE_PRICE_* env assignments to paste into
-Railway (test first, then live after "Switch to live account").
+Idempotent: prices are keyed by a Stripe `lookup_key` that includes the AMOUNT
+(dentovox_<plan>_<cycle>_<cents>), so re-running finds the existing price instead
+of making a duplicate — and a repriced tier gets a new price rather than
+colliding with the old one, which Stripe would never let us edit.
+
+Prints the STRIPE_PRICE_* env assignments to paste into Railway (test first,
+then live after "Switch to live account").
 
 Usage:
     STRIPE_SECRET_KEY=sk_test_... python3 scripts/sync_stripe_catalog.py
@@ -112,7 +115,14 @@ def main() -> None:
                 ("monthly", plan.monthly_price_cents, "month"),
                 ("annual", plan.annual_total_cents, "year"),
             ):
-                lk = f"dentovox_{plan_key}_{cycle}"
+                # Amount is part of the key. Stripe prices are IMMUTABLE, so a
+                # key that outlives a price change collides forever and the sync
+                # stops — which is what happened the first time the grid moved:
+                # three new tiers created cleanly and Multi refused, because its
+                # key was unchanged while its amount was not. Including the cents
+                # means a repriced tier simply gets a new price, and the old one
+                # stays addressable for anybody still subscribed to it.
+                lk = f"dentovox_{plan_key}_{cycle}_{amount}"
                 price_id = _ensure_price(
                     client, product_id=product_id, lookup_key=lk,
                     amount_cents=amount, interval=interval, dry=args.dry_run,
