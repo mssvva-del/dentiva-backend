@@ -39,8 +39,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Annual discount: 15% off the 12-month total (matches the public site).
-ANNUAL_DISCOUNT = 0.15
+# Annual discount, cut from 15% to 10%.
+#
+# A discount is a margin decision, not a SaaS habit. Against the 65% the grid
+# targets, 15% off leaves roughly 59% and buys cash flow with the one thing we
+# were short of. 10% leaves about 61% and still gives a practice a real reason
+# to commit for a year. Revisit upward when the cost per minute is measured
+# rather than estimated.
+ANNUAL_DISCOUNT = 0.10
 
 # Rough per-minute cost of a call (Retell + LLM + Cartesia TTS), in cents. Used by
 # the admin margin view only — a planning estimate, NOT an invoice input. Tune as
@@ -63,10 +69,49 @@ ANNUAL_DISCOUNT = 0.15
 # when a per-location NexHealth deal replaces per-request billing.
 ESTIMATED_COST_CENTS_PER_MIN = 15
 
+# The number the GRID is derived from, which is not the same number.
+#
+# 15¢ is what we have MEASURED and is what the admin margin screens show. This
+# one adds the PMS middleware we have not measured: NexHealth bills per request,
+# roughly $0.10 each, at 4–6 requests to book one patient — about 10¢ over a
+# five-minute call. Estimate, explicitly.
+#
+# Pricing is built on the pessimistic figure on purpose. If the estimate is too
+# high we are leaving margin on the table, which is recoverable by raising
+# allowances later. If it is too low and we priced on 15¢, every busy clinic
+# loses us money and we find out from a quarter's accounts.
+#
+# It comes down two ways, both being worked: a per-location NexHealth deal
+# (~$75/location discussed, unsigned), and direct Open Dental at a published
+# $15/$30/$35 per location per month — flat, so it dilutes toward zero per
+# minute as a clinic talks more, the exact opposite of per-request billing.
+PRICING_COST_CENTS_PER_MIN = 25
+
+# Gross margin the grid must hold at FULL utilisation — the worst case, where a
+# clinic uses every included minute. Anything less demanding prices for the
+# customer who barely calls and punishes us for the one who loves the product.
+TARGET_GROSS_MARGIN = 0.65
+
+
+def included_minutes_for(monthly_price_cents: int, *,
+                         target_margin: float = TARGET_GROSS_MARGIN,
+                         cost_cents_per_min: int = PRICING_COST_CENTS_PER_MIN) -> int:
+    """How many minutes a price can carry and still hold the target margin.
+
+        minutes = price x (1 - margin) / cost_per_minute
+
+    The previous grid had no such derivation. Its allowances implied revenue of
+    15.0–16.6c per included minute against a 14.8c measured floor — the
+    allowances had been chosen by feel, and the arithmetic simply had not been
+    done. Comparable metered products sell 44–53c of revenue per included
+    minute, which is what a grid looks like when it starts from a margin target.
+    """
+    return int(monthly_price_cents * (1 - target_margin) / cost_cents_per_min)
+
 
 @dataclass(frozen=True)
 class Plan:
-    key: str                 # after_hours | full_time | growth | multi
+    key: str                 # overflow | front_desk | revenue | multi
     name: str
     monthly_price_cents: int
     included_minutes: int         # fair-use soft cap
@@ -85,23 +130,64 @@ class Plan:
         return round(self.annual_total_cents / 12)
 
 
+# One overage rate for every tier.
+#
+# The old grid charged LESS per extra minute the higher the plan — 18c, 15c,
+# 13c, 11c — so a clinic growing into a bigger plan cost us more the more it
+# used us, and three of the four rates sat below the 14.8c measured voice floor
+# before any PMS cost at all. That is not a discount, it is a subsidy that grows
+# with the customer's success.
+#
+# 39c holds roughly 36% margin on the 25c pricing cost, and about 62% if the
+# cost lands nearer the measured 15c. It is above the 29c a metered competitor
+# charges, which is the honest trade: they can go lower because their allowances
+# are a third the size. The route to matching them runs through cost — at a 17c
+# marginal cost, 29c carries the same 40% margin. Lower this when that happens,
+# not before.
+OVERAGE_CENTS_PER_MIN = 39
+
 # Catalog keyed by plan id. Order matters for display (cheapest first).
+#
+# Tiers differ by WHAT THE PRODUCT DOES, not by which taps cost extra. Every one
+# includes HIPAA and the BAA, English and Spanish, transcripts, analytics and
+# PMS booking — a competitor markets against "surprise overages" and paid
+# add-ons, and they are right to.
+#
+# Allowances come from included_minutes_for(), rounded DOWN to a round number.
+# Nothing here is a judgement call about how many minutes feel generous.
 PLANS: dict[str, Plan] = {
-    "after_hours": Plan(
-        key="after_hours", name="After-Hours",
-        monthly_price_cents=24900, included_minutes=1500, overage_cents_per_min=18,
+    "overflow": Plan(
+        key="overflow", name="Overflow",
+        # Busy, no answer, and the days the practice is closed. The entry
+        # product: it takes nothing away from the front desk.
+        monthly_price_cents=29900, included_minutes=400,
+        overage_cents_per_min=OVERAGE_CENTS_PER_MIN,
     ),
-    "full_time": Plan(
-        key="full_time", name="Full-Time",
-        monthly_price_cents=39900, included_minutes=2500, overage_cents_per_min=15,
+    "front_desk": Plan(
+        key="front_desk", name="Front Desk",
+        # All-day coverage — the agent is the line, not the safety net.
+        # 650, not the 700 this was first written as: the ceiling at $499 is 698
+        # and 700 was a round number chosen by hand — the exact habit this grid
+        # exists to end. The test caught it before the commit did.
+        monthly_price_cents=49900, included_minutes=650,
+        overage_cents_per_min=OVERAGE_CENTS_PER_MIN,
     ),
-    "growth": Plan(
-        key="growth", name="Growth",
-        monthly_price_cents=59900, included_minutes=4000, overage_cents_per_min=13,
+    "revenue": Plan(
+        key="revenue", name="Revenue",
+        # Front Desk plus the outbound work: reactivation, recalls, and calling
+        # back the people who rang this week and did not book. The only tier
+        # that MAKES a clinic money rather than saving it — and the only one
+        # gated on outbound actually being switched on (see routes/billing.py).
+        monthly_price_cents=74900, included_minutes=1000,
+        overage_cents_per_min=OVERAGE_CENTS_PER_MIN,
     ),
     "multi": Plan(
         key="multi", name="Multi-Location",
-        monthly_price_cents=89900, included_minutes=3000, overage_cents_per_min=11,
+        # Per location, minutes pooled across the group. Priced below Front Desk
+        # per site because a group brings volume and one commercial
+        # relationship, not because its minutes are cheaper to serve.
+        monthly_price_cents=64900, included_minutes=900,
+        overage_cents_per_min=OVERAGE_CENTS_PER_MIN,
         per_location=True,
     ),
 }
@@ -110,9 +196,16 @@ PLANS: dict[str, Plan] = {
 # tier. Keeps any existing subscription row / demo / old checkout link resolving
 # instead of crashing on get_plan() — remove once no rows reference them.
 _LEGACY_ALIASES: dict[str, str] = {
-    "starter": "after_hours",
-    "practice": "full_time",
+    "starter": "overflow",
+    "practice": "front_desk",
     "group": "multi",
+    # The 2026-08 grid, replaced when the allowances turned out never to have
+    # been derived from a margin target. No practice was on a paid plan when it
+    # changed — the aliases exist for old checkout links and demo rows, not for
+    # a migration that had to happen.
+    "after_hours": "overflow",
+    "full_time": "front_desk",
+    "growth": "revenue",
 }
 
 # Subscription statuses we model. 'pilot' = concierge clinic on a manual deal

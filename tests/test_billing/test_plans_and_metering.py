@@ -15,35 +15,80 @@ from app.observability import alerts
 from tests.conftest import seed_practice
 
 
-# ── plan catalog (ADM7 grid) ─────────────────────────────────────────────────
+# ── plan catalog ─────────────────────────────────────────────────────────────
 def test_plan_prices_match_spec():
-    # Prices match the public site (canonical): $249/399/599/899.
-    assert PLANS["after_hours"].monthly_price_cents == 24900
-    assert PLANS["after_hours"].included_minutes == 1500
-    assert PLANS["after_hours"].overage_cents_per_min == 18
-    assert PLANS["full_time"].monthly_price_cents == 39900
-    assert PLANS["full_time"].included_minutes == 2500
-    assert PLANS["full_time"].overage_cents_per_min == 15
-    assert PLANS["growth"].monthly_price_cents == 59900
-    assert PLANS["growth"].included_minutes == 4000
-    assert PLANS["multi"].monthly_price_cents == 89900
-    assert PLANS["multi"].included_minutes == 3000
-    assert PLANS["multi"].overage_cents_per_min == 11
+    assert PLANS["overflow"].monthly_price_cents == 29900
+    assert PLANS["overflow"].included_minutes == 400
+    assert PLANS["front_desk"].monthly_price_cents == 49900
+    assert PLANS["front_desk"].included_minutes == 650
+    assert PLANS["revenue"].monthly_price_cents == 74900
+    assert PLANS["revenue"].included_minutes == 1000
+    assert PLANS["multi"].monthly_price_cents == 64900
+    assert PLANS["multi"].included_minutes == 900
     assert PLANS["multi"].per_location is True
-    assert set(PLANS) == {"after_hours", "full_time", "growth", "multi"}
+    assert set(PLANS) == {"overflow", "front_desk", "revenue", "multi"}
 
 
-def test_annual_discount_15pct():
-    p = PLANS["full_time"]
-    # 399*12 = 4788.00 → 15% off → 407us... round(399_00*12*0.85) cents.
-    assert p.annual_total_cents == round(39900 * 12 * 0.85)
+def test_every_allowance_holds_the_target_margin_at_full_use():
+    """The property the old grid did not have.
+
+    Its allowances implied 15.0-16.6c of revenue per included minute against a
+    14.8c measured voice floor — chosen by feel, with the arithmetic never done.
+    A clinic that used everything it paid for was our worst customer.
+
+    Each allowance must now be no larger than the margin target permits, so the
+    heaviest legitimate user is still profitable."""
+    from app.billing.plans import (
+        PRICING_COST_CENTS_PER_MIN,
+        TARGET_GROSS_MARGIN,
+        included_minutes_for,
+    )
+
+    for plan in PLANS.values():
+        ceiling = included_minutes_for(plan.monthly_price_cents)
+        assert plan.included_minutes <= ceiling, (
+            f"{plan.key}: {plan.included_minutes} min exceeds the {ceiling} the "
+            f"price can carry at {TARGET_GROSS_MARGIN:.0%}"
+        )
+        gm_at_cap = 1 - (
+            plan.included_minutes * PRICING_COST_CENTS_PER_MIN
+        ) / plan.monthly_price_cents
+        assert gm_at_cap >= TARGET_GROSS_MARGIN, f"{plan.key}: {gm_at_cap:.1%} at cap"
+
+
+def test_no_plan_sells_an_extra_minute_below_cost():
+    """Three of the four old rates were under the MEASURED voice floor, before
+    any PMS cost — and the rate fell as the tier rose, so a clinic growing into
+    a bigger plan cost us more the more it used us."""
+    from app.billing.plans import PRICING_COST_CENTS_PER_MIN
+
+    rates = {p.overage_cents_per_min for p in PLANS.values()}
+    assert len(rates) == 1, f"overage must be one rate for every tier, found {rates}"
+    assert rates.pop() > PRICING_COST_CENTS_PER_MIN
+
+
+def test_the_annual_discount_does_not_eat_the_margin():
+    """A discount is a margin decision, not a habit. At 15% off a 65% target the
+    heaviest annual customer fell under 60%; 10% keeps every tier above it."""
+    from app.billing.plans import ANNUAL_DISCOUNT, PRICING_COST_CENTS_PER_MIN
+
+    assert ANNUAL_DISCOUNT == 0.10
+    for plan in PLANS.values():
+        monthly_equiv = plan.annual_total_cents / 12
+        gm = 1 - (plan.included_minutes * PRICING_COST_CENTS_PER_MIN) / monthly_equiv
+        assert gm >= 0.60, f"{plan.key}: {gm:.1%} on annual at full use"
 
 
 def test_legacy_plan_keys_resolve_to_current_tier():
-    # Old checkout links / existing subscription rows must not crash.
-    assert get_plan("starter").key == "after_hours"
-    assert get_plan("practice").key == "full_time"
+    """Old checkout links and demo rows must not crash. The 2026-08 keys are here
+    for the same reason — no practice was on a paid plan when the grid changed,
+    so these are for stale links, not a migration."""
+    assert get_plan("starter").key == "overflow"
+    assert get_plan("practice").key == "front_desk"
     assert get_plan("group").key == "multi"
+    assert get_plan("after_hours").key == "overflow"
+    assert get_plan("full_time").key == "front_desk"
+    assert get_plan("growth").key == "revenue"
     assert get_plan("nope") is None
 
 
@@ -107,7 +152,7 @@ async def _subscribed(db_session, practice_id, included_minutes):
     from app.models.subscription import Subscription
 
     db_session.add(Subscription(
-        id=uuid.uuid4(), practice_id=practice_id, plan="after_hours",
+        id=uuid.uuid4(), practice_id=practice_id, plan="overflow",
         status="active", included_minutes=included_minutes,
     ))
     await db_session.flush()

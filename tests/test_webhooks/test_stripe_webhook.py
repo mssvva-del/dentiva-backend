@@ -64,9 +64,9 @@ async def test_checkout_completed_activates_subscription(client, db_session):
     )).scalar_one()
     assert sub.plan == "practice" and sub.status == "active"
     # Reviewer: the legacy key is stored verbatim, but entitlements must resolve
-    # from the catalog via the alias (practice → full_time: 2500 min / 15¢).
-    assert sub.included_minutes == 2500
-    assert sub.overage_cents_per_min == 15
+    # from the catalog via the alias (practice → front_desk: 650 min).
+    assert sub.included_minutes == 650
+    assert sub.overage_cents_per_min == 39
     assert sub.stripe_subscription_id == "sub_123"
     p = (await db_session.execute(
         select(Practice).where(Practice.id == practice.id)
