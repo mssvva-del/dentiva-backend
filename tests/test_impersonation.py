@@ -19,9 +19,11 @@ from app.auth import impersonation as imp
 from app.models.dentiva_staff import DentivaStaff
 
 
-def _request(method: str = "GET", view_as: str | None = None):
+def _request(method: str = "GET", view_as: str | None = None, path: str = "/api/calls"):
     headers = {imp.VIEW_AS_HEADER: view_as} if view_as else {}
-    return SimpleNamespace(method=method, headers=headers)
+    return SimpleNamespace(
+        method=method, headers=headers, url=SimpleNamespace(path=path)
+    )
 
 
 def _user(*, internal: bool = True):
@@ -158,3 +160,36 @@ def test_impersonation_grants_reads_only():
         assert denied not in imp.IMPERSONATION_PERMISSIONS
     # And it never leaks an admin-world permission into the clinic world.
     assert not (imp.IMPERSONATION_PERMISSIONS & p.ADMIN_PERMISSIONS)
+
+
+@pytest.mark.parametrize("path", ["/api/calls/search", "/api/patients/search"])
+@pytest.mark.asyncio
+async def test_a_search_is_a_read_even_though_it_is_a_post(staff_role, path):
+    """These are POSTs only because they search on a phone number, and a phone
+    number in a URL lands in access logs and browser history.
+
+    Refusing them by verb broke the clinic's own Calls and Patients screens for
+    the operator looking at them — which is the entire feature. The screen said
+    "Couldn't load data" and gave no hint that impersonation was the cause.
+    """
+    staff_role("super_admin")
+    target = uuid.uuid4()
+    got = await imp.impersonated_practice_id(
+        _request(method="POST", view_as=str(target), path=path), _user()
+    )
+    assert got == target
+
+
+@pytest.mark.asyncio
+async def test_placing_a_call_is_not_a_read_however_it_is_gated(staff_role):
+    """/api/voice/web-call is also a POST behind a view permission, and it puts a
+    live call out as that clinic. Nothing about the method separates it from the
+    two searches, which is why the allow-list is a list and not a rule."""
+    staff_role("super_admin")
+    with pytest.raises(HTTPException) as exc:
+        await imp.impersonated_practice_id(
+            _request(method="POST", view_as=str(uuid.uuid4()),
+                     path="/api/voice/web-call"),
+            _user(),
+        )
+    assert exc.value.status_code == 403
