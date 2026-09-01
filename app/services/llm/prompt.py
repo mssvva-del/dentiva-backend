@@ -136,11 +136,54 @@ def _render_kb(kb: dict) -> str:
     return block[:1200]
 
 
-def _render_hours(hours: dict) -> str:
-    """Best-effort short render of a business_hours map; tolerant of shape."""
+_WEEK: tuple[tuple[str, str], ...] = (
+    ("mon", "Mon"), ("tue", "Tue"), ("wed", "Wed"), ("thu", "Thu"),
+    ("fri", "Fri"), ("sat", "Sat"), ("sun", "Sun"),
+)
+
+
+def _spoken_time(hhmm: str) -> str:
+    """'16:30' → '4:30 PM'. Returns the input unchanged if it isn't a clock time."""
     try:
-        days = [f"{d} {v}" for d, v in hours.items() if v]
-        return "; ".join(days[:7]) or "call for hours"
+        h, m = (int(x) for x in str(hhmm).split(":")[:2])
+    except (TypeError, ValueError):
+        return str(hhmm)
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return str(hhmm)
+    suffix = "AM" if h < 12 else "PM"
+    return f"{h % 12 or 12}:{m:02d} {suffix}"
+
+
+def _render_hours(hours: dict) -> str:
+    """Render business_hours for the agent, in week order, closed days INCLUDED.
+
+    Closed days must be stated, not omitted. The previous version listed only the
+    days with a value, so a clinic closed on Wednesday reached the agent as
+    "fri …; mon …; thu …; tue …" — Wednesday simply absent. Asked "are you open
+    Wednesday?", the agent had no fact to answer with and inferred one from the
+    neighbouring days: it told a caller the practice was open 9 to 4:30 on a day
+    it is closed. An absent fact does not read as "closed" to a language model,
+    it reads as a gap to fill.
+
+    Alphabetical order made it worse (Friday first), as did handing the model a
+    raw dict repr to parse. Week order and spoken times cost nothing and remove
+    both.
+    """
+    try:
+        parts: list[str] = []
+        for key, label in _WEEK:
+            if key not in hours:
+                continue
+            v = hours.get(key)
+            if isinstance(v, dict) and v.get("open") and v.get("close"):
+                parts.append(
+                    f"{label} {_spoken_time(v['open'])}–{_spoken_time(v['close'])}"
+                )
+            elif v:
+                parts.append(f"{label} {v}")
+            else:
+                parts.append(f"{label} CLOSED")
+        return "; ".join(parts) or "call for hours"
     except Exception:  # noqa: BLE001 — never let prompt-building crash a call
         return "call for hours"
 
