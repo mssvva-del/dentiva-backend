@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.open_dental.models import AvailableSlot
 from app.models.booking import Booking
 from app.models.practice import Practice
+from app.observability.alerts import record_alert
 
 # Order of JS/DB weekday index (Mon=0 … Sun=6) → business_hours keys.
 _WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -380,7 +381,16 @@ async def compute_pms_slots(
             # gap for an extraction it books at 90.
             slot_length=visit_minutes(practice, procedure),
         )
-    except (NexHealthUnavailable, NexHealthError):
+    except (NexHealthUnavailable, NexHealthError) as exc:
+        # The reason is the whole diagnosis and it was being dropped on the
+        # floor: "pms_slots_unavailable practice=<uuid>" says a clinic's calendar
+        # is not answering but not whether that is auth, the wrong location, or
+        # the vendor being down. NexHealth's messages are status codes and paths
+        # — no patient data — so they are safe to carry.
+        record_alert(
+            "pms_slots_error",
+            f"practice={practice.id} {type(exc).__name__}: {str(exc)[:120]}",
+        )
         return None
 
     provider_label = _provider_name(practice)

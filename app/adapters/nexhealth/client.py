@@ -33,6 +33,7 @@ from app.adapters.nexhealth.models import (
 )
 from app.adapters.nexhealth.source import ReactivationSource
 from app.config import get_settings
+from app.observability.alerts import record_alert
 from app.utils.resilience import make_timeout, retry_async
 
 logger = logging.getLogger("dentiva.pms.nexhealth")
@@ -408,7 +409,14 @@ class NexHealthClient(ReactivationSource):
         """
         try:
             payload = (await self._get("/providers", {"per_page": 5})).json()
-        except (NexHealthError, NexHealthUnavailable):
+        except (NexHealthError, NexHealthUnavailable) as exc:
+            # Returning None here reads downstream as "this clinic has no
+            # providers", which is a very different thing from "we could not
+            # ask". The caller then alerts pms_no_provider and a booking never
+            # reaches the practice's own calendar. Names of clinicians are not
+            # PHI, but nothing from the body travels here anyway — only the
+            # status code and path in NexHealth's own message.
+            record_alert("pms_providers_error", f"{type(exc).__name__}: {str(exc)[:120]}")
             return None
         rows = payload.get("data") or []
         if isinstance(rows, dict):
@@ -416,6 +424,7 @@ class NexHealthClient(ReactivationSource):
         for row in rows:
             if isinstance(row, dict) and row.get("id") is not None and not row.get("inactive"):
                 return str(row["id"])
+        record_alert("pms_providers_empty", f"rows={len(rows)}")
         return None
 
     async def create_patient(
