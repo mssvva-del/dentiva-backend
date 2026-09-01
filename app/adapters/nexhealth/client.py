@@ -177,6 +177,54 @@ class NexHealthClient(ReactivationSource):
             raise NexHealthError("auth response missing token")
         return token
 
+    async def _resolve_subdomain(self) -> str:
+        """The institution this API key belongs to.
+
+        Every other endpoint is scoped by ``subdomain``, and NexHealth rejects a
+        blank one outright: "Blank values not allowed for parameter subdomain".
+        A clinic connected without it looked fully connected on every screen we
+        have, while its calendar answered 400 to every question — the agent fell
+        back to our own book and no booking ever reached the practice.
+
+        /institutions is the one endpoint that does not need it. One institution
+        is the normal case for a clinic's own key. TWO is refused rather than
+        guessed: picking the first would read and write a different practice's
+        calendar, which is not a mistake you can take back.
+        """
+        if self._subdomain:
+            return self._subdomain
+        if self._token is None:
+            self._token = await self._fetch_token()
+        headers = {"Authorization": f"Bearer {self._token}", **_BASE_HEADERS}
+        async with await self._client() as client:
+            try:
+                resp = await client.get("/institutions", headers=headers)
+            except httpx.HTTPError as exc:
+                raise NexHealthUnavailable(str(exc)) from exc
+        if resp.status_code >= 500:
+            raise NexHealthUnavailable(f"NexHealth {resp.status_code} on GET /institutions")
+        if resp.status_code >= 400:
+            raise NexHealthError(
+                f"NexHealth {resp.status_code} on GET /institutions — {_why(resp)}"
+            )
+        rows = (resp.json() or {}).get("data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("institutions") or []
+        subs = [
+            str(r["subdomain"]) for r in rows
+            if isinstance(r, dict) and r.get("subdomain")
+        ]
+        if len(subs) != 1:
+            record_alert("pms_subdomain_ambiguous", f"institutions={len(subs)}")
+            raise NexHealthError(
+                f"cannot resolve subdomain: {len(subs)} institutions on this key"
+            )
+        self._subdomain = subs[0]
+        # Named so it can be written into the practice's credentials and stop
+        # costing a request per client. An institution subdomain is not PHI.
+        record_alert("pms_subdomain_resolved", f"subdomain={subs[0]}")
+        return self._subdomain
+
     async def _get(self, path: str, params: dict) -> httpx.Response:
         """Authenticated GET with one token-refresh retry on 401, plus the shared
         transient retry (idempotent read)."""
@@ -184,7 +232,8 @@ class NexHealthClient(ReactivationSource):
         async def _once() -> httpx.Response:
             if self._token is None:
                 self._token = await self._fetch_token()
-            scoped = {"subdomain": self._subdomain, "location_id": self._location_id, **params}
+            subdomain = self._subdomain or await self._resolve_subdomain()
+            scoped = {"subdomain": subdomain, "location_id": self._location_id, **params}
             headers = {"Authorization": f"Bearer {self._token}", **_BASE_HEADERS}
             async with await self._client() as client:
                 try:

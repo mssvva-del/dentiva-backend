@@ -296,3 +296,68 @@ async def test_a_4xx_quotes_nexhealth_only_where_the_request_had_no_patient_data
         await _client(phone_handler)._get("/patients", {"phone_number": "+16175551234"})
     assert "6175551234" not in str(ei2.value)
     assert "NexHealth 400 on GET /patients" in str(ei2.value)
+
+
+def _client_without_subdomain(handler) -> NexHealthClient:
+    c = NexHealthClient(
+        api_key="KEY", subdomain="", location_id="42",
+        base_url="https://nh.test", transport=httpx.MockTransport(handler),
+    )
+    c._retry_base_delay = 0
+    return c
+
+
+async def test_a_blank_subdomain_is_resolved_from_the_key():
+    """NexHealth scopes every endpoint by subdomain and rejects a blank one
+    outright. Harborside was connected without one: every screen said the PMS
+    was linked while its calendar answered 400 to every question, the agent
+    quietly fell back to our own book, and no booking ever reached the practice.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        if request.url.path == "/institutions":
+            return httpx.Response(200, json={"data": [
+                {"id": 23242, "subdomain": "harborside"},
+            ]})
+        assert request.url.params.get("subdomain") == "harborside"
+        return httpx.Response(200, json={"data": [{"id": 11}]})
+
+    client = _client_without_subdomain(handler)
+    assert await client.first_provider_id() == "11"
+    # Resolved once, not on every request for the life of the client.
+    await client.provider_ids()
+    assert seen.count("/institutions") == 1
+
+
+async def test_two_institutions_on_one_key_are_refused_not_picked():
+    """Taking the first would read and write a different practice's calendar.
+    Ambiguity is refused everywhere else in this codebase; here too."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        if request.url.path == "/institutions":
+            return httpx.Response(200, json={"data": [
+                {"subdomain": "one"}, {"subdomain": "two"},
+            ]})
+        raise AssertionError("asked a scoped endpoint with an unresolved subdomain")
+
+    with pytest.raises(NexHealthError, match="2 institutions"):
+        await _client_without_subdomain(handler)._get("/providers", {})
+
+
+async def test_an_explicit_subdomain_is_never_second_guessed():
+    """A configured subdomain must not cost an extra request per client."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        return httpx.Response(200, json={"data": [{"id": 11}]})
+
+    assert await _client(handler).first_provider_id() == "11"
+    assert "/institutions" not in seen
