@@ -188,3 +188,24 @@ def test_knowledge_does_not_deny_bridged_systems():
     # The old wording enumerated the two integrations as if they were the whole
     # world of dental software.
     assert "supported: open dental and nexhealth" not in kb
+
+
+def test_the_assistant_sends_people_to_a_mailbox_that_exists():
+    """Both assistants — in-app and the public one on the website — tell a person
+    to email us when they hit something the knowledge does not cover. That
+    address was support@dentovox.com, which is not a mailbox anybody reads. A
+    visitor who took the advice was writing into nothing, and the failure is
+    silent on both ends: they think they asked, we never hear it."""
+    from app.services.assistant.knowledge import (
+        PRODUCT_KB,
+        PUBLIC_SYSTEM_PROMPT,
+        SYSTEM_PROMPT,
+    )
+
+    for name, text in (
+        ("PRODUCT_KB", PRODUCT_KB),
+        ("SYSTEM_PROMPT", SYSTEM_PROMPT),
+        ("PUBLIC_SYSTEM_PROMPT", PUBLIC_SYSTEM_PROMPT),
+    ):
+        assert "support@dentovox.com" not in text, f"{name} still points at a dead mailbox"
+    assert "info@dentovox.com" in PRODUCT_KB

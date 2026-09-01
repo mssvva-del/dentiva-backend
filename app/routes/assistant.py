@@ -122,7 +122,7 @@ async def public_ask(
     if not reply.strip():
         reply = (
             "I didn't catch that — could you rephrase? For anything I can't "
-            "answer, email support@dentovox.com."
+            "answer, email info@dentovox.com."
         )
     return AskResponse(reply=reply.strip())
 
@@ -159,6 +159,6 @@ async def ask(
     if not reply.strip():
         reply = (
             "I didn't catch that — could you rephrase? For anything I can't "
-            "answer, email support@dentovox.com."
+            "answer, email info@dentovox.com."
         )
     return AskResponse(reply=reply.strip())
