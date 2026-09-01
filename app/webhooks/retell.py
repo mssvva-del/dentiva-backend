@@ -807,8 +807,19 @@ async def _handle_call_started(payload: dict) -> dict:
 
 
 async def _handle_call_ended(payload: dict) -> dict:
-    retell_call_id = payload.get("call_id") or payload.get("retell_call_id", "")
+    retell_call_id = (
+        payload.get("call_id")
+        or payload.get("retell_call_id")
+        or (payload.get("call", {}) or {}).get("call_id")
+        or ""
+    )
     call_data = payload.get("call", {}) or {}
+    if not retell_call_id:
+        # Without an id there is nothing to finish, and the branch below would
+        # insert a row keyed on the empty string — one junk row, then a unique
+        # violation for every call after it.
+        record_alert("call_ended_without_id", "payload had no call_id")
+        return {"ok": True, "warning": "no_call_id"}
 
     end_ts = call_data.get("end_timestamp") or payload.get("end_timestamp")
     start_ts = call_data.get("start_timestamp") or payload.get("start_timestamp")
@@ -847,8 +858,21 @@ async def _handle_call_ended(payload: dict) -> dict:
     resolved_practice = await _resolve_practice_meta(call_data, agent_id)
 
     async with _app_db.async_session_factory() as session:
-        if resolved_practice is not None:
-            await set_tenant(session, resolved_practice.id)
+        # By the time a call ends its row already exists, and the row is a better
+        # answer than anything in this payload: it was written when the number
+        # was known. Ask it whenever the payload cannot say. Without this the
+        # tenant stayed unbound, RLS hid the row, and the branch below invented
+        # a practice id — see the comment there.
+        practice_id = (
+            resolved_practice.id
+            if resolved_practice is not None
+            else await _resolve_practice_id_for_call(session, retell_call_id)
+        )
+        if practice_id is None:
+            logger.warning("call_ended: no practice for call=%s", retell_call_id)
+            record_alert("call_ended_unroutable", f"call={retell_call_id}")
+            return {"ok": True, "warning": "no_practice"}
+        await set_tenant(session, practice_id)
         # FOR UPDATE serializes concurrent call_ended redeliveries on this row, so
         # the meter-once guard below (usage_metered_at IS NULL) can't be read as
         # None by two handlers at once and double-count the minutes.
@@ -860,9 +884,14 @@ async def _handle_call_ended(payload: dict) -> dict:
             logger.warning(
                 "call_ended: no call row for retell_call_id=%s; creating one.", retell_call_id
             )
-            # Orphan row — use the practice resolved above (tenant already bound).
-            practice = resolved_practice
-            practice_id = practice.id if practice else uuid.uuid4()
+            # This used to fall back to uuid4() for the practice id when the
+            # payload resolved to nothing. That is not a fallback, it is a
+            # guaranteed foreign-key violation: every call_ended raised
+            # IntegrityError, returned 500, was retried five times by Retell and
+            # failed identically each time. 620 calls sat frozen at
+            # "in progress" — no duration, no transcript, no metered minutes —
+            # for three months, while /health reported ok. A tenant we cannot
+            # name is refused above, never guessed.
             from_number = call_data.get("from_number") or payload.get("from_number", "unknown")
             to_number = call_data.get("to_number") or payload.get("to_number", "unknown")
             started_at = ended_at  # best-effort

@@ -4,7 +4,11 @@ Note: these tests use the `client` fixture which ensures a fresh DB engine,
 so each test gets a clean connection pool via _prepare_database.
 """
 
+import uuid
+from datetime import UTC, datetime
+
 import pytest
+from sqlalchemy import func, select
 
 from tests.conftest import seed_practice
 
@@ -111,3 +115,69 @@ async def test_a_failing_lifecycle_handler_names_itself(client, monkeypatch):
     assert "event=call_ended" in failures[0]
     # The payload's contents must not travel with the alert.
     assert "Jane" not in failures[0] and "6175551234" not in failures[0]
+
+
+async def test_call_ended_finishes_the_call_when_the_payload_cannot_name_the_clinic(
+    client, db_session, monkeypatch
+):
+    """The three-month outage, pinned.
+
+    call_ended resolved the tenant from its own payload. When that came back
+    empty the tenant stayed unbound, RLS hid the existing row, and the handler
+    took its "orphan" branch — which invented practice_id=uuid4(). That is a
+    guaranteed foreign-key violation: 500, five Retell retries, five identical
+    failures, and a call left at "in progress" with no duration, no transcript
+    and no metered minutes. 620 calls in that state, /health green throughout.
+
+    The row itself knows the tenant — it was written while the dialled number
+    was still available. Ask it.
+    """
+    from app.models.call import Call
+    from app.webhooks import retell as retell_mod
+
+    practice, _user = await seed_practice(
+        db_session, name="Finish Me Dental", clerk_org_id="org_finish",
+        clerk_user_id="user_finish",
+    )
+    db_session.add(Call(
+        id=uuid.uuid4(), practice_id=practice.id, retell_call_id="call_finish_me",
+        direction="inbound", from_number="+15550001111", to_number="+15550002222",
+        started_at=datetime.now(tz=UTC), status="in_progress",
+    ))
+    await db_session.commit()
+
+    # Exactly the failing condition: the payload tells us nothing about which
+    # clinic this is.
+    monkeypatch.setattr(retell_mod, "_verify_signature", lambda *a, **k: True)
+
+    async def unresolvable(_call_data, _agent_id):
+        return None
+
+    monkeypatch.setattr(retell_mod, "_resolve_practice_meta", unresolvable)
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "call_ended",
+        "call_id": "call_finish_me",
+        "call": {
+            "call_id": "call_finish_me",
+            "start_timestamp": 1_788_000_000_000,
+            "end_timestamp": 1_788_000_090_000,
+            "disconnection_reason": "user_hangup",
+        },
+    })
+    assert r.status_code == 200, r.text
+
+    await db_session.commit()  # see the handler's write
+    row = (await db_session.execute(
+        select(Call).where(Call.retell_call_id == "call_finish_me")
+    )).scalar_one()
+    await db_session.refresh(row)
+    assert row.status == "completed", "the call never left 'in progress'"
+    assert row.duration_seconds == 90
+    assert row.ended_at is not None
+    # And exactly one row: the orphan branch must not have minted a second.
+    count = (await db_session.execute(
+        select(func.count()).select_from(Call)
+        .where(Call.retell_call_id == "call_finish_me")
+    )).scalar_one()
+    assert count == 1
