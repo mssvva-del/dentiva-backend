@@ -380,6 +380,27 @@ class NexHealthClient(ReactivationSource):
         }
         return self._slots_from((await self._get("/appointment_slots", params)).json())
 
+    async def availability_count(self) -> int | None:
+        """How many bookable windows this location has defined in NexHealth.
+
+        NexHealth builds open slots from *availabilities*, not from the practice
+        software's schedule. A clinic can be fully synced — patients, providers,
+        appointments all flowing — and still answer "no openings" for every day
+        of the year because nobody defined when its chairs are bookable. From
+        the caller's side that is indistinguishable from a genuinely full book,
+        so it has to be asked about explicitly.
+
+        None means we could not ask; 0 means nobody can ever be booked.
+        """
+        try:
+            payload = (await self._get("/availabilities", {"per_page": 100})).json()
+        except (NexHealthError, NexHealthUnavailable):
+            return None
+        rows = payload.get("data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("availabilities") or []
+        return len(rows)
+
     async def create_appointment(
         self,
         *,
