@@ -292,3 +292,34 @@ async def test_an_open_dental_practice_resolves_to_its_own_bridge():
         pms_credentials={"bridge": "open_dental", "customer_key": "ck_live_abc"},
     )
     assert bridge_name(practice) == "open_dental"
+
+
+async def test_the_inbound_answer_carries_the_clinic_to_the_rest_of_the_call(
+    client, db_session
+):
+    """The dialled number is the only key that identifies a clinic, and Retell
+    hands it to us exactly once — on this webhook, before the call is answered.
+    Every later event (call_started, each tool call, call_ended) arrives without
+    a usable number, so unless the answer travels with the call, routing has to
+    guess. It guessed wrong once via a stale agent id, and once cleaned up it
+    dropped calls entirely: no calls row, every mid-conversation tool empty, and
+    the agent telling a live caller the schedule was full.
+    """
+    fleet = await _fleet(db_session, prefix="meta")
+
+    for practice in fleet[:5]:
+        r = await client.post("/webhooks/retell/inbound",
+                              json=_inbound(practice.ai_phone_number))
+        body = r.json()["call_inbound"]
+        assert body.get("metadata", {}).get("practice_id") == str(practice.id), (
+            f"{practice.ai_phone_number} did not carry its practice id forward"
+        )
+
+
+async def test_an_unroutable_call_carries_no_practice_id(client, db_session):
+    """A number we cannot place must hand back nothing — attaching a guess here
+    would launder it into every downstream event as fact."""
+    await _fleet(db_session, prefix="nometa")
+
+    r = await client.post("/webhooks/retell/inbound", json=_inbound("+16175559998"))
+    assert "metadata" not in r.json()["call_inbound"]

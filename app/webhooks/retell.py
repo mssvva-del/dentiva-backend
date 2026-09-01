@@ -768,7 +768,12 @@ async def _handle_call_started(payload: dict) -> dict:
 
     practice = await _resolve_practice_meta(call_data, agent_id)
     if practice is None:
+        # This used to be a log line nobody reads. A call we cannot attribute is
+        # a call whose every tool comes back empty while a patient is talking —
+        # the agent stays fluent and tells them the schedule is full. That has
+        # already happened once, and /health said "ok" throughout.
         logger.warning("call_started: no practice found, ignoring. call_id=%s", retell_call_id)
+        record_alert("call_unroutable", f"call={retell_call_id} to={to_number}")
         return {"ok": True, "warning": "no_practice"}
 
     async with _app_db.async_session_factory() as session:
@@ -2809,6 +2814,7 @@ async def retell_inbound_webhook(request: Request, response: Response) -> dict:
     inbound = payload.get("call_inbound") or {}
     agent_id = inbound.get("agent_id")
     to_number = inbound.get("to_number")
+    practice = None
     try:
         practice = await _resolve_practice_for_inbound(agent_id, to_number)
         variables = build_dynamic_variables(practice) if practice else dict(_VAR_FALLBACKS)
@@ -2817,4 +2823,19 @@ async def retell_inbound_webhook(request: Request, response: Response) -> dict:
         variables = dict(_VAR_FALLBACKS)
     logger.info("retell inbound: vars=%d practice=%s",
                 len(variables), "yes" if variables else "none")
-    return {"call_inbound": {"dynamic_variables": variables}}
+
+    body: dict = {"dynamic_variables": variables}
+    if practice is not None:
+        # Answer the tenant question ONCE, here, and let the answer ride with the
+        # call. This is the only moment Retell hands us the dialled number, and
+        # the number is the only reliable key we have: every clinic shares one
+        # agent, so agent_id cannot tell them apart. Later events (call_started,
+        # every tool call, call_ended) arrive without a usable number and were
+        # re-deriving the clinic from scratch — which is how a stale
+        # practices.retell_agent_id on a demo row collected a live clinic's
+        # calls, and how, once that row was cleaned up, routing had nothing left
+        # to key on and dropped the call entirely: no row, so every tool the
+        # agent invoked mid-conversation came back empty and it told the caller
+        # the schedule was full and the system was unavailable.
+        body["metadata"] = {"practice_id": str(practice.id)}
+    return {"call_inbound": body}
