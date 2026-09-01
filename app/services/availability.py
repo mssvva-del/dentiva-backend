@@ -393,6 +393,23 @@ async def compute_pms_slots(
         )
         return None
 
+    if not raw:
+        # Zero openings across the whole window is almost never a full diary.
+        # NexHealth builds slots from *availabilities*, which are configured
+        # separately from the sync: a clinic can have patients, providers and
+        # appointments all flowing and still offer nothing, forever. The caller
+        # hears "we're fully booked" and hangs up, and every screen we have says
+        # the integration is healthy — so ask the question that separates the
+        # two and put the answer where somebody will see it.
+        try:
+            configured = await client.availability_count()
+        except Exception:  # noqa: BLE001 — diagnosis must never break a call
+            configured = None
+        record_alert(
+            "pms_no_open_slots",
+            f"practice={practice.id} days={days_ahead} availabilities={configured}",
+        )
+
     provider_label = _provider_name(practice)
     slots: list[AvailableSlot] = []
     per_day: dict[str, int] = {}

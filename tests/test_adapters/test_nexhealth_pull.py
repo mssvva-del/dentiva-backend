@@ -361,3 +361,24 @@ async def test_an_explicit_subdomain_is_never_second_guessed():
 
     assert await _client(handler).first_provider_id() == "11"
     assert "/institutions" not in seen
+
+
+async def test_availability_count_separates_a_full_diary_from_an_empty_setup():
+    """NexHealth builds openings from *availabilities*, configured separately
+    from the sync. A clinic can have patients, providers and appointments all
+    flowing and still offer nothing, forever — and the caller just hears "we're
+    fully booked"."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        return httpx.Response(200, json={"data": [{"id": 1}, {"id": 2}]})
+
+    assert await _client(handler).availability_count() == 2
+
+    def broken(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        return httpx.Response(400, json={"description": "nope"})
+
+    # Could not ask is not the same as nobody can be booked.
+    assert await _client(broken).availability_count() is None
