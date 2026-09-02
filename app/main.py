@@ -343,6 +343,12 @@ async def health_detailed() -> JSONResponse:
             ),
             "pms_nexhealth": bool(settings.nexhealth_api_key),
             "pms_open_dental": bool(settings.open_dental_dev_key),
+            # Off by default, and its "write_disabled" status is deliberately not
+            # an alert — so a booking that never reached the clinic's calendar
+            # looks exactly like one that did. Every screen said the integration
+            # was healthy while pms_external_id stayed NULL on every appointment
+            # the product has taken. If it is false, we are not writing.
+            "pms_write": settings.pms_write_enabled,
             "call_review": bool(settings.anthropic_api_key),
             "error_tracking": bool(settings.sentry_dsn),
         },
