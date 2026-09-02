@@ -17,6 +17,7 @@ import logging
 import httpx
 
 from app.config import get_settings
+from app.observability.alerts import record_alert
 
 logger = logging.getLogger("dentiva.services.clerk_api")
 
@@ -66,10 +67,27 @@ async def create_organization(*, name: str) -> str | None:
     Which is why the caller must treat None as a refusal to create anything. A
     half-created clinic is worse than no button.
     """
+    org_id, _why = await create_organization_detailed(name=name)
+    return org_id
+
+
+async def create_organization_detailed(*, name: str) -> tuple[str | None, str]:
+    """Same, but says WHY it failed.
+
+    The reason was being written to a log line and thrown away, so the operator
+    got "Could not create the organization in Clerk" and no way to act on it.
+    Clerk answers with a plain sentence — "The organizations feature is not
+    enabled for this instance" — which is the difference between a dashboard
+    toggle and an afternoon.
+
+    Clerk's message describes configuration, never a person, so it is safe to
+    show an admin. The secret key is never in it: a bad key produces its own
+    message about authentication, not an echo of the credential.
+    """
     settings = get_settings()
     if not settings.clerk_secret_key:
         logger.info("CLERK_SECRET_KEY unset — cannot create a Clerk organization.")
-        return None
+        return None, "CLERK_SECRET_KEY is not set on this deployment."
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
@@ -78,15 +96,29 @@ async def create_organization(*, name: str) -> str | None:
                 json={"name": name},
             )
         if resp.status_code >= 400:
+            why = _clerk_reason(resp)
             logger.warning(
-                "Clerk organization create failed (%s): %s",
-                resp.status_code, resp.text[:200],
+                "Clerk organization create failed (%s): %s", resp.status_code, why
             )
-            return None
-        return resp.json().get("id")
-    except Exception:  # noqa: BLE001 — the caller refuses rather than half-creates
+            record_alert("clerk_org_create_failed", f"{resp.status_code}: {why[:120]}")
+            return None, f"Clerk said ({resp.status_code}): {why}"
+        return resp.json().get("id"), ""
+    except Exception as exc:  # noqa: BLE001 — the caller refuses rather than half-creates
         logger.exception("Clerk organization create errored")
-        return None
+        record_alert("clerk_org_create_failed", type(exc).__name__)
+        return None, f"Could not reach Clerk ({type(exc).__name__})."
+
+
+def _clerk_reason(resp: httpx.Response) -> str:
+    """Clerk's own sentence about a 4xx, or the raw body if it is not JSON."""
+    try:
+        errors = (resp.json() or {}).get("errors") or []
+        if errors:
+            first = errors[0]
+            return str(first.get("long_message") or first.get("message") or first)[:300]
+    except Exception:  # noqa: BLE001 — an error page is not a crash
+        pass
+    return resp.text[:200]
 
 
 async def revoke_org_invitation(*, clerk_org_id: str, clerk_invitation_id: str) -> bool:

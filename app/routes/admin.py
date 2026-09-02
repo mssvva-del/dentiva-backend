@@ -376,17 +376,20 @@ async def create_clinic(
     The clinic lands in onboarding at step one, exactly where it would be if the
     owner had signed up themselves — the panel skips the sign-up, not the setup.
     """
-    from app.services.clerk_api import create_org_invitation, create_organization
+    from app.services.clerk_api import (
+        create_org_invitation,
+        create_organization_detailed,
+    )
 
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="A clinic needs a name.")
 
-    clerk_org_id = await create_organization(name=name)
+    clerk_org_id, why = await create_organization_detailed(name=name)
     if not clerk_org_id:
         raise HTTPException(
             status_code=503,
-            detail=(
+            detail=(f"{why} " if why else "") + (
                 "Could not create the organization in Clerk, so no clinic was "
                 "created. A clinic without one cannot be signed in to."
             ),
