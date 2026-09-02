@@ -27,9 +27,9 @@ async def test_a_clinic_is_created_with_its_organization(client, db_session, mon
     await _staff(db_session)
 
     async def _org(*, name):
-        return "org_created_123"
+        return "org_created_123", ""
 
-    monkeypatch.setattr(clerk_api, "create_organization", _org)
+    monkeypatch.setattr(clerk_api, "create_organization_detailed", _org)
 
     r = await client.post(
         "/api/admin/clinics",
@@ -61,9 +61,12 @@ async def test_no_organization_means_no_clinic_row(client, db_session, monkeypat
     )).scalar_one()
 
     async def _no_org(*, name):
-        return None
+        # The route now asks for the reason too, so a refusal carries one — the
+        # operator used to get "could not create the organization" and no way to
+        # act on it.
+        return None, "Clerk said (403): organizations are not enabled."
 
-    monkeypatch.setattr(clerk_api, "create_organization", _no_org)
+    monkeypatch.setattr(clerk_api, "create_organization_detailed", _no_org)
 
     r = await client.post(
         "/api/admin/clinics", headers=_h("sa_create"), json={"name": "Ghost Dental"},
@@ -91,12 +94,12 @@ async def test_an_owner_invitation_failing_does_not_undo_the_clinic(
     await _staff(db_session)
 
     async def _org(*, name):
-        return "org_invite_fail"
+        return "org_invite_fail", ""
 
     async def _bad_invite(**kwargs):
         return None
 
-    monkeypatch.setattr(clerk_api, "create_organization", _org)
+    monkeypatch.setattr(clerk_api, "create_organization_detailed", _org)
     monkeypatch.setattr(clerk_api, "create_org_invitation", _bad_invite)
 
     r = await client.post(
@@ -117,9 +120,9 @@ async def test_a_nameless_clinic_is_refused(client, db_session, monkeypatch):
 
     async def _org(*, name):
         called.append(name)
-        return "org_x"
+        return "org_x", ""
 
-    monkeypatch.setattr(clerk_api, "create_organization", _org)
+    monkeypatch.setattr(clerk_api, "create_organization_detailed", _org)
     r = await client.post(
         "/api/admin/clinics", headers=_h("sa_create"), json={"name": "   "},
     )
@@ -138,7 +141,7 @@ async def test_a_clinic_user_cannot_create_clinics(client, db_session, monkeypat
     async def _org(*, name):
         raise AssertionError("reached Clerk without permission")
 
-    monkeypatch.setattr(clerk_api, "create_organization", _org)
+    monkeypatch.setattr(clerk_api, "create_organization_detailed", _org)
     r = await client.post(
         "/api/admin/clinics",
         headers={"X-Dev-Clerk-User-Id": "outsider", "X-Dev-Clerk-Org-Id": "org_out"},
