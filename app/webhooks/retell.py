@@ -22,6 +22,7 @@ import re
 import time
 import uuid
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select, text, update
@@ -1284,6 +1285,23 @@ async def _handle_check_availability(retell_call_id: str, args: dict) -> dict:
     }
 
 
+def _spoken_booking_time(when, tz_name: str | None) -> tuple[str, str]:
+    """A stored appointment as the CLINIC's own date and time.
+
+    appointment_at is UTC. The fresh-booking reply reports the slot the caller
+    chose, which is already local; the two idempotent replies read the row back
+    and were formatting UTC straight out — so a redelivered booking told a
+    patient in Massachusetts nine in the morning had become one in the
+    afternoon. They would arrive four hours late to an appointment that was
+    right all along.
+    """
+    try:
+        local = when.astimezone(ZoneInfo(tz_name)) if tz_name else when
+    except (ZoneInfoNotFoundError, ValueError):
+        local = when
+    return local.date().isoformat(), local.strftime("%H:%M")
+
+
 async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     # Phase 2: persist a real booking row + audit log.
     first_name = args.get("patient_first_name", "Unknown")
@@ -1345,12 +1363,15 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
                 )
             ).scalars().first()
             if existing is not None:
-                ts = existing.appointment_at
+                tz_name = (await session.execute(
+                    select(Practice.timezone).where(Practice.id == practice_id)
+                )).scalar_one_or_none()
+                d, t = _spoken_booking_time(existing.appointment_at, tz_name)
                 return {
                     "booked": True,
                     "appointment": {
-                        "date": ts.date().isoformat(),
-                        "time": ts.strftime("%H:%M"),
+                        "date": d,
+                        "time": t,
                         "provider": existing.provider_name or "Dr. Smith",
                         "procedure": existing.procedure_type or procedure,
                     },
@@ -1454,11 +1475,14 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
                     Booking.status == "confirmed",
                 ))).scalars().first()
             if dup is not None:  # this call already has a booking → idempotent success
-                ts = dup.appointment_at
+                d, t = _spoken_booking_time(
+                    dup.appointment_at,
+                    practice_obj.timezone if practice_obj else None,
+                )
                 return {
                     "booked": True,
                     "appointment": {
-                        "date": ts.date().isoformat(), "time": ts.strftime("%H:%M"),
+                        "date": d, "time": t,
                         "provider": dup.provider_name or "Dr. Smith",
                         "procedure": dup.procedure_type or procedure,
                     },
@@ -2770,6 +2794,16 @@ async def retell_webhook(request: Request, response: Response) -> dict:
         )
 
     payload = await request.json()
+    if not isinstance(payload, dict):
+        # A JSON array or a bare string is not something any handler can read.
+        return {"ok": True, "ignored": "payload was not an object"}
+    if not isinstance(payload.get("call"), dict):
+        # Every handler treats "call" as an object and reaches into it. One that
+        # arrived as a string raised AttributeError out of call_started — a 500,
+        # which Retell retries, so a single malformed delivery became a retry
+        # storm and the call still had no row. An absent call object is already
+        # handled gracefully everywhere; make a malformed one look the same.
+        payload.pop("call", None)
     event = payload.get("event")
     record_alert("webhook_event_seen", f"event={event or payload.get('name') or 'tool'}")
 
