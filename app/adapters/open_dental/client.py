@@ -20,10 +20,11 @@ against mocked Open Dental responses without touching the network.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 
+from app.adapters.nexhealth.models import PmsSlot
 from app.adapters.open_dental.interface import PMSAdapter
 from app.adapters.open_dental.models import (
     AvailableSlot,
@@ -33,6 +34,7 @@ from app.adapters.open_dental.models import (
     PMSProvider,
 )
 from app.config import get_settings
+from app.observability.alerts import record_alert
 from app.utils.resilience import make_timeout, retry_async
 
 logger = logging.getLogger("dentiva.pms.open_dental")
@@ -62,6 +64,12 @@ def _pattern_for(duration_minutes: int) -> str:
     A 60-min appt → 12 chars. Used when creating/rescheduling so the block has a
     length; the office can refine it later."""
     return "/" * max(1, duration_minutes // 5)
+
+
+def _digits(value: str) -> str:
+    """Just the digits, last ten. "+1 (555) 010-0199" and "5550100199" are the
+    same number written by two different people."""
+    return "".join(ch for ch in str(value) if ch.isdigit())[-10:]
 
 
 class OpenDentalClient(PMSAdapter):
@@ -152,13 +160,79 @@ class OpenDentalClient(PMSAdapter):
         return self._parse_patient(resp.json())
 
     async def get_patient_by_phone(self, phone: str) -> PMSPatient | None:
-        # TO VERIFY: exact phone query param against a sandbox. Open Dental search
-        # is by fields like Phone/WirelessPhone; we send a 'phone' param for now.
-        resp = await self._request("GET", "/patients", params={"phone": phone})
+        """The caller's own chart, or None.
+
+        Two things verified against Open Dental's hosted test database, both of
+        which the previous version got wrong:
+
+        The parameter is ``Phone``, capitalised. Lowercase ``phone`` is a 400,
+        so this lookup failed on every single call — the agent then treated a
+        returning patient as brand new and asked them for a date of birth their
+        office already has.
+
+        And the search is FUZZY. Sending "5550100199" returned a different
+        patient than "+15550100199" did. Taking rows[0] therefore risked
+        attaching a caller to a stranger's chart, and everything downstream —
+        their appointments, their history — would have been that stranger's. So
+        every candidate is checked against the number we actually dialled, and
+        nothing but an exact match is accepted.
+        """
+        resp = await self._request("GET", "/patients", params={"Phone": phone})
         rows = resp.json()
-        if isinstance(rows, list) and rows:
-            return self._parse_patient(rows[0])
-        return None
+        if not isinstance(rows, list):
+            return None
+        wanted = _digits(phone)
+        exact = [
+            row for row in rows
+            if any(_digits(row.get(f) or "") == wanted
+                   for f in ("WirelessPhone", "HmPhone", "WkPhone"))
+        ]
+        if len(exact) > 1:
+            # A household shares a phone. A parent's mobile sits on the
+            # children's charts, and picking one of them would file this visit
+            # against a person who did not call. Their own front desk asks who is
+            # calling; so do we, by treating the caller as somebody we do not yet
+            # recognise rather than as the wrong somebody.
+            record_alert("pms_patient_phone_ambiguous", f"matches={len(exact)}")
+            return None
+        return self._parse_patient(exact[0]) if exact else None
+
+    async def find_appointment_slots(
+        self,
+        *,
+        start_date: str,
+        days: int = 1,
+        slot_length: int = 60,
+        provider_ids: list[str] | None = None,
+    ) -> list[PmsSlot]:
+        """Open slots in the shape the availability service expects.
+
+        compute_pms_slots calls find_appointment_slots on whatever client the
+        bridge hands it. NexHealth and Kolla have one; Open Dental had only
+        check_availability, with a different signature and a different return
+        type — so the first real call to an Open Dental practice would have
+        raised AttributeError inside the availability path, which catches
+        NexHealth errors and nothing else, mid-conversation with a patient.
+
+        Never caught live because this adapter had never run against a server.
+        """
+        end = (
+            datetime.strptime(start_date, "%Y-%m-%d").date() + timedelta(days=days)
+        ).isoformat()
+        slots = await self.check_availability(
+            start_date, end,
+            length_minutes=slot_length,
+            prov_num=(provider_ids[0] if provider_ids else None),
+        )
+        return [
+            PmsSlot(
+                start_time=f"{s.date}T{s.time}:00",
+                provider_id=s.prov_num or "",
+                operatory_id=s.op_num,
+            )
+            for s in slots
+            if s.date and s.time
+        ]
 
     async def create_patient(
         self, first_name: str, last_name: str, phone: str, email: str | None = None

@@ -123,9 +123,13 @@ async def test_cancel_calls_break_endpoint():
     assert seen["body"]["sendToUnscheduledList"] == "true"
 
 
-async def test_get_patient_by_phone_returns_first_match():
+async def test_get_patient_by_phone_returns_the_chart_that_holds_the_number():
+    """This test used to assert a lowercase "phone" parameter and that we take
+    the first row back. Both were wrong, and neither had ever met a real server:
+    lowercase is a 400, and the search is fuzzy enough to return someone else.
+    Verified against Open Dental's hosted test database."""
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params["phone"] == "+15551234567"
+        assert request.url.params["Phone"] == "+15551234567"
         return httpx.Response(200, json=[
             {"PatNum": 7, "FName": "Maria", "LName": "Garcia",
              "WirelessPhone": "+15551234567", "Email": "m@x.com"},
@@ -256,3 +260,76 @@ async def test_post_write_not_retried_on_transient():
     with pytest.raises(PMSUnavailable):
         await c.create_patient("A", "B", "+15551234567")
     assert calls["n"] == 1  # no retry on a write
+
+
+# ── Verified against Open Dental's hosted test database ──────────────────────
+def _patient_row(pat_num, wireless="", hm="", wk="", fname="A", lname="B"):
+    return {"PatNum": pat_num, "FName": fname, "LName": lname,
+            "WirelessPhone": wireless, "HmPhone": hm, "WkPhone": wk}
+
+
+async def test_the_phone_parameter_is_capitalised():
+    """Lowercase "phone" is a 400. This lookup therefore failed on every call,
+    and the agent treated returning patients as brand new — asking them for a
+    date of birth their own office already holds."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json=[_patient_row(7, wireless="+15551230000")])
+
+    p = await _client(handler).get_patient_by_phone("+15551230000")
+    assert seen["params"] == {"Phone": "+15551230000"}
+    assert p is not None and p.pms_external_id == "7"
+
+
+async def test_a_fuzzy_hit_that_is_not_the_number_is_rejected():
+    """Open Dental's phone search is fuzzy: searching one number returned a
+    patient whose number was different. Taking rows[0] would have filed the
+    caller's visit on a stranger's chart."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_patient_row(9, wireless="+15559998888")])
+
+    assert await _client(handler).get_patient_by_phone("+15551230000") is None
+
+
+async def test_two_charts_on_one_number_are_refused_not_guessed():
+    """A household shares a phone — a parent's mobile sits on the children's
+    charts. Confirmed on the test database, where two patients carried the same
+    number. Picking one files the visit against a person who did not call."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            _patient_row(1, wireless="(555)123-0000", lname="Parent"),
+            _patient_row(2, wireless="+15551230000", lname="Child"),
+        ])
+
+    assert await _client(handler).get_patient_by_phone("+15551230000") is None
+
+
+async def test_the_same_number_written_differently_still_matches():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_patient_row(3, hm="(555) 123-0000")])
+
+    p = await _client(handler).get_patient_by_phone("+1 555 123 0000")
+    assert p is not None and p.pms_external_id == "3"
+
+
+async def test_find_appointment_slots_exists_and_speaks_the_shared_shape():
+    """compute_pms_slots calls find_appointment_slots on whatever client the
+    bridge returns. This adapter only had check_availability, with a different
+    signature and return type — so the first real Open Dental call would have
+    raised AttributeError inside the availability path, which catches NexHealth
+    errors and nothing else, in the middle of a conversation with a patient."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/appointments/Slots")
+        return httpx.Response(200, json=[
+            {"DateTimeStart": "2026-09-09 10:00:00", "ProvNum": 1, "OpNum": 2},
+            {"DateTimeStart": "2026-09-09 14:30:00", "ProvNum": 1, "OpNum": 2},
+        ])
+
+    slots = await _client(handler).find_appointment_slots(
+        start_date="2026-09-02", days=14, slot_length=60)
+    assert [s.start_time for s in slots] == [
+        "2026-09-09T10:00:00", "2026-09-09T14:30:00",
+    ]
+    assert slots[0].provider_id == "1" and slots[0].operatory_id == "2"
