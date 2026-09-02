@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class BookingSummary(BaseModel):
@@ -35,6 +35,19 @@ class BookingListResponse(BaseModel):
 
 class BookingStatusUpdate(BaseModel):
     status: str  # confirmed | completed | cancelled | no_show
+
+
+class BookingEdit(BaseModel):
+    """A change made by a person, not by the agent.
+
+    Every field optional: an edit names only what it changes, so moving a time
+    cannot silently blank a procedure somebody typed in last week.
+    """
+
+    appointment_at: datetime | None = None
+    duration_minutes: int | None = Field(default=None, ge=5, le=480)
+    procedure_type: str | None = Field(default=None, max_length=120)
+    provider_name: str | None = Field(default=None, max_length=120)
 
 
 class DashboardToday(BaseModel):
