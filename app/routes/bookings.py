@@ -31,6 +31,15 @@ from app.schemas.booking import (
 )
 from app.utils.redact import redact_name
 
+
+def _full_name(patient) -> str | None:
+    """The name the front desk needs to greet someone, not an initial."""
+    if patient is None:
+        return None
+    parts = [(patient.first_name or "").strip(), (patient.last_name or "").strip()]
+    return " ".join(p for p in parts if p) or None
+
+
 router = APIRouter(prefix="/api/bookings", tags=["bookings"])
 
 # Statuses staff can set from the dashboard — the same canonical set the DB CHECK
@@ -91,6 +100,8 @@ async def list_bookings(
             BookingSummary(
                 id=str(b.id),
                 patient_name_redacted=name,
+                patient_name=_full_name(patient),
+                patient_phone=patient.phone if patient else None,
                 patient_id=str(b.patient_id),
                 appointment_at=b.appointment_at,
                 duration_minutes=b.duration_minutes,
@@ -201,6 +212,8 @@ async def get_booking(
     return BookingSummary(
         id=str(b.id),
         patient_name_redacted=name,
+        patient_name=_full_name(patient),
+        patient_phone=patient.phone if patient else None,
         patient_id=str(b.patient_id),
         appointment_at=b.appointment_at,
         duration_minutes=b.duration_minutes,
@@ -285,6 +298,8 @@ async def update_booking_status(
     return BookingSummary(
         id=str(b.id),
         patient_name_redacted=name,
+        patient_name=_full_name(patient),
+        patient_phone=patient.phone if patient else None,
         patient_id=str(b.patient_id),
         appointment_at=b.appointment_at,
         duration_minutes=b.duration_minutes,
