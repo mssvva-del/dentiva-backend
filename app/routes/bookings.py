@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
@@ -73,16 +73,23 @@ async def list_bookings(
 ) -> BookingListResponse:
     today = datetime.now(UTC).date()
     start = from_date or today
-    end = to_date or (today + timedelta(days=30))
     start_dt = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
-    end_dt = datetime.combine(end, datetime.max.time(), tzinfo=UTC)
 
     base = (
         select(Booking)
         .where(Booking.practice_id == practice.id)
         .where(Booking.appointment_at >= start_dt)
-        .where(Booking.appointment_at <= end_dt)
     )
+    if to_date is not None:
+        # Only when somebody asked for it. The default used to stop thirty days
+        # out, so an appointment the agent booked for November simply was not on
+        # the screen in September — no empty state, no note about a range, just
+        # a shorter list. The clinic reasonably concluded the booking had been
+        # lost. A practice should see every appointment it has.
+        base = base.where(
+            Booking.appointment_at
+            <= datetime.combine(to_date, datetime.max.time(), tzinfo=UTC)
+        )
     if status:
         base = base.where(Booking.status == status)
 
@@ -108,6 +115,7 @@ async def list_bookings(
                 patient_name_redacted=name,
                 patient_name=_full_name(patient),
                 patient_phone=patient.phone if patient else None,
+                in_pms=bool(b.pms_external_id),
                 patient_id=str(b.patient_id),
                 appointment_at=b.appointment_at,
                 duration_minutes=b.duration_minutes,
@@ -139,16 +147,23 @@ async def export_bookings(
     """Export bookings as CSV. Returns all matching bookings (no pagination)."""
     today = datetime.now(UTC).date()
     start = from_date or today
-    end = to_date or (today + timedelta(days=30))
     start_dt = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
-    end_dt = datetime.combine(end, datetime.max.time(), tzinfo=UTC)
 
     base = (
         select(Booking)
         .where(Booking.practice_id == practice.id)
         .where(Booking.appointment_at >= start_dt)
-        .where(Booking.appointment_at <= end_dt)
     )
+    if to_date is not None:
+        # Only when somebody asked for it. The default used to stop thirty days
+        # out, so an appointment the agent booked for November simply was not on
+        # the screen in September — no empty state, no note about a range, just
+        # a shorter list. The clinic reasonably concluded the booking had been
+        # lost. A practice should see every appointment it has.
+        base = base.where(
+            Booking.appointment_at
+            <= datetime.combine(to_date, datetime.max.time(), tzinfo=UTC)
+        )
     if status:
         base = base.where(Booking.status == status)
 
@@ -181,7 +196,10 @@ async def export_bookings(
         ])
 
     output.seek(0)
-    filename = f"bookings_{start.isoformat()}_{end.isoformat()}.csv"
+    filename = (
+        f"bookings_{start.isoformat()}_"
+        f"{to_date.isoformat() if to_date else 'onwards'}.csv"
+    )
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
@@ -220,6 +238,7 @@ async def get_booking(
         patient_name_redacted=name,
         patient_name=_full_name(patient),
         patient_phone=patient.phone if patient else None,
+        in_pms=bool(b.pms_external_id),
         patient_id=str(b.patient_id),
         appointment_at=b.appointment_at,
         duration_minutes=b.duration_minutes,
@@ -314,6 +333,7 @@ async def update_booking_status(
         patient_name_redacted=name,
         patient_name=_full_name(patient),
         patient_phone=patient.phone if patient else None,
+        in_pms=bool(b.pms_external_id),
         patient_id=str(b.patient_id),
         appointment_at=b.appointment_at,
         duration_minutes=b.duration_minutes,
@@ -420,6 +440,7 @@ async def edit_booking(
         patient_name_redacted=name,
         patient_name=_full_name(patient),
         patient_phone=patient.phone if patient else None,
+        in_pms=bool(b.pms_external_id),
         patient_id=str(b.patient_id),
         appointment_at=b.appointment_at,
         duration_minutes=b.duration_minutes,

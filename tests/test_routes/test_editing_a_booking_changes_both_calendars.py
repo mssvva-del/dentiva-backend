@@ -197,3 +197,44 @@ async def test_the_edit_is_written_to_the_audit_log(client, db_session, monkeypa
     )).scalars().all()
     assert rows, "a person changed a patient's appointment and nothing recorded it"
     assert rows[0].audit_metadata["before"]["procedure_type"] == "cleaning"
+
+
+async def test_a_booking_months_out_is_still_on_the_list(client, db_session):
+    """The list stopped thirty days out by default. An appointment the agent
+    booked for November simply was not on the screen in September — no empty
+    state, no note about a range, just a shorter list. The clinic reasonably
+    concluded the booking had been lost.
+    """
+    at = datetime.now(UTC) + timedelta(days=61)
+    _practice, booking = await _setup(db_session, "h", at=at)
+
+    r = await client.get("/api/bookings", headers=_headers("h"))
+    assert r.status_code == 200, r.text
+    ids = [b["id"] for b in r.json()["bookings"]]
+    assert str(booking.id) in ids, "a real appointment was hidden by a default"
+
+
+async def test_a_booking_says_whether_the_practice_calendar_took_it(
+    client, db_session
+):
+    """A booking their software refused looks identical to one it accepted —
+    same badge, same row — and the patient has already been told they are
+    booked. It happened twice on this clinic in one afternoon."""
+    at = datetime.now(UTC) + timedelta(days=11)
+    practice, synced = await _setup(db_session, "i", at=at)
+
+    ours_only = Booking(
+        id=uuid.uuid4(), practice_id=practice.id, patient_id=synced.patient_id,
+        appointment_at=at + timedelta(days=1), duration_minutes=45,
+        procedure_type="cleaning", status="confirmed", source="ai_call",
+        pms_external_id=None,          # the PMS refused it
+    )
+    db_session.add(ours_only)
+    await db_session.commit()
+
+    r = await client.get("/api/bookings", headers=_headers("i"))
+    rows = {b["id"]: b["in_pms"] for b in r.json()["bookings"]}
+    assert rows[str(synced.id)] is True
+    assert rows[str(ours_only.id)] is False, (
+        "an appointment the clinic's calendar never took looks accepted"
+    )
