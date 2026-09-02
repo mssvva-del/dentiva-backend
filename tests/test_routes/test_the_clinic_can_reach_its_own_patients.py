@@ -24,6 +24,11 @@ from tests.conftest import seed_practice
 PHONE = "+16175550142"
 
 
+def _as(tag: str) -> dict[str, str]:
+    return {"X-Dev-Clerk-User-Id": f"u_reach_{tag}",
+            "X-Dev-Clerk-Org-Id": f"org_reach_{tag}"}
+
+
 async def _patient(db, practice_id) -> Patient:
     p = Patient(
         id=uuid.uuid4(), practice_id=practice_id,
@@ -47,7 +52,7 @@ async def test_a_callback_carries_the_number_to_call(client, db_session):
     ))
     await db_session.commit()
 
-    r = await client.get("/api/callbacks", headers={"X-Dev-Clerk-User-Id": "u_reach_a", "X-Dev-Clerk-Org-Id": "org_reach_a"})
+    r = await client.get("/api/callbacks", headers=_as("a"))
     assert r.status_code == 200, r.text
     row = r.json()["callbacks"][0]
     assert row["patient_phone"] == PHONE, "the clinic cannot return this call"
@@ -68,7 +73,7 @@ async def test_a_waitlist_entry_carries_the_number_to_call(client, db_session):
     ))
     await db_session.commit()
 
-    r = await client.get("/api/waitlist", headers={"X-Dev-Clerk-User-Id": "u_reach_b", "X-Dev-Clerk-Org-Id": "org_reach_b"})
+    r = await client.get("/api/waitlist", headers=_as("b"))
     assert r.status_code == 200, r.text
     row = r.json()["entries"][0]
     # A waitlist exists to be phoned the moment somebody cancels.
@@ -90,7 +95,7 @@ async def test_a_booking_carries_the_patient_and_their_number(client, db_session
     ))
     await db_session.commit()
 
-    r = await client.get("/api/bookings", headers={"X-Dev-Clerk-User-Id": "u_reach_c", "X-Dev-Clerk-Org-Id": "org_reach_c"})
+    r = await client.get("/api/bookings", headers=_as("c"))
     assert r.status_code == 200, r.text
     row = r.json()["bookings"][0]
     assert row["patient_phone"] == PHONE, "cannot ring this patient to confirm"
