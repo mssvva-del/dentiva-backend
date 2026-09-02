@@ -104,7 +104,14 @@ async def recording_url_for_call(retell_call_id: str, *, transport=None) -> str 
         call = await _request("GET", f"/v2/get-call/{retell_call_id}", transport=transport)
     except (RetellError, RetellNotConfigured):
         return None
-    url = call.get("recording_url")
+    # Retell names the field by the agent's data-storage setting, and ours is
+    # not the same on every call: "everything" gives recording_url, while
+    # "everything_except_pii" gives ONLY scrubbed_recording_url and leaves
+    # recording_url null. Reading one name meant the play button worked on some
+    # calls and rendered 0:00 / 0:00 on others, with no pattern a clinic could
+    # see — and the ones it failed on were the ones storing least, which is to
+    # say the ones we would rather they could still listen to.
+    url = call.get("recording_url") or call.get("scrubbed_recording_url")
     return str(url) if url else None
 
 

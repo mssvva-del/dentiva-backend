@@ -100,3 +100,56 @@ async def test_a_call_with_no_recording_shows_none(client, db_session):
     )
     assert r.status_code == 200
     assert r.json()["recording_url"] is None
+
+
+async def test_a_scrubbed_recording_is_still_a_recording(monkeypatch):
+    """Retell names the field by the agent's data-storage setting, and ours is
+    not the same on every call. "everything" gives recording_url;
+    "everything_except_pii" gives ONLY scrubbed_recording_url and leaves
+    recording_url null.
+
+    Reading one name made the play button work on some calls and render
+    0:00 / 0:00 on others, with no pattern a clinic could see — and it failed on
+    exactly the calls storing least, which are the ones we would rather they
+    could still listen to. A live clinic pressed play on a real patient's call
+    and got silence.
+    """
+    from app.services import retell_admin
+
+    async def _scrubbed_only(method, path, *, transport=None):
+        return {
+            "call_id": "c1",
+            "data_storage_setting": "everything_except_pii",
+            "recording_url": None,
+            "scrubbed_recording_url": "https://cdn.example/scrubbed.wav",
+        }
+
+    monkeypatch.setattr(retell_admin, "_request", _scrubbed_only)
+    assert await retell_admin.recording_url_for_call("c1") == (
+        "https://cdn.example/scrubbed.wav"
+    )
+
+
+async def test_the_unscrubbed_link_still_wins_when_there_is_one(monkeypatch):
+    from app.services import retell_admin
+
+    async def _both(method, path, *, transport=None):
+        return {
+            "recording_url": "https://cdn.example/full.wav",
+            "scrubbed_recording_url": "https://cdn.example/scrubbed.wav",
+        }
+
+    monkeypatch.setattr(retell_admin, "_request", _both)
+    assert await retell_admin.recording_url_for_call("c1") == (
+        "https://cdn.example/full.wav"
+    )
+
+
+async def test_no_recording_at_all_is_still_none(monkeypatch):
+    from app.services import retell_admin
+
+    async def _none(method, path, *, transport=None):
+        return {"recording_url": None, "scrubbed_recording_url": None}
+
+    monkeypatch.setattr(retell_admin, "_request", _none)
+    assert await retell_admin.recording_url_for_call("c1") is None
