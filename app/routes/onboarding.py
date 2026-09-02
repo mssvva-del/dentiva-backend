@@ -90,12 +90,14 @@ async def _audit(db: AsyncSession, practice: Practice, user: User, action: str,
 def _state(practice: Practice) -> OnboardingState:
     from app.config import get_settings
     from app.services.call_routing import forwarding_instruction
+    from app.services.knowledge_gaps import gap_summary
 
     settings = get_settings()
     # This clinic's own provisioned number; the global env number is the
     # single-tenant fallback for practices provisioned before NUM-1.
     ai_number = practice.ai_phone_number or settings.retell_from_number or None
     return OnboardingState(
+        knowledge_gaps=gap_summary(practice),
         practice_id=str(practice.id),
         status=practice.status,
         onboarding_step=practice.onboarding_step,
