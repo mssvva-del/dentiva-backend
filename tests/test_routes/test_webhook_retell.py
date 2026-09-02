@@ -181,3 +181,32 @@ async def test_call_ended_finishes_the_call_when_the_payload_cannot_name_the_cli
         .where(Call.retell_call_id == "call_finish_me")
     )).scalar_one()
     assert count == 1
+
+
+async def test_our_own_forgery_probe_is_refused_quietly(client, monkeypatch):
+    """The monitor pokes this endpoint every hour with no signature to prove a
+    forgery is refused. Refusing it is the PASS condition — and it was raising a
+    paging alert, so production sat at "degraded" around the clock and the real
+    alerts arrived into a list nobody trusted.
+
+    Still 401. Only the loudness changes, so an attacker who copies the header
+    gains nothing but a quieter line in a log we still keep.
+    """
+    from app.webhooks import retell as retell_mod
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        retell_mod, "record_alert", lambda k, d="", **kw: seen.append((k, d))
+    )
+    monkeypatch.setattr(retell_mod, "_verify_signature", lambda *a, **k: False)
+
+    r = await client.post(
+        "/webhooks/retell", json={"event": "call_ended"},
+        headers={"User-Agent": "dentovox-monitor"},
+    )
+    assert r.status_code == 401
+    kinds = [k for k, _ in seen]
+    assert "webhook_forgery_probe_refused" in kinds
+    assert "webhook_signature_rejected" not in kinds, (
+        "our own passing self-test must not page"
+    )

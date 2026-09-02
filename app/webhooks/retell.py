@@ -2471,17 +2471,23 @@ async def _page_clinic_urgent_callback(
     a failed page must never fail the callback itself (send_sms already alerts).
     """
     row = (await session.execute(
-        select(Practice.name, Practice.transfer_phone_number, Practice.phone_number)
+        select(Practice.name, Practice.transfer_phone_number, Practice.phone_number,
+               Practice.is_canary)
         .where(Practice.id == practice_id)
     )).first()
     if row is None:
         return
-    name, transfer_to, main_to = row
+    name, transfer_to, main_to, is_canary = row
     dest = transfer_to or main_to
     if not dest:
         record_alert("urgent_callback_unpageable", f"practice={practice_id}")
         return
-    _fire_sms(critical="urgent_callback", coro=page_clinic_urgent_callback(
+    # A page that never left is a broken promise — the caller was told the team
+    # had been notified. That holds for a real clinic and never for the canary:
+    # nobody was told anything, because nobody called. Watching it there turned
+    # the hourly probe into an hourly page and kept production at "degraded".
+    _fire_sms(critical=None if is_canary else "urgent_callback",
+              coro=page_clinic_urgent_callback(
         to=dest,
         practice_name=name or "Dentovox",
         first_name=first_name,
@@ -2745,8 +2751,20 @@ async def retell_webhook(request: Request, response: Response) -> dict:
         # metered minutes — because call_started/call_ended stopped landing, and
         # there was no way to tell a wrong secret from a vendor that had gone
         # quiet. It is also the signal a forged webhook would raise.
-        record_alert("webhook_signature_rejected",
-                     f"present={bool(signature)} bytes={len(raw_body)}")
+        # Our own monitor pokes this endpoint every hour with no signature to
+        # prove a forgery is refused. Refusing it is the pass condition — and it
+        # was raising a paging alert, so production sat at "degraded" around the
+        # clock and the real alerts arrived into a list nobody trusted.
+        #
+        # The User-Agent only changes how loudly we record it. The request is
+        # refused either way, so an attacker who copies the header gains nothing
+        # but a quieter line in a log we still keep.
+        is_our_probe = request.headers.get("user-agent") == "dentovox-monitor"
+        record_alert(
+            "webhook_forgery_probe_refused" if is_our_probe
+            else "webhook_signature_rejected",
+            f"present={bool(signature)} bytes={len(raw_body)}",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Bad webhook signature."
         )

@@ -217,3 +217,18 @@ def test_signals_that_fire_on_healthy_work_do_not_page():
     for paging in ("pms_no_open_slots", "pms_providers_error", "call_unroutable",
                    "webhook_handler_failed", "webhook_signature_rejected"):
         assert paging not in NON_PAGING_KINDS
+
+
+def test_the_hourly_security_self_test_does_not_page():
+    """The monitor pokes /webhooks/retell every hour with no signature to prove
+    a forgery is refused. Refusing it is the PASS condition, and it was raising
+    a paging alert — so production sat at "degraded" around the clock and every
+    real alert arrived into a list nobody trusted.
+
+    A rejection from anyone else still pages: that is a forged webhook, or our
+    own secret gone wrong, and both matter.
+    """
+    from app.observability.alerts import NON_PAGING_KINDS
+
+    assert "webhook_forgery_probe_refused" in NON_PAGING_KINDS
+    assert "webhook_signature_rejected" not in NON_PAGING_KINDS

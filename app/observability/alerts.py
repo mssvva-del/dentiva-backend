@@ -65,6 +65,9 @@ NON_PAGING_KINDS = frozenset({
     # healthy client, and an alert that fires on correct behaviour is how a team
     # learns to scroll past the list.
     "pms_subdomain_resolved",
+    # The hourly security self-test, passing. An unsigned webhook was refused
+    # because that is what we built it to do.
+    "webhook_forgery_probe_refused",
 })
 
 
