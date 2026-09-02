@@ -45,8 +45,16 @@ _ACCEPT = "application/vnd.Nexhealth+json;version=2"
 # without this every live request fails. Identify ourselves explicitly.
 _UA = "Dentovox/1.0 (+https://dentovox.com)"
 
+# The API version we are written against. Sending nothing does NOT mean "latest"
+# — NexHealth falls back to the legacy 2.2 API, which is where /appointment_slots
+# and /availabilities live. We were calling both, getting empty results, and
+# reading that as "this clinic has no schedule". Their support named it: those
+# endpoints "can only be used with the legacy, deprecated version of our API".
+# v3.0.0 calls them /available_slots and /working_hours.
+_API_VERSION = "v3.0.0"
+
 # Base headers on every authenticated call.
-_BASE_HEADERS = {"Accept": _ACCEPT, "User-Agent": _UA}
+_BASE_HEADERS = {"Accept": _ACCEPT, "User-Agent": _UA, "Nex-Api-Version": _API_VERSION}
 
 
 def _money_to_cents(value: object) -> int:
@@ -70,7 +78,10 @@ def _balance_to_cents(balance: object) -> int:
 
 # Paths whose request carries no patient data, so a 4xx body can be quoted back
 # into an alert. Everything else stays status-and-path only.
-_BODY_SAFE_PATHS = frozenset({"/providers", "/locations", "/appointment_slots"})
+_BODY_SAFE_PATHS = frozenset({
+    "/providers", "/locations", "/available_slots", "/working_hours",
+    "/appointment_types", "/institutions",
+})
 
 
 def _why(resp: httpx.Response) -> str:
@@ -355,6 +366,10 @@ class NexHealthClient(ReactivationSource):
         """Open slots from start_date over N days (used for the anti-double-book
         re-check before writing an appointment back).
 
+        v3.0.0 calls this ``/available_slots``. The old ``/appointment_slots`` is
+        the legacy 2.2 endpoint and answers an empty list rather than an error,
+        which reads exactly like a clinic with no free time.
+
         ``pids[]`` is REQUIRED, not optional. Without it NexHealth answers 400
         and every caller fell back to our own calendar — so a clinic whose PMS
         was connected and healthy was still offered times from our book, and no
@@ -378,13 +393,15 @@ class NexHealthClient(ReactivationSource):
             "pids[]": pids,
             "slot_length": slot_length,
         }
-        return self._slots_from((await self._get("/appointment_slots", params)).json())
+        return self._slots_from((await self._get("/available_slots", params)).json())
 
     async def availability_count(self) -> int | None:
         """How many bookable windows this location has defined in NexHealth.
 
-        NexHealth builds open slots from *availabilities*, not from the practice
-        software's schedule. A clinic can be fully synced — patients, providers,
+        NexHealth builds open slots from *working hours*, not from the practice
+        software's schedule. (Called "availabilities" in the legacy 2.2 API,
+        which is what we were asking, and which answers empty rather than
+        erroring.) A clinic can be fully synced — patients, providers,
         appointments all flowing — and still answer "no openings" for every day
         of the year because nobody defined when its chairs are bookable. From
         the caller's side that is indistinguishable from a genuinely full book,
@@ -393,12 +410,12 @@ class NexHealthClient(ReactivationSource):
         None means we could not ask; 0 means nobody can ever be booked.
         """
         try:
-            payload = (await self._get("/availabilities", {"per_page": 100})).json()
+            payload = (await self._get("/working_hours", {"per_page": 100})).json()
         except (NexHealthError, NexHealthUnavailable):
             return None
         rows = payload.get("data") or []
         if isinstance(rows, dict):
-            rows = rows.get("availabilities") or []
+            rows = rows.get("working_hours") or rows.get("availabilities") or []
         return len(rows)
 
     async def create_appointment(

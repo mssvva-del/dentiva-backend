@@ -382,3 +382,58 @@ async def test_availability_count_separates_a_full_diary_from_an_empty_setup():
 
     # Could not ask is not the same as nobody can be booked.
     assert await _client(broken).availability_count() is None
+
+
+async def test_every_call_declares_the_api_version_we_are_written_against():
+    """Sending no version header does NOT mean "latest". NexHealth falls back to
+    the legacy 2.2 API, where /appointment_slots and /availabilities live — both
+    of which answer an empty list rather than an error.
+
+    So the clinic looked like a practice with no schedule and no free time, for
+    days, while its calendar was fine. Their support named it outright.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        seen.append(request.headers.get("Nex-Api-Version", "<missing>"))
+        return httpx.Response(200, json={"data": []})
+
+    c = _client(handler)
+    await c.list_locations()
+    await c.provider_ids()
+    assert seen, "no request was made"
+    assert set(seen) == {"v3.0.0"}, f"version header was {set(seen)}"
+
+
+async def test_slots_come_from_the_v3_endpoint():
+    """/appointment_slots is the legacy path. Asking it returns [] forever."""
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        paths.append(request.url.path)
+        if request.url.path == "/providers":
+            return httpx.Response(200, json={"data": [{"id": 5}]})
+        return httpx.Response(200, json={"data": []})
+
+    await _client(handler).find_appointment_slots(start_date="2026-09-10", days=7)
+    assert "/available_slots" in paths, paths
+    assert "/appointment_slots" not in paths, "still calling the deprecated endpoint"
+
+
+async def test_working_hours_is_what_we_count():
+    """Called "availabilities" in 2.2. A clinic with a perfectly good schedule
+    reported zero, and we read that as "nobody can ever be booked"."""
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "T"}})
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"data": [{"id": 1}, {"id": 2}, {"id": 3}]})
+
+    assert await _client(handler).availability_count() == 3
+    assert paths == ["/working_hours"], paths
