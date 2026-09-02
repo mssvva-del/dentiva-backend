@@ -38,6 +38,14 @@ def _mask_phone(phone: str | None) -> str | None:
     return f"(•••) •••-{digits[-4:]}"
 
 
+def _full_name(patient) -> str | None:
+    """The name the front desk greets somebody by, not an initial."""
+    if patient is None:
+        return None
+    parts = [(patient.first_name or "").strip(), (patient.last_name or "").strip()]
+    return " ".join(x for x in parts if x) or None
+
+
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
@@ -46,6 +54,11 @@ class PatientSummary(BaseModel):
     patient_id: str
     name_redacted: str | None
     phone_masked: str | None
+    # The practice's own patient, on the practice's own screen. Masking these was
+    # a habit from our cross-tenant admin views; here it left the front desk with
+    # a card they could not act on — no way to ring the person the card is about.
+    name: str | None = None
+    phone: str | None = None
     last_visit_date: str | None      # ISO date or null
     next_visit_date: str | None      # ISO date or null
     total_visits: int
@@ -154,6 +167,8 @@ async def list_patients(
                 patient_id=str(p.id),
                 name_redacted=redact_name(p.first_name, p.last_name),
                 phone_masked=_mask_phone(p.phone),
+                name=_full_name(p),
+                phone=p.phone,
                 last_visit_date=last_visit.date().isoformat() if last_visit else None,
                 next_visit_date=next_visit.date().isoformat() if next_visit else None,
                 total_visits=len(completed),
@@ -394,6 +409,11 @@ class PatientDetailResponse(BaseModel):
     patient_id: str
     name_redacted: str | None
     phone_masked: str | None
+    # The practice's own patient, on the practice's own screen. Masking these was
+    # a habit from our cross-tenant admin views; here it left the front desk with
+    # a card they could not act on — no way to ring the person the card is about.
+    name: str | None = None
+    phone: str | None = None
     status: str
     last_visit_date: str | None
     next_visit_date: str | None
@@ -475,6 +495,8 @@ async def get_patient_detail(
         patient_id=str(patient.id),
         name_redacted=redact_name(patient.first_name, patient.last_name),
         phone_masked=_mask_phone(patient.phone),
+        name=_full_name(patient),
+        phone=patient.phone,
         status=status,
         last_visit_date=last_visit.date().isoformat() if last_visit else None,
         next_visit_date=next_visit.date().isoformat() if next_visit else None,

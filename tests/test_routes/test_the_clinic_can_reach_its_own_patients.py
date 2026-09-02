@@ -101,3 +101,27 @@ async def test_a_booking_carries_the_patient_and_their_number(client, db_session
     assert row["patient_phone"] == PHONE, "cannot ring this patient to confirm"
     assert row["patient_name"] == "Miriam Okonkwo"
     assert row["patient_name_redacted"] == "Miriam O."
+
+
+async def test_a_patient_card_carries_the_name_and_number(client, db_session):
+    """The card exists so the front desk can act on the person it describes.
+    "Even L." and "(•••) •••-0377" describe nobody they can ring."""
+    practice, _ = await seed_practice(
+        db_session, name="Reach D", clerk_org_id="org_reach_d",
+        clerk_user_id="u_reach_d",
+    )
+    patient = await _patient(db_session, practice.id)
+
+    listed = await client.get("/api/patients", headers=_as("d"))
+    assert listed.status_code == 200, listed.text
+    row = listed.json()["patients"][0]
+    assert row["phone"] == PHONE
+    assert row["name"] == "Miriam Okonkwo"
+
+    card = await client.get(f"/api/patients/{patient.id}", headers=_as("d"))
+    assert card.status_code == 200, card.text
+    body = card.json()
+    assert body["phone"] == PHONE, "the card cannot be acted on"
+    assert body["name"] == "Miriam Okonkwo"
+    # The masked values stay while a dashboard mid-deploy still reads them.
+    assert body["name_redacted"] == "Miriam O."
