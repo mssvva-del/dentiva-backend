@@ -347,7 +347,7 @@ async def test_readiness_names_what_is_missing(client, db_session):
     # The ones that degrade the agent without stopping it. Saying which is which
     # is the difference between "we cannot launch" and "it will not name your
     # hygienist yet".
-    assert items["insurances"]["blocking"] is False
+    assert items["kb:insurances"]["blocking"] is False
     assert items["emergency"]["blocking"] is False
     # Every unfinished item carries the sentence to read to the clinic.
     for item in items.values():
@@ -380,7 +380,7 @@ async def test_a_finished_clinic_shows_what_only_the_carrier_knows(client, db_se
     items = {i["key"]: i for i in r.json()["readiness"]}
 
     assert items["baa"]["done"] and items["number"]["done"] and items["hours"]["done"]
-    assert items["providers"]["done"] and items["insurances"]["done"]
+    assert items["kb:providers"]["done"] and items["kb:insurances"]["done"]
     assert items["emergency"]["done"]
     # The one thing that is never green from here.
     assert items["forwarding"]["done"] is False

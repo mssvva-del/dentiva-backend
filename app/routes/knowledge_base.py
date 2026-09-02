@@ -32,6 +32,7 @@ from app.models.audit_log import AuditLog
 from app.models.practice import Practice
 from app.models.user import User
 from app.schemas.knowledge_base import KnowledgeBase, KnowledgeBaseResponse
+from app.services.knowledge_gaps import gap_summary
 
 router = APIRouter(prefix="/api/knowledge-base", tags=["knowledge_base"])
 
@@ -106,3 +107,23 @@ async def put_knowledge_base(
     return KnowledgeBaseResponse(
         knowledge_base=KnowledgeBase(**kb_raw) if kb_raw else None
     )
+
+
+@router.get("/gaps")
+async def knowledge_base_gaps(
+    practice: Practice = Depends(get_current_practice),
+    _user: User = Depends(require_permission(VIEW_DASHBOARD)),
+) -> dict:
+    """What the agent still cannot answer about this practice.
+
+    A clinic goes live with whatever its website happened to mention. This
+    practice's had no clinicians, no cancellation policy and no parking, so its
+    agent met real patients answering "the team will confirm that" to questions
+    a front desk answers in four words — and the only way anyone found out was
+    the owner reading transcripts.
+
+    Each gap carries the question to ask the clinic and what the caller hears
+    until it is answered, because "incomplete profile" is not a reason anybody
+    acts on.
+    """
+    return gap_summary(practice)

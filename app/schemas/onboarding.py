@@ -167,3 +167,8 @@ class OnboardingState(BaseModel):
     # and nobody has to ask us where things stand.
     pms_install_key: str | None = None
     pms_connected: bool = False
+    # What the agent still cannot answer about this practice, in the clinic's own
+    # words. Filled from whatever the website analysis found; whatever it did not
+    # find, somebody has to type — and until this was here, that somebody was us,
+    # after a patient had already been told "the team will confirm that".
+    knowledge_gaps: dict | None = None

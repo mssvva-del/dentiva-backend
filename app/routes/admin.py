@@ -67,6 +67,7 @@ from app.schemas.knowledge_base import KnowledgeBase
 from app.schemas.onboarding import DayHours
 from app.services.bulk_onboarding import MAX_ROWS as BULK_MAX_ROWS
 from app.services.clerk_provisioning import is_placeholder_email
+from app.services.knowledge_gaps import knowledge_checklist
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -241,14 +242,25 @@ class ReadinessItem(BaseModel):
     blocking: bool = True
 
 
+# Short names for the shared knowledge list, so this screen reads as a checklist
+# rather than as field paths.
+_GAP_LABELS = {
+    "providers": "Providers named",
+    "insurances": "Insurances listed",
+    "appointment_types": "Appointment lengths",
+    "self_pay": "Self-pay answer",
+    "policies.cancellation": "Cancellation policy",
+    "policies.new_patient": "New-patient instructions",
+    "policies.late": "Running-late policy",
+    "policies.parking": "Parking",
+}
+
+
 def _readiness(practice: Practice, *, kb: dict, has_baa: bool,
                pms_bridge: str | None) -> list[ReadinessItem]:
     """What still has to be true. Order is the order to do them in."""
     hours = practice.business_hours or {}
     hours_set = any(v for v in hours.values())
-    providers = len(kb.get("providers") or [])
-    insurances = len(kb.get("insurances") or [])
-    appt_types = len(kb.get("appointment_types") or [])
     emergency = (kb.get("emergency") or {})
 
     return [
@@ -281,22 +293,22 @@ def _readiness(practice: Practice, *, kb: dict, has_baa: bool,
                  "set the agent says \"go to the ER\" — safe, and a patient the "
                  "practice loses.",
         ),
-        ReadinessItem(
-            key="providers", label="Providers named", done=providers > 0,
-            blocking=False,
-            todo="The agent cannot say who the patient will see.",
-        ),
-        ReadinessItem(
-            key="insurances", label="Insurances listed", done=insurances > 0,
-            blocking=False,
-            todo="\"Do you take Delta Dental?\" is the most common question on a "
-                 "dental front desk. Unanswerable without this.",
-        ),
-        ReadinessItem(
-            key="appointment_types", label="Appointment lengths", done=appt_types > 0,
-            blocking=False,
-            todo="Without these the agent books generic slots and the schedule "
-                 "drifts from reality.",
+        # Everything the AGENT needs to know comes from one list, shared with the
+        # clinic's own setup wizard. Naming providers, insurances and visit types
+        # here by hand meant this screen and the wizard could disagree about what
+        # a practice still owed us — and it left out the policies entirely, so a
+        # clinic could look ready here while its agent could not say what happens
+        # if you cancel late.
+        *(
+            ReadinessItem(
+                key=f"kb:{gap.field}",
+                label=_GAP_LABELS.get(gap.field, gap.field.replace("_", " ").title()),
+                done=gap.done,
+                blocking=gap.blocking,
+                todo=f"{gap.consequence} Ask: {gap.question}",
+            )
+            for gap in knowledge_checklist(practice)
+            if gap.field not in ("business_hours", "transfer_phone_number")
         ),
         ReadinessItem(
             key="pms", label="Calendar connected", done=bool(pms_bridge),
