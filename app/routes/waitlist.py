@@ -37,6 +37,10 @@ def _summary(entry: WaitlistEntry, patient: Patient | None) -> WaitlistSummary:
         call_id=str(entry.call_id) if entry.call_id else None,
         patient_name_redacted=redact_name(first_name, None),
         phone_last4=_phone_last4(phone),
+        patient_name=" ".join(
+            x for x in (first_name, patient.last_name if patient else None) if x
+        ) or None,
+        patient_phone=phone,
         procedure_type=entry.procedure_type,
         preferred_date=entry.preferred_date,
         preferred_time_window=entry.preferred_time_window,
