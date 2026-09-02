@@ -33,7 +33,7 @@ def _slot_handler(*, slot_free=True, create_ok=True):
         path = request.url.path
         if path == "/authenticates":
             return httpx.Response(200, json={"data": {"token": "T"}})
-        if path == "/appointment_slots":
+        if path == "/available_slots":   # v3.0.0; 2.2 called it /appointment_slots
             rows = (
                 [{"pid": "p1", "slots": [{"time": _START, "operatory_id": "op1"}]}]
                 if slot_free else
@@ -117,7 +117,7 @@ async def test_write_back_graceful_on_pms_unavailable(db_session):
     )
     bk = await _seed_booking(db_session, practice)
 
-    # /appointment_slots 500s → NexHealthUnavailable → graceful, no crash.
+    # /available_slots 500s → NexHealthUnavailable → graceful, no crash.
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/authenticates":
             return httpx.Response(200, json={"data": {"token": "T"}})
