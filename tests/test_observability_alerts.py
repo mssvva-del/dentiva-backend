@@ -232,3 +232,17 @@ def test_the_hourly_security_self_test_does_not_page():
 
     assert "webhook_forgery_probe_refused" in NON_PAGING_KINDS
     assert "webhook_signature_rejected" not in NON_PAGING_KINDS
+
+
+async def test_health_says_whether_we_are_writing_to_the_clinic_calendar(client):
+    """pms_write_enabled is off by default, and write_back_booking's
+    "write_disabled" status is deliberately not an alert. So a booking that never
+    reached the practice's calendar looked exactly like one that did — every
+    screen said the integration was healthy while pms_external_id stayed NULL on
+    every appointment this product has ever taken.
+
+    A switch that silent has to be visible somewhere.
+    """
+    body = (await client.get("/health/detailed")).json()
+    assert "pms_write" in body["capabilities"]
+    assert isinstance(body["capabilities"]["pms_write"], bool)
