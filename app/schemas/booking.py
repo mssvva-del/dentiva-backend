@@ -16,6 +16,11 @@ class BookingSummary(BaseModel):
     # front desk protects nobody and stops the work.
     patient_name: str | None = None
     patient_phone: str | None = None
+    # Did the practice's OWN calendar take it? A booking their software refused
+    # looks identical to one it accepted on every screen we have — same badge,
+    # same row — and the patient has already been told they are booked. The
+    # front desk needs to see which ones are only ours.
+    in_pms: bool = False
     patient_id: str
     appointment_at: datetime
     duration_minutes: int
