@@ -136,6 +136,17 @@ class NexHealthUnavailable(Exception):
     """Transient NexHealth failure (5xx / network / timeout) — retryable."""
 
 
+class NexHealthAlreadyCancelled(NexHealthError):
+    """The appointment we tried to cancel is already cancelled there.
+
+    Not a failure: the chair is free, which is the whole point of the call. It
+    reads as one because NexHealth refuses the write — "Cannot update already
+    cancelled appointment" — and a refusal we could not tell apart from a real
+    one left three appointments flagged as out of step with a calendar that
+    agreed with us perfectly.
+    """
+
+
 class NexHealthDuplicate(NexHealthError):
     """The patient we tried to create is already in the practice's system.
 
@@ -793,9 +804,17 @@ class NexHealthClient(ReactivationSource):
         the two clients take the same call so the caller never branches on which
         bridge it holds.
         """
-        await self._patch(
-            f"/appointments/{appointment_id}", {"appt": {"cancelled": True}}
-        )
+        try:
+            await self._patch(
+                f"/appointments/{appointment_id}", {"appt": {"cancelled": True}}
+            )
+        except NexHealthError as exc:
+            # Already cancelled there — by their front desk, or by an earlier
+            # attempt of ours that we never saw the answer to. The state we
+            # asked for is the state they are in.
+            if "already cancelled" in str(exc).lower():
+                raise NexHealthAlreadyCancelled(str(exc)) from exc
+            raise
 
     async def move_appointment(
         self, appointment_id: str, *, start_time: str, end_time: str | None = None  # noqa: ARG002

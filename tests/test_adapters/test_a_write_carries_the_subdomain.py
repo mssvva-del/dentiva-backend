@@ -69,3 +69,42 @@ async def test_a_clinic_that_gave_us_its_subdomain_is_never_asked():
     await _client(_routes(seen), subdomain="told-us").cancel_appointment("1")
     assert seen.get("PATCH") == "told-us"
     assert "institutions" not in seen
+
+
+@pytest.mark.asyncio
+async def test_already_cancelled_is_not_a_failure():
+    """Their front desk got there first, or an earlier attempt of ours landed
+    and we never saw the answer. Either way the chair is free — which is the
+    whole point of the call, and was being reported as a disagreement."""
+    from app.adapters.nexhealth.client import NexHealthAlreadyCancelled
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "t"}})
+        if request.url.path == "/institutions":
+            return httpx.Response(200, json=INSTITUTIONS)
+        return httpx.Response(400, json={
+            "error": ["Cannot update already cancelled appointment"]
+        })
+
+    with pytest.raises(NexHealthAlreadyCancelled):
+        await _client(handler).cancel_appointment("1677173079")
+
+
+@pytest.mark.asyncio
+async def test_any_other_refusal_is_still_a_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "t"}})
+        if request.url.path == "/institutions":
+            return httpx.Response(200, json=INSTITUTIONS)
+        return httpx.Response(400, json={"error": ["Appointment not found"]})
+
+    from app.adapters.nexhealth.client import (
+        NexHealthAlreadyCancelled,
+        NexHealthError,
+    )
+
+    with pytest.raises(NexHealthError) as caught:
+        await _client(handler).cancel_appointment("1")
+    assert not isinstance(caught.value, NexHealthAlreadyCancelled)

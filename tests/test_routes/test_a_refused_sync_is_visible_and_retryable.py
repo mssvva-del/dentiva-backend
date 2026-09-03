@@ -135,3 +135,32 @@ async def test_one_practice_cannot_resync_anothers_booking(client, db_session):
         f"/api/bookings/{booking.id}/resync", headers=_auth("org_sx", "user_sx")
     )
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_calendar_that_already_agrees_stops_showing_a_disagreement(
+    db_session, monkeypatch
+):
+    """Pressing Try again on an appointment their system has already cancelled
+    must clear the warning, not repeat it forever."""
+    from app.adapters.nexhealth.client import NexHealthAlreadyCancelled
+    from app.services.reactivation import writeback
+
+    practice, booking = await _seed(db_session, "f")
+    booking.pms_sync_status = "Your practice software refused it"
+    await db_session.commit()
+
+    class _AlreadyDone:
+        async def cancel_appointment(self, _id, **_kw):
+            raise NexHealthAlreadyCancelled(
+                "NexHealth 400 on PATCH /appointments/1 — "
+                "Cannot update already cancelled appointment"
+            )
+
+    monkeypatch.setattr(writeback, "_bridge_for", lambda *_a, **_kw: _wrap(_AlreadyDone()))
+    monkeypatch.setattr(writeback.get_settings(), "pms_write_enabled", True, raising=False)
+
+    outcome = await apply_cancellation(db_session, practice.id, booking)
+
+    assert outcome == "cancelled"
+    assert booking.pms_sync_status is None
