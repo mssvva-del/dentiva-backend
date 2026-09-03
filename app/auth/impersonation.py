@@ -75,6 +75,14 @@ IMPERSONATION_WRITE_PATHS: tuple[tuple[str, str], ...] = (
     ("PATCH", "/api/patients/"),   # the note the front desk keeps on a person
 )
 
+# Exact writes, not prefixes: asking the practice's calendar again after it
+# refused. The list above was written the same morning this button was, and
+# forgot it — the operator pressed Try again on a chair still blocked in a live
+# clinic and was told the change "isn't available while viewing a clinic".
+IMPERSONATION_WRITE_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("POST", "/resync"),
+)
+
 
 def _is_read(request: Request) -> bool:
     return request.method == "GET" or (
@@ -84,10 +92,15 @@ def _is_read(request: Request) -> bool:
 
 
 def _is_allowed_repair(request: Request) -> bool:
-    path = request.url.path
+    path = request.url.path.rstrip("/")
     return any(
         request.method == method and path.startswith(prefix)
         for method, prefix in IMPERSONATION_WRITE_PATHS
+    ) or any(
+        request.method == method
+        and path.startswith("/api/bookings/")
+        and path.endswith(suffix)
+        for method, suffix in IMPERSONATION_WRITE_SUFFIXES
     )
 
 # What an impersonating operator may see. Deliberately narrower than the clinic
