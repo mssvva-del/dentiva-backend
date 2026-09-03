@@ -238,3 +238,89 @@ async def test_a_booking_says_whether_the_practice_calendar_took_it(
     assert rows[str(ours_only.id)] is False, (
         "an appointment the clinic's calendar never took looks accepted"
     )
+
+
+async def test_a_slot_taken_while_the_caller_chose_is_not_confirmed(
+    client, db_session, monkeypatch
+):
+    """The times offered a minute ago were free a minute ago.
+
+    On a live pair of calls one patient took nine o'clock while the next was
+    still choosing, and the agent confirmed quarter past — inside the
+    forty-five minutes the first patient now owned. The practice's software
+    refused the write, correctly, and the caller had already been told they
+    were booked.
+    """
+    from app.webhooks import retell as retell_mod
+
+    practice, _ = await _setup(
+        db_session, "j", at=datetime.now(UTC) + timedelta(days=20)
+    )
+    # Connected to a PMS that no longer has the slot the agent picked.
+    monkeypatch.setattr(retell_mod, "pms_is_connected", lambda _p: True)
+
+    from app.adapters.open_dental.models import AvailableSlot
+
+    offered = AvailableSlot(date="2099-10-05", time="09:15", provider="our team")
+    calls: list[int] = []
+
+    async def _free_then_taken(*_a, **_kw):
+        # Free when the caller was offered it; gone by the time they said yes.
+        calls.append(1)
+        return [offered] if len(calls) == 1 else []
+
+    monkeypatch.setattr(retell_mod, "compute_pms_slots", _free_then_taken)
+
+    r = await client.post("/webhooks/retell", json={
+        "name": "book_appointment",
+        "call": {"call_id": f"taken-{uuid.uuid4().hex[:8]}",
+                 "metadata": {"practice_id": str(practice.id)}},
+        "args": {"patient_first_name": "Nadia", "patient_phone": "+16175550123",
+                 "preferred_date": "2099-10-05", "preferred_time": "09:15",
+                 "procedure": "cleaning"},
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("booked") is False, (
+        "the caller was told yes for a time the practice no longer had"
+    )
+    assert "just taken" in body["message"]
+
+
+async def test_a_pms_we_cannot_reach_does_not_block_a_live_booking(
+    client, db_session, monkeypatch
+):
+    """A slow or broken PMS must not cost the caller their appointment. Falling
+    back to our own book is what every other path here does, and the write-back
+    still refuses a genuine collision afterwards."""
+    from app.webhooks import retell as retell_mod
+
+    practice, _ = await _setup(
+        db_session, "k", at=datetime.now(UTC) + timedelta(days=21)
+    )
+    monkeypatch.setattr(retell_mod, "pms_is_connected", lambda _p: True)
+
+    from app.adapters.open_dental.models import AvailableSlot
+
+    offered = AvailableSlot(date="2099-10-06", time="09:15", provider="our team")
+    calls: list[int] = []
+
+    async def _then_down(*_a, **_kw):
+        # Answers while the caller is choosing, times out when they say yes.
+        calls.append(1)
+        if len(calls) == 1:
+            return [offered]
+        raise TimeoutError("PMS unreachable")
+
+    monkeypatch.setattr(retell_mod, "compute_pms_slots", _then_down)
+
+    r = await client.post("/webhooks/retell", json={
+        "name": "book_appointment",
+        "call": {"call_id": f"down-{uuid.uuid4().hex[:8]}",
+                 "metadata": {"practice_id": str(practice.id)}},
+        "args": {"patient_first_name": "Nadia", "patient_phone": "+16175550124",
+                 "preferred_date": "2099-10-06", "preferred_time": "09:15",
+                 "procedure": "cleaning"},
+    })
+    assert r.status_code == 200, r.text
+    assert r.json().get("booked") is True, "a PMS outage cost the caller a booking"
