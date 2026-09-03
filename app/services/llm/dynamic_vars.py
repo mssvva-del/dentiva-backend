@@ -27,7 +27,9 @@ def _clinic_now(tz_name: str | None) -> datetime:
         return datetime.utcnow()
 
 
-def build_dynamic_variables(practice: Practice) -> dict[str, str]:
+def build_dynamic_variables(
+    practice: Practice, caller_number: str | None = None
+) -> dict[str, str]:
     """Everything the live agent should know about THIS clinic on THIS call."""
     now = _clinic_now(practice.timezone)
     kb = _render_kb(practice.knowledge_base or {})
@@ -79,6 +81,14 @@ def build_dynamic_variables(practice: Practice) -> dict[str, str]:
         "clinic_transfer_number": (
             practice.transfer_phone_number or practice.phone_number or ""
         ),
+        # The number this call is coming FROM. Without it the agent has no way to
+        # know it: it asks "is this the best number for you?", the caller says
+        # yes, and the agent then has to put something in the phone field. It
+        # invents one — three unrelated callers to the first live clinic all
+        # ended up on the same fabricated number, so their reminders would have
+        # gone to a stranger and nobody could be found again when they rang back
+        # to cancel. Empty for a web call, which genuinely has no number.
+        "caller_number": caller_number or "",
         # The structured clinic brain (providers/visit types/insurance/policies).
         "kb_context": kb if kb else "No additional clinic details on file.",
     }
