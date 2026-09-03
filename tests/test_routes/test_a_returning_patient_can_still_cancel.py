@@ -226,3 +226,67 @@ async def test_the_other_persons_name_cancels_nothing(client, db_session):
         select(Booking).where(Booking.id == bid)
     )).scalar_one()
     assert fresh.status == "confirmed"
+
+
+async def test_a_household_where_the_birthday_helps_nobody_is_settled_by_name(
+    client, db_session
+):
+    """The live failure this fixes. Two records created by voice, neither
+    carrying a birthday, and the caller offers one anyway — the filter emptied
+    the set before the name could narrow it, and a real appointment could not be
+    cancelled."""
+    practice, _, booking = await _clinic(db_session, "g")
+    await set_tenant(db_session, practice.id)
+    db_session.add(Patient(
+        id=uuid.uuid4(), practice_id=practice.id, pms_external_id="r-g2",
+        first_name="Elena", last_name="Vasquez", phone=PHONE,
+    ))
+    await db_session.commit()
+
+    await _call_from(client, practice, PHONE, "ret-g")
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "ret-g",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": PHONE, "patient_first_name": "Ruth",
+                 "patient_dob": "1982-05-16"},  # nothing on file to check it
+    })
+    assert r.json().get("cancelled") is True, r.json()
+
+    pid, bid = practice.id, booking.id
+    db_session.expire_all()
+    await set_tenant(db_session, pid)
+    fresh = (await db_session.execute(
+        select(Booking).where(Booking.id == bid)
+    )).scalar_one()
+    assert fresh.status == "cancelled"
+
+
+async def test_a_chart_with_a_different_birthday_is_not_reached_by_name_either(
+    client, db_session
+):
+    """Ruth's record HAS a birthday and it disagrees. Saying her name must not
+    walk around that."""
+    practice, _, booking = await _clinic(db_session, "h", dob="1971-02-02")
+    await set_tenant(db_session, practice.id)
+    db_session.add(Patient(
+        id=uuid.uuid4(), practice_id=practice.id, pms_external_id="r-h2",
+        first_name="Tom", last_name="Delaney", phone=PHONE,
+    ))
+    await db_session.commit()
+
+    await _call_from(client, practice, PHONE, "ret-h")
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "ret-h",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": PHONE, "patient_first_name": "Ruth",
+                 "patient_dob": "1968-04-09"},
+    })
+    assert r.json().get("cancelled") is False
+
+    pid, bid = practice.id, booking.id
+    db_session.expire_all()
+    await set_tenant(db_session, pid)
+    fresh = (await db_session.execute(
+        select(Booking).where(Booking.id == bid)
+    )).scalar_one()
+    assert fresh.status == "confirmed"
