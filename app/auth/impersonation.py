@@ -10,11 +10,16 @@ The rule this module enforces is narrow on purpose:
 
   * only a user who is ``is_internal`` AND holds a ``dentiva_staff`` role
     carrying ``impersonate_clinic`` may do it;
-  * only ``GET`` — a write while impersonating would land in the audit trail as
-    the CLINIC having made the change, which is untrue and unfixable after the
-    fact. Operators change clinic settings through the admin API, under their own
-    name;
-  * only the clinic permissions a read-only viewer has; the impersonator never
+  * reads of anything the clinic reads, plus a short, explicit list of repairs
+    a support call actually needs: move or cancel an appointment, and keep the
+    note on a patient. Every one of them writes an audit row carrying the STAFF
+    user's id, so the trail never reads as the clinic having done it;
+  * nothing else. Settings, billing, team, integrations and placing calls as the
+    clinic stay refused here — those are done through the admin API under the
+    operator's own name. The list is by method and path rather than by verb:
+    /api/voice/web-call is a POST behind a view permission and it PLACES A CALL
+    as the clinic;
+  * only the clinic permissions this module names; the impersonator never
     inherits the clinic owner's rights.
 
 Signalled by a request header rather than a session flag so it cannot leak into
@@ -32,6 +37,8 @@ from sqlalchemy import select
 import app.db as _app_db
 from app.auth.permissions import (
     IMPERSONATE_CLINIC,
+    MANAGE_APPOINTMENTS,
+    MANAGE_PATIENTS,
     VIEW_ANALYTICS,
     VIEW_APPOINTMENTS,
     VIEW_BILLING,
@@ -59,10 +66,28 @@ READ_ONLY_POST_PATHS: frozenset[str] = frozenset({
 })
 
 
+# The repairs a support call needs, named one by one. A clinic rings because an
+# appointment is in the wrong place or a patient's note is wrong; sending the
+# operator away to "do it in the admin area" is how a test booking sat in a live
+# clinic's calendar all morning with nobody able to remove it.
+IMPERSONATION_WRITE_PATHS: tuple[tuple[str, str], ...] = (
+    ("PATCH", "/api/bookings/"),   # move, amend, cancel, mark no-show
+    ("PATCH", "/api/patients/"),   # the note the front desk keeps on a person
+)
+
+
 def _is_read(request: Request) -> bool:
     return request.method == "GET" or (
         request.method == "POST"
         and request.url.path.rstrip("/") in READ_ONLY_POST_PATHS
+    )
+
+
+def _is_allowed_repair(request: Request) -> bool:
+    path = request.url.path
+    return any(
+        request.method == method and path.startswith(prefix)
+        for method, prefix in IMPERSONATION_WRITE_PATHS
     )
 
 # What an impersonating operator may see. Deliberately narrower than the clinic
@@ -70,6 +95,10 @@ def _is_read(request: Request) -> bool:
 IMPERSONATION_PERMISSIONS: frozenset[str] = frozenset({
     VIEW_DASHBOARD, VIEW_CALLS, VIEW_APPOINTMENTS,
     VIEW_PATIENTS, VIEW_ANALYTICS, VIEW_BILLING,
+    # The two repairs above. Paired with IMPERSONATION_WRITE_PATHS: a permission
+    # alone opens every endpoint that asks for it, and "manage appointments" is
+    # also what a future endpoint we have not written yet will ask for.
+    MANAGE_APPOINTMENTS, MANAGE_PATIENTS,
 })
 
 
@@ -91,12 +120,13 @@ async def impersonated_practice_id(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Viewing as a clinic is for Dentovox staff only.",
         )
-    if not _is_read(request):
+    if not _is_read(request) and not _is_allowed_repair(request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "Viewing as a clinic is read-only. Make changes through the "
-                "admin area so the audit trail names you, not the clinic."
+                "That change isn't available while viewing a clinic. Appointments "
+                "and patient notes can be fixed here; everything else is done in "
+                "the admin area, under your own name."
             ),
         )
 

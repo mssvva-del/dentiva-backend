@@ -1,9 +1,12 @@
-"""Read-only "view as clinic" — the access boundary.
+""""View as clinic" — the access boundary.
 
 The feature exists so an operator on a support call can open the clinic's own
-screens. Everything valuable about it is what it REFUSES, so that is what these
-tests pin: a clinic user cannot use the header, a write cannot use it, and a
-staff role without the permission cannot use it.
+screens, and fix the two things a support call is actually about: an appointment
+in the wrong place, and the note kept on a patient. Everything else valuable
+about it is what it REFUSES, so that is what these tests pin: a clinic user
+cannot use the header, a staff role without the permission cannot use it, and no
+other write gets through — settings, billing, team, or placing a call as the
+clinic.
 """
 
 from __future__ import annotations
@@ -106,15 +109,50 @@ async def test_a_clinic_user_cannot_use_the_header(staff_role):
 
 @pytest.mark.parametrize("method", ["POST", "PATCH", "PUT", "DELETE"])
 @pytest.mark.asyncio
-async def test_writes_are_refused(staff_role, method):
-    # A write while impersonating would be recorded as the CLINIC's own change.
+async def test_writes_outside_the_two_repairs_are_refused(staff_role, method):
+    # Anything not on the repair list is still done in the admin area, under the
+    # operator's own name.
     staff_role("super_admin")
     with pytest.raises(HTTPException) as exc:
         await imp.impersonated_practice_id(
-            _request(method=method, view_as=str(uuid.uuid4())), _user()
+            _request(method=method, view_as=str(uuid.uuid4()),
+                     path="/api/practice/settings"),
+            _user(),
         )
     assert exc.value.status_code == 403
-    assert "read-only" in exc.value.detail
+    assert "admin area" in exc.value.detail
+
+
+@pytest.mark.parametrize("path", [
+    "/api/bookings/8b0f2c1e-0000-0000-0000-000000000000",
+    "/api/bookings/8b0f2c1e-0000-0000-0000-000000000000/status",
+    "/api/patients/8b0f2c1e-0000-0000-0000-000000000000",
+])
+@pytest.mark.asyncio
+async def test_the_two_repairs_a_support_call_needs_go_through(staff_role, path):
+    """A test booking sat in a live clinic's calendar all morning because the
+    only person looking at it was viewing the clinic, and viewing could not
+    cancel. Both write an audit row carrying the STAFF user's id."""
+    staff_role("super_admin")
+    target = uuid.uuid4()
+    got = await imp.impersonated_practice_id(
+        _request(method="PATCH", view_as=str(target), path=path), _user()
+    )
+    assert got == target
+
+
+@pytest.mark.asyncio
+async def test_a_repair_path_on_another_verb_is_still_refused(staff_role):
+    """DELETE /api/bookings/{id} is not "fix the schedule" — it is erasing the
+    record of it."""
+    staff_role("super_admin")
+    with pytest.raises(HTTPException) as exc:
+        await imp.impersonated_practice_id(
+            _request(method="DELETE", view_as=str(uuid.uuid4()),
+                     path="/api/bookings/8b0f2c1e-0000-0000-0000-000000000000"),
+            _user(),
+        )
+    assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -149,14 +187,18 @@ async def test_garbage_practice_id_is_a_400_not_a_500(staff_role):
 
 
 # ── The permission set itself ───────────────────────────────────────────────
-def test_impersonation_grants_reads_only():
+def test_impersonation_grants_reads_and_the_two_repairs():
     from app.auth import permissions as p
 
     assert p.VIEW_DASHBOARD in imp.IMPERSONATION_PERMISSIONS
     assert p.VIEW_CALLS in imp.IMPERSONATION_PERMISSIONS
     assert p.VIEW_PATIENTS in imp.IMPERSONATION_PERMISSIONS
-    for denied in (p.MANAGE_APPOINTMENTS, p.MANAGE_SETTINGS, p.MANAGE_TEAM,
-                   p.MANAGE_BILLING, p.SEND_SMS, p.MANAGE_INTEGRATIONS):
+    # Fixing a schedule and a patient note is what a support call is about; the
+    # path list above is what keeps these two from opening anything else.
+    assert p.MANAGE_APPOINTMENTS in imp.IMPERSONATION_PERMISSIONS
+    assert p.MANAGE_PATIENTS in imp.IMPERSONATION_PERMISSIONS
+    for denied in (p.MANAGE_SETTINGS, p.MANAGE_TEAM, p.MANAGE_BILLING,
+                   p.SEND_SMS, p.MANAGE_INTEGRATIONS, p.MANAGE_CALLS):
         assert denied not in imp.IMPERSONATION_PERMISSIONS
     # And it never leaks an admin-world permission into the clinic world.
     assert not (imp.IMPERSONATION_PERMISSIONS & p.ADMIN_PERMISSIONS)

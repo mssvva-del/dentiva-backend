@@ -15,6 +15,8 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
+
 from app.db import set_tenant
 from app.models.booking import Booking
 from app.models.patient import Patient
@@ -135,3 +137,74 @@ async def test_an_empty_patient_edit_is_refused(client, db_session):
         f"/api/patients/{patient.id}", json={}, headers=_auth("org_nf", "user_nf")
     )
     assert r.status_code == 422
+
+
+async def test_the_front_desk_can_correct_what_the_call_got_wrong(
+    client, db_session
+):
+    """Every field the agent fills is a field that can be wrong: a name heard
+    over a bad line, a number written down before the caller corrected it, a
+    birthday given as a month and a day."""
+    _, patient, _ = await _seed(db_session, "g")
+    h = _auth("org_ng", "user_ng")
+
+    r = await client.patch(
+        f"/api/patients/{patient.id}",
+        json={"first_name": "Maria", "last_name": "Lopez-Ruiz",
+              "phone": "+16175550142", "date_of_birth": "1979-03-02",
+              "preferred_language": "es"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["first_name"] == "Maria"
+    assert body["last_name"] == "Lopez-Ruiz"
+    assert body["phone"] == "+16175550142"
+    assert body["date_of_birth"] == "1979-03-02"
+    assert body["preferred_language"] == "es"
+
+
+async def test_a_corrected_number_is_findable_by_the_next_caller(
+    client, db_session
+):
+    """The searchable copy of the phone has to move with it, or the patient is
+    invisible to the lookup that runs on every incoming call."""
+    from app.utils.crypto import phone_hmac
+
+    practice, patient, _ = await _seed(db_session, "h")
+    practice_id = practice.id
+    await client.patch(
+        f"/api/patients/{patient.id}",
+        json={"phone": "+16175550143"},
+        headers=_auth("org_nh", "user_nh"),
+    )
+    pid = patient.id  # read before expiring: an expired instance cannot load here
+    db_session.expire_all()
+    await set_tenant(db_session, practice_id)
+    fresh = (await db_session.execute(
+        select(Patient).where(Patient.id == pid)
+    )).scalar_one()
+    assert fresh.phone_hmac == phone_hmac("+16175550143")
+
+
+async def test_a_birthday_that_is_not_a_date_is_refused(client, db_session):
+    """A junk birthday silences the lookup that tells two people on one number
+    apart — worse than leaving it empty."""
+    _, patient, _ = await _seed(db_session, "i")
+    r = await client.patch(
+        f"/api/patients/{patient.id}",
+        json={"date_of_birth": "1979-02-30"},   # a date that never happened
+        headers=_auth("org_ni", "user_ni"),
+    )
+    assert r.status_code == 400, r.text
+    assert "1968-04-09" in r.text  # the message shows the shape it wants
+
+
+async def test_a_number_that_is_not_a_number_is_refused(client, db_session):
+    _, patient, _ = await _seed(db_session, "j")
+    r = await client.patch(
+        f"/api/patients/{patient.id}",
+        json={"phone": "555-1234"},   # what a speech model heard, not a number
+        headers=_auth("org_nj", "user_nj"),
+    )
+    assert r.status_code == 400, r.text
