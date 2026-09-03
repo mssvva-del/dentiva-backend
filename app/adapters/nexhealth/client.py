@@ -267,6 +267,22 @@ class NexHealthClient(ReactivationSource):
         record_alert("pms_subdomain_resolved", f"subdomain={subs[0]}")
         return self._subdomain
 
+    async def _scoped(self, params: dict | None = None) -> dict:
+        """The query every NexHealth endpoint needs: subdomain and location.
+
+        The subdomain is resolved from /institutions when the clinic's
+        credentials do not carry one — and it used to be resolved on READS only.
+        Writes took the blank field straight from the constructor, so a clinic
+        connected without a subdomain could be asked about its calendar all day
+        and never have anything written to it: appointments existed in our book
+        and in no practice's software, and a cancellation answered
+        "Blank values not allowed for parameter subdomain" with the alert saying
+        only "pms_error". Every request goes through here now.
+        """
+        subdomain = self._subdomain or await self._resolve_subdomain()
+        return {"subdomain": subdomain, "location_id": self._location_id,
+                **(params or {})}
+
     async def _get(self, path: str, params: dict) -> httpx.Response:
         """Authenticated GET with one token-refresh retry on 401, plus the shared
         transient retry (idempotent read)."""
@@ -274,8 +290,7 @@ class NexHealthClient(ReactivationSource):
         async def _once() -> httpx.Response:
             if self._token is None:
                 self._token = await self._fetch_token()
-            subdomain = self._subdomain or await self._resolve_subdomain()
-            scoped = {"subdomain": subdomain, "location_id": self._location_id, **params}
+            scoped = await self._scoped(params)
             headers = {"Authorization": f"Bearer {self._token}", **_BASE_HEADERS}
             async with await self._client() as client:
                 try:
@@ -316,7 +331,7 @@ class NexHealthClient(ReactivationSource):
         retried write is a write we cannot prove happened only once."""
         if self._token is None:
             self._token = await self._fetch_token()
-        scoped = {"subdomain": self._subdomain, "location_id": self._location_id}
+        scoped = await self._scoped()
         headers = {"Authorization": f"Bearer {self._token}", **_BASE_HEADERS}
         async with await self._client() as client:
             try:
@@ -337,7 +352,7 @@ class NexHealthClient(ReactivationSource):
         could double-book the patient (the caller decides any fallback)."""
         if self._token is None:
             self._token = await self._fetch_token()
-        scoped = {"subdomain": self._subdomain, "location_id": self._location_id}
+        scoped = await self._scoped()
         headers = {"Authorization": f"Bearer {self._token}", **_BASE_HEADERS}
         async with await self._client() as client:
             try:
