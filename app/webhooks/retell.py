@@ -612,25 +612,27 @@ async def _find_patient_by_phone(
     # is what booking always has.
     if dob:
         matched = [p for p in rows if _dob_matches(p.date_of_birth, dob)]
-        # A birthday we never recorded cannot match one. Our own chart holds a
-        # date of birth only for callers who said they were NEW — a returning
-        # patient books without ever being asked — so when they ring back to
-        # cancel, the date they correctly recite matches nothing and they are
-        # told there is no appointment under their number. The chair stays
-        # blocked and the patient believes they are still booked.
-        #
-        # For the tools that only ACT on an existing appointment, one person on
-        # this number is answer enough: caller ID already ties them to it, and
-        # _caller_is_verified still has to agree before anything changes. Never
-        # for booking — there the same fallback would file a child's visit in a
-        # parent's chart.
-        if not (
-            lone_match_is_enough
-            and not matched
-            and len(rows) == 1
-            and not rows[0].date_of_birth  # a birthday we never wrote down
-        ):
+        if matched:
             rows = matched
+        else:
+            # A birthday we never wrote down cannot match one. Our chart holds a
+            # date of birth only for callers who said they were NEW — a
+            # returning patient books without ever being asked — so on the way
+            # back in, the date they correctly recite matches nothing and they
+            # are told there is no appointment under their number. The chair
+            # stays blocked and they hang up believing they are still booked.
+            #
+            # For the tools that only ACT on an appointment which already
+            # exists, keep the records we hold no birthday for and let the name
+            # (or being the only one) settle it: caller ID already ties them to
+            # the number and _caller_is_verified still has to agree before
+            # anything changes. A chart whose birthday DISAGREES stays out — the
+            # fallback is for the date we never recorded, not the wrong one.
+            #
+            # Never for booking, where the same fallback would file a child's
+            # visit in a parent's chart.
+            unconfirmable = [p for p in rows if not p.date_of_birth]
+            rows = unconfirmable if lone_match_is_enough else []
     # The name narrows what the birthday could not. It is the only thing a
     # household of records created BY VOICE can be told apart by: none of them
     # carries a birthday, so "which of you is it?" used to be a question the
