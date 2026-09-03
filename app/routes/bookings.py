@@ -125,6 +125,7 @@ async def list_bookings(
                 source=b.source,
                 source_call_id=str(b.source_call_id) if b.source_call_id else None,
                 notes=b.notes,
+                pms_sync_status=b.pms_sync_status,
                 created_at=b.created_at,
             )
         )
@@ -249,6 +250,7 @@ async def get_booking(
         source=b.source,
         source_call_id=str(b.source_call_id) if b.source_call_id else None,
         notes=b.notes,
+        pms_sync_status=b.pms_sync_status,
         created_at=b.created_at,
     )
 
@@ -350,6 +352,7 @@ async def update_booking_status(
         source=b.source,
         source_call_id=str(b.source_call_id) if b.source_call_id else None,
         notes=b.notes,
+        pms_sync_status=b.pms_sync_status,
         created_at=b.created_at,
     )
 
@@ -459,5 +462,80 @@ async def edit_booking(
         source=b.source,
         source_call_id=str(b.source_call_id) if b.source_call_id else None,
         notes=b.notes,
+        pms_sync_status=b.pms_sync_status,
+        created_at=b.created_at,
+    )
+
+
+@router.post("/{booking_id}/resync", response_model=BookingSummary)
+async def resync_booking(
+    booking_id: str,
+    practice: Practice = Depends(get_current_practice),
+    user: User = Depends(require_permission(MANAGE_APPOINTMENTS)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> BookingSummary:
+    """Try the practice's own calendar again.
+
+    A write-back their software refuses leaves the two calendars disagreeing and,
+    until now, no way at all to fix it: the appointment was already cancelled
+    here, so nothing would call the PMS a second time. Three cancellations sat
+    in a live clinic's calendar this morning for exactly that reason, and the
+    only remedy was to ask the practice to delete them by hand.
+    """
+    b = (
+        await db.execute(
+            select(Booking).where(
+                Booking.id == booking_id, Booking.practice_id == practice.id
+            )
+        )
+    ).scalar_one_or_none()
+    if b is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Booking not found."
+        )
+    if not b.pms_external_id:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="This appointment was never in your practice calendar.",
+        )
+
+    outcome = (
+        await apply_cancellation(db, practice.id, b)
+        if b.status == "cancelled"
+        else await apply_move(db, practice.id, b)
+    )
+    db.add(AuditLog(
+        id=uuid.uuid4(),
+        practice_id=practice.id,
+        user_id=user.id,
+        action="booking_resynced",
+        resource_type="booking",
+        resource_id=b.id,
+        audit_metadata={"outcome": outcome},
+    ))
+    await db.commit()
+    await set_tenant(db, practice.id)
+    await db.refresh(b)
+
+    patient = (
+        await db.execute(select(Patient).where(Patient.id == b.patient_id))
+    ).scalar_one_or_none()
+    return BookingSummary(
+        id=str(b.id),
+        patient_name_redacted=redact_name(patient.first_name, patient.last_name)
+        if patient else None,
+        patient_name=_full_name(patient),
+        patient_phone=patient.phone if patient else None,
+        in_pms=bool(b.pms_external_id),
+        patient_id=str(b.patient_id),
+        appointment_at=b.appointment_at,
+        duration_minutes=b.duration_minutes,
+        procedure_type=b.procedure_type,
+        provider_name=b.provider_name,
+        status=b.status,
+        source=b.source,
+        source_call_id=str(b.source_call_id) if b.source_call_id else None,
+        notes=b.notes,
+        pms_sync_status=b.pms_sync_status,
         created_at=b.created_at,
     )
