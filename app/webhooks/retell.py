@@ -1302,6 +1302,25 @@ def _spoken_booking_time(when, tz_name: str | None) -> tuple[str, str]:
     return local.date().isoformat(), local.strftime("%H:%M")
 
 
+async def _pms_slot_still_free(practice, slot) -> bool:
+    """Is this exact slot still open in the clinic's own calendar?
+
+    True when we cannot ask. A PMS that is slow or down must not stop a booking
+    the caller is on the line for — falling back to our own book is the
+    behaviour everywhere else in this file, and the write-back still refuses a
+    genuine collision afterwards.
+    """
+    try:
+        fresh = await compute_pms_slots(
+            practice, preferred_date=slot.date, procedure="", days_ahead=1,
+        )
+    except Exception:  # noqa: BLE001 — never fail a live booking on a lookup
+        return True
+    if fresh is None:
+        return True
+    return any(s.date == slot.date and s.time == slot.time for s in fresh)
+
+
 async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     # Phase 2: persist a real booking row + audit log.
     first_name = args.get("patient_first_name", "Unknown")
@@ -1436,6 +1455,40 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
                     "Want me to check another day, or have the team call you?"
                 ),
                 "available_slots": [],
+            }
+
+        # One last look at the practice's OWN calendar before we say yes.
+        #
+        # The times offered a minute ago were free a minute ago. On a live pair
+        # of calls, one patient took nine o'clock while the next was still
+        # choosing, and the agent then confirmed quarter past — inside the
+        # forty-five minutes the first patient now owned. Their software refused
+        # the write, correctly, and the caller had already been told they were
+        # booked.
+        #
+        # This costs no extra request: write_back_booking re-checks the slot
+        # anyway, just AFTER the promise instead of before it. Checking here
+        # turns a patient who is not in the clinic's calendar into a caller
+        # offered another time, which the prompt already knows how to say.
+        if (
+            practice_obj is not None
+            and pms_is_connected(practice_obj)
+            and not await _pms_slot_still_free(practice_obj, chosen_slot)
+        ):
+            others = [s for s in slots if s.time != chosen_slot.time][:2]
+            record_alert("pms_slot_taken_while_choosing",
+                         f"practice={practice_id} {chosen_slot.date} {chosen_slot.time}")
+            return {
+                "booked": False,
+                "message": (
+                    "I'm sorry — that time was just taken. "
+                    "Want one of these instead?"
+                ),
+                "available_slots": [
+                    {"date": s.date, "time": s.time, "provider": s.provider,
+                     "spoken": _spoken_slot(s.date, s.time)}
+                    for s in others
+                ],
             }
 
         # Create booking row — store the LOCAL slot converted to UTC.
