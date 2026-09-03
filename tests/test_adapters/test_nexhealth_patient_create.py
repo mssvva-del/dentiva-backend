@@ -177,3 +177,20 @@ async def test_an_inactive_provider_is_not_offered():
         ]})
 
     assert await _client(handler).first_provider_id() == "2"
+
+
+async def test_an_appointment_refusal_is_quoted_because_it_is_about_the_chair():
+    """The opposite side of the rule above. "Cannot update already cancelled
+    appointment" is a fact about the appointment, and without it a cancellation
+    their system refuses reaches us as "pms_error" and nothing else — which is
+    how three of them sat in a live clinic's calendar for a morning."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (resp := _auth(request)) is not None:
+            return resp
+        return httpx.Response(400, json={
+            "error": ["Cannot update already cancelled appointment"]
+        })
+
+    with pytest.raises(NexHealthError) as caught:
+        await _client(handler).cancel_appointment("1677173079")
+    assert "already cancelled" in str(caught.value)

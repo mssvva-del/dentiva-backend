@@ -84,6 +84,37 @@ _BODY_SAFE_PATHS = frozenset({
 })
 
 
+# Writes whose 4xx body is about an APPOINTMENT — its state, its time — and not
+# about the person. /patients is deliberately absent: its error text echoes the
+# name, number and date of birth we just sent, which a test caught leaking into
+# an exception message the moment this was written too broadly.
+_REFUSAL_SAFE_PREFIX = "/appointments"
+
+
+def _refusal(resp: httpx.Response, path: str) -> str:
+    """Only NexHealth's own reason for refusing an APPOINTMENT write, trimmed.
+
+    A cancellation that their API rejects currently reaches us as "pms_error"
+    and nothing else — three of them sat in a live clinic's calendar while the
+    log said only that something had gone wrong. Their refusals read
+    {"error": ["Cannot update already cancelled appointment"]}: a sentence about
+    the appointment's state, not about the patient.
+
+    Narrower than _why on purpose, twice over: only the "error" field (a
+    "description" echoes the parameters we sent), and only on appointment paths.
+    """
+    if not path.startswith(_REFUSAL_SAFE_PREFIX):
+        return ""
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 — a non-JSON error page is not a crash
+        return ""
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(err, list):
+        err = "; ".join(str(e) for e in err if e)
+    return f" — {str(err)[:200]}" if err else ""
+
+
 def _why(resp: httpx.Response) -> str:
     """NexHealth's own explanation of a 4xx, trimmed. Never raises."""
     try:
@@ -296,7 +327,9 @@ class NexHealthClient(ReactivationSource):
             self._token = None if resp.status_code == 401 else self._token
             raise NexHealthUnavailable(f"NexHealth {resp.status_code} on PATCH {path}")
         if resp.status_code >= 400:
-            raise NexHealthError(f"NexHealth {resp.status_code} on PATCH {path}")
+            raise NexHealthError(
+                f"NexHealth {resp.status_code} on PATCH {path}" + _refusal(resp, path)
+            )
         return resp
 
     async def _post(self, path: str, body: dict) -> httpx.Response:
@@ -324,7 +357,9 @@ class NexHealthClient(ReactivationSource):
             duplicate = _DUPLICATE_ID_RE.search(resp.text or "")
             if duplicate:
                 raise NexHealthDuplicate(duplicate.group(1))
-            raise NexHealthError(f"NexHealth {resp.status_code} on POST {path}")
+            raise NexHealthError(
+                f"NexHealth {resp.status_code} on POST {path}" + _refusal(resp, path)
+            )
         return resp
 
     # ── booking write-back (block 8) ──────────────────────────────────────────

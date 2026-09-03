@@ -32,6 +32,10 @@ class BookingSummary(BaseModel):
     # What the caller said that no other field holds. The agent writes it during
     # the call; the front desk edits it after.
     notes: str | None = None
+    # Empty when our calendar and the practice's agree. Otherwise what their
+    # software said when we last wrote to it — a cancellation it refused looks
+    # identical to one it took on every screen we have.
+    pms_sync_status: str | None = None
     created_at: datetime
 
 

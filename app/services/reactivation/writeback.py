@@ -145,6 +145,20 @@ async def write_back_booking(
         return "pms_error"
 
 
+async def _remember(session: AsyncSession, booking: Booking, note: str | None) -> None:
+    """Keep the outcome ON the booking, so a failure is visible where the work is.
+
+    An alert tells us. The front desk looking at an appointment they believe is
+    cancelled is the person who needs to know it is still in their calendar.
+    """
+    booking.pms_sync_status = note[:300] if note else None
+    try:
+        await session.commit()
+    except Exception:  # noqa: BLE001 — never turn a sync note into a failed request
+        logger.exception("could not record the sync outcome for booking %s", booking.id)
+        await session.rollback()
+
+
 async def _bridge_for(session, practice_id: uuid.UUID, client=None):
     if client is not None:
         return client
@@ -178,12 +192,15 @@ async def cancel_in_pms(
         return "no_pms"
     try:
         await client.cancel_appointment(booking.pms_external_id)
-    except _PMS_UNAVAILABLE:
+    except _PMS_UNAVAILABLE as exc:
         logger.warning("cancel deferred (PMS unavailable) for booking %s", booking.id)
+        await _remember(session, booking, f"Couldn't reach your practice software: {exc}")
         return "pms_unavailable"
-    except _PMS_REJECTED:
-        logger.warning("cancel rejected by PMS for booking %s", booking.id)
+    except _PMS_REJECTED as exc:
+        logger.warning("cancel rejected by PMS for booking %s: %s", booking.id, exc)
+        await _remember(session, booking, f"Your practice software refused it: {exc}")
         return "pms_error"
+    await _remember(session, booking, None)
     return "cancelled"
 
 
@@ -217,10 +234,13 @@ async def move_in_pms(
         await client.move_appointment(
             booking.pms_external_id, start_time=start, end_time=end
         )
-    except _PMS_UNAVAILABLE:
+    except _PMS_UNAVAILABLE as exc:
         logger.warning("move deferred (PMS unavailable) for booking %s", booking.id)
+        await _remember(session, booking, f"Couldn't reach your practice software: {exc}")
         return "pms_unavailable"
-    except _PMS_REJECTED:
-        logger.warning("move rejected by PMS for booking %s", booking.id)
+    except _PMS_REJECTED as exc:
+        logger.warning("move rejected by PMS for booking %s: %s", booking.id, exc)
+        await _remember(session, booking, f"Your practice software refused the move: {exc}")
         return "pms_error"
+    await _remember(session, booking, None)
     return "moved"

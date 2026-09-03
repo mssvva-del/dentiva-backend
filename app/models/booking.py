@@ -46,6 +46,11 @@ class Booking(UUIDPKMixin, TimestampMixin, Base):
     # call and editable by the front desk afterwards. Encrypted: it is the
     # patient's own words about their health.
     notes: Mapped[str | None] = mapped_column(EncryptedString)
+    # What the practice's own system said when we last wrote to it. NULL when
+    # the two calendars agree; otherwise the refusal, in their software's words.
+    # Without it a cancellation their API rejects looks identical to one it took:
+    # our screen says cancelled, their chair stays blocked, and nobody can tell.
+    pms_sync_status: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="confirmed")
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default="ai_call")
     # Appointment-reminder idempotency: set when each SMS reminder is sent so the
