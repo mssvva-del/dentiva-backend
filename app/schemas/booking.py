@@ -29,6 +29,9 @@ class BookingSummary(BaseModel):
     status: str
     source: str
     source_call_id: str | None
+    # What the caller said that no other field holds. The agent writes it during
+    # the call; the front desk edits it after.
+    notes: str | None = None
     created_at: datetime
 
 
@@ -53,6 +56,7 @@ class BookingEdit(BaseModel):
     duration_minutes: int | None = Field(default=None, ge=5, le=480)
     procedure_type: str | None = Field(default=None, max_length=120)
     provider_name: str | None = Field(default=None, max_length=120)
+    notes: str | None = Field(default=None, max_length=4000)
 
 
 class DashboardToday(BaseModel):

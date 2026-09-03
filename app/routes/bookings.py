@@ -124,6 +124,7 @@ async def list_bookings(
                 status=b.status,
                 source=b.source,
                 source_call_id=str(b.source_call_id) if b.source_call_id else None,
+                notes=b.notes,
                 created_at=b.created_at,
             )
         )
@@ -247,6 +248,7 @@ async def get_booking(
         status=b.status,
         source=b.source,
         source_call_id=str(b.source_call_id) if b.source_call_id else None,
+        notes=b.notes,
         created_at=b.created_at,
     )
 
@@ -342,6 +344,7 @@ async def update_booking_status(
         status=b.status,
         source=b.source,
         source_call_id=str(b.source_call_id) if b.source_call_id else None,
+        notes=b.notes,
         created_at=b.created_at,
     )
 
@@ -449,5 +452,6 @@ async def edit_booking(
         status=b.status,
         source=b.source,
         source_call_id=str(b.source_call_id) if b.source_call_id else None,
+        notes=b.notes,
         created_at=b.created_at,
     )

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 from app.models.enums import BOOKING_STATUSES, sql_in
 from app.models.mixins import TimestampMixin, UUIDPKMixin
+from app.models.types import EncryptedString
 
 
 class Booking(UUIDPKMixin, TimestampMixin, Base):
@@ -40,6 +41,11 @@ class Booking(UUIDPKMixin, TimestampMixin, Base):
     duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="60")
     procedure_type: Mapped[str | None] = mapped_column(Text)
     provider_name: Mapped[str | None] = mapped_column(Text)
+    # What the caller said that the row above cannot hold — which tooth, who is
+    # driving them, that the last cleaning hurt. Written by the agent during the
+    # call and editable by the front desk afterwards. Encrypted: it is the
+    # patient's own words about their health.
+    notes: Mapped[str | None] = mapped_column(EncryptedString)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="confirmed")
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default="ai_call")
     # Appointment-reminder idempotency: set when each SMS reminder is sent so the

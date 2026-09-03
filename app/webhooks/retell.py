@@ -1511,6 +1511,11 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
             provider_name=chosen_slot.provider if chosen_slot else "Dr. Smith",
             status=CONFIRMED,
             source=AI_CALL,
+            # Whatever the caller said that no column above holds — which tooth,
+            # who is driving them, that the last cleaning hurt. Without it the
+            # front desk meets the patient knowing "Cleaning, 9:00" and nothing
+            # else, and the only record is a transcript nobody opens.
+            notes=(args.get("notes") or "").strip()[:4000] or None,
         )
         try:
             # Savepoint so a collision keeps the patient upsert; the partial-unique

@@ -44,6 +44,10 @@ class Patient(UUIDPKMixin, TimestampMixin, Base):
     email: Mapped[str | None] = mapped_column(EncryptedString)
     # DOB stored encrypted as ISO string (date is PHI).
     date_of_birth: Mapped[str | None] = mapped_column(EncryptedString)
+    # About the person, not one visit: allergies, "always brings her daughter",
+    # "pay by card only". The front desk types this after meeting them, and it
+    # outlives every appointment. Encrypted for the same reason the name is.
+    notes: Mapped[str | None] = mapped_column(EncryptedString)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # SMS opt-out (TCPA compliance). Set when a patient texts STOP; cleared on
     # START. All outbound SMS senders skip opted-out patients.

@@ -12,7 +12,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.permissions import SEND_SMS, VIEW_PATIENTS, require_permission
+from app.auth.permissions import (
+    MANAGE_PATIENTS,
+    SEND_SMS,
+    VIEW_PATIENTS,
+    require_permission,
+)
+from app.db import set_tenant
 from app.dependencies import get_current_practice, get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.booking import Booking
@@ -420,6 +426,9 @@ class PatientDetailResponse(BaseModel):
     total_visits: int
     no_show_count: int
     sms_opt_out: bool
+    # What the front desk knows about this person that no field holds: allergies,
+    # "always brings her daughter", "pay by card only". Outlives every visit.
+    notes: str | None = None
     created_at: datetime
     bookings: list[PatientBookingRow]
     waitlist: list[PatientWaitlistRow]
@@ -503,6 +512,7 @@ async def get_patient_detail(
         total_visits=len(completed),
         no_show_count=len(no_shows),
         sms_opt_out=patient.sms_opt_out,
+        notes=patient.notes,
         created_at=patient.created_at,
         bookings=[
             PatientBookingRow(
@@ -527,4 +537,71 @@ async def get_patient_detail(
             )
             for w in waitlist
         ],
+    )
+
+
+class PatientEdit(BaseModel):
+    """What the front desk can change on a patient card.
+
+    Only the notes for now: names, phone and date of birth belong to the
+    practice software and are pulled from it — editing them here would put our
+    copy and theirs quietly out of step.
+    """
+
+    notes: str | None = Field(default=None, max_length=8000)
+
+
+@router.patch("/{patient_id}", response_model=PatientDetailResponse)
+async def edit_patient(
+    patient_id: str,
+    payload: PatientEdit,
+    practice: Practice = Depends(get_current_practice),
+    db: AsyncSession = Depends(get_tenant_db),
+    user: User = Depends(require_permission(MANAGE_PATIENTS)),
+) -> PatientDetailResponse:
+    """Write what the practice learned about a patient after they walked in.
+
+    A caller tells the agent one thing and the hygienist finds out another. The
+    card has to hold the second kind too, or the front desk keeps it on a
+    sticky note beside the monitor.
+    """
+    patient = (
+        await db.execute(
+            select(Patient).where(
+                Patient.id == patient_id, Patient.practice_id == practice.id
+            )
+        )
+    ).scalar_one_or_none()
+    if patient is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Patient not found."
+        )
+
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Nothing to change.",
+        )
+    for key, value in fields.items():
+        setattr(patient, key, value)
+
+    # The note itself is PHI and never goes in the audit row — only that
+    # somebody changed it, and who.
+    db.add(AuditLog(
+        id=uuid.uuid4(),
+        practice_id=practice.id,
+        user_id=user.id,
+        action="patient_notes_edited",
+        resource_type="patient",
+        resource_id=patient.id,
+        audit_metadata={"changed": sorted(fields)},
+    ))
+    await db.commit()
+    # COMMIT drops the transaction-local tenant setting the RLS policy reads, so
+    # the read below would see nothing without putting it back.
+    await set_tenant(db, practice.id)
+
+    return await get_patient_detail(
+        patient_id=patient_id, practice=practice, db=db, _user=user
     )
