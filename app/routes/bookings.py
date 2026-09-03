@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +31,7 @@ from app.schemas.booking import (
     BookingStatusUpdate,
     BookingSummary,
 )
+from app.services.availability import pms_is_connected
 from app.services.booking_edits import (
     apply_cancellation,
     apply_move,
@@ -136,6 +138,47 @@ async def list_bookings(
         total=total,
         has_more=(offset + len(summaries)) < total,
     )
+
+
+class OutOfStepResponse(BaseModel):
+    """Upcoming appointments the practice's own calendar does not have."""
+
+    count: int
+    pms_connected: bool
+
+
+@router.get("/out-of-step", response_model=OutOfStepResponse)
+async def bookings_out_of_step(
+    practice: Practice = Depends(get_current_practice),
+    _: User = Depends(require_permission(VIEW_APPOINTMENTS)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> OutOfStepResponse:
+    """How many appointments exist here and not in the practice's software.
+
+    A clinic found appointments missing from their calendar before we did. The
+    booking page had said so all along, one appointment at a time, to whoever
+    happened to open it — so the number belongs on the screen they look at every
+    morning instead.
+
+    Only upcoming and only for a clinic with a PMS connected: for one without,
+    our book IS the calendar and a permanent warning would be a lie.
+    """
+    if not pms_is_connected(practice):
+        return OutOfStepResponse(count=0, pms_connected=False)
+
+    count = (
+        await db.execute(
+            select(func.count())
+            .select_from(Booking)
+            .where(
+                Booking.practice_id == practice.id,
+                Booking.status == "confirmed",
+                Booking.appointment_at >= datetime.now(UTC),
+                Booking.pms_external_id.is_(None),
+            )
+        )
+    ).scalar_one()
+    return OutOfStepResponse(count=int(count), pms_connected=True)
 
 
 @router.get("/export")
