@@ -480,7 +480,10 @@ async def test_emergency_blocks_booking_after_urgent_callback(client, db_session
     body = r2.json()
     assert body["blocked"] is True
     assert body["reason"] == "emergency_active"
-    assert "urgent situation" in body["message"]
+    # An instruction to the agent, not a sentence to read out: on a live call
+    # the old wording was obeyed and then followed by "tomorrow at 9:15" anyway.
+    assert "NOT made an appointment" in body["message"]
+    assert body["booked"] is False
 
     # No booking row was created.
     await db_session.commit()

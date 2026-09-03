@@ -301,10 +301,18 @@ _SCHEDULING_TOOLS = frozenset(
     {"check_availability", "book_appointment", "reschedule_appointment"}
 )
 
+# Read out AFTER a time may already have been offered — the symptoms reach us in
+# the words the caller used, and on a live call that was the note attached to the
+# booking, one sentence after "I'll reserve 9:15 for you". The agent read the old
+# version of this message and still closed the call saying "tomorrow at 9:15", so
+# the patient hung up believing they had an appointment that does not exist.
+# Instruction, not a sentence to paraphrase: take the time back explicitly.
 _EMERGENCY_BLOCK_MESSAGE = (
-    "I can't schedule a regular appointment while we're handling your urgent "
-    "situation. Our team is being notified right now and will call you "
-    "immediately."
+    "Do NOT book, and do NOT repeat any appointment time. Tell the caller "
+    "plainly that you have NOT made an appointment, because what they have "
+    "described needs the team to speak to them first — say the office is being "
+    "notified now and will call them straight back. If you already said a time "
+    "out loud, correct it in the same breath: that time is not booked."
 )
 
 
@@ -2692,20 +2700,52 @@ async def _handle_create_callback_request(
 
         # RLS tenant context so the insert is allowed.
         await set_tenant(session, practice_id)
-        callback = CallbackRequest(
-            id=uuid.uuid4(),
-            practice_id=practice_id,
-            call_id=call_internal_id,
-            patient_first_name=first_name,
-            phone=phone,
-            reason=reason,
-            urgent=urgent,
-            status="pending",
-        )
-        session.add(callback)
-        await session.commit()
-        if urgent:
-            await _page_clinic_urgent_callback(session, practice_id, first_name, phone)
+
+        # The emergency lock writes an urgent callback of its own the moment it
+        # engages, precisely because it cannot trust the agent to. When the agent
+        # then does the right thing anyway — as it did on a live call, 1.15
+        # seconds later — the clinic gets paged twice for one patient in pain,
+        # and the second page is the one that teaches them to ignore both.
+        # Enrich the row that exists instead of adding a second.
+        existing = None
+        if urgent and call_internal_id is not None:
+            existing = (await session.execute(
+                select(CallbackRequest).where(
+                    CallbackRequest.call_id == call_internal_id,
+                    CallbackRequest.urgent.is_(True),
+                    CallbackRequest.status == "pending",
+                )
+            )).scalars().first()
+
+        if existing is not None:
+            # The lock's row says only "urgent symptoms mentioned on the call".
+            # What the agent has is the caller's own words and their name.
+            existing.patient_first_name = existing.patient_first_name or first_name
+            existing.phone = existing.phone or phone
+            if reason:
+                existing.reason = reason
+            await session.commit()
+            logger.info(
+                "create_callback_request: merged into the lock's row for call=%s",
+                retell_call_id,
+            )
+        else:
+            callback = CallbackRequest(
+                id=uuid.uuid4(),
+                practice_id=practice_id,
+                call_id=call_internal_id,
+                patient_first_name=first_name,
+                phone=phone,
+                reason=reason,
+                urgent=urgent,
+                status="pending",
+            )
+            session.add(callback)
+            await session.commit()
+            if urgent:
+                await _page_clinic_urgent_callback(
+                    session, practice_id, first_name, phone
+                )
 
     logger.info(
         "create_callback_request persisted: call=%s phone=%s urgent=%s er=%s",
@@ -2824,8 +2864,15 @@ async def _dispatch_function(
         logger.warning(
             "emergency lock: REFUSING %s for call=%s", fn, retell_call_id
         )
+        # "booked": false as well as "blocked": true. The agent reads the shape
+        # it knows from an ordinary refusal; a lone unfamiliar key is how a
+        # refusal gets narrated as a confirmation.
+        record_alert(
+            "emergency_lock_refused_scheduling", f"call={retell_call_id} tool={fn}"
+        )
         return {
             "blocked": True,
+            "booked": False,
             "reason": "emergency_active",
             "message": _EMERGENCY_BLOCK_MESSAGE,
         }
