@@ -1348,11 +1348,40 @@ async def _pms_slot_still_free(practice, slot) -> bool:
     return any(s.date == slot.date and s.time == slot.time for s in fresh)
 
 
+# Numbers a speech model reaches for when it does not know the real one: the
+# example in a tool's own description, and the 555-01xx range reserved for
+# fiction. Three unrelated callers to the first live clinic were all filed under
+# one of these.
+_FICTIONAL_PHONES = {"5551234567", "5555555555"}
+
+
+async def _caller_phone(session, retell_call_id: str, spoken: str | None) -> str:
+    """The number to file this patient under.
+
+    The agent asks "is this the best number for you?", the caller says yes, and
+    the agent then has to put something in the phone field — a number nobody has
+    told it. What it invents looks like a phone number and is not one, so the
+    reminder goes to a stranger and the patient cannot be found again when they
+    ring back to cancel.
+
+    Caller ID is the fact. A number the caller actually dictates is honoured —
+    people do give a different one — but only when it could be a real number,
+    and only when we have nothing better for a call that came in over the phone.
+    """
+    digits = normalize_phone(spoken)
+    if digits and digits not in _FICTIONAL_PHONES:
+        return spoken or ""
+    call = (await session.execute(
+        select(Call).where(Call.retell_call_id == retell_call_id)
+    )).scalar_one_or_none()
+    return ((call.from_number if call else None) or "") or (spoken or "")
+
+
 async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
     # Phase 2: persist a real booking row + audit log.
     first_name = args.get("patient_first_name", "Unknown")
     last_name = args.get("patient_last_name", "")
-    phone = args.get("patient_phone", "")
+    spoken_phone = args.get("patient_phone", "")
     preferred_date = args.get("preferred_date", "")
     procedure = args.get("procedure", "cleaning")
 
@@ -1442,6 +1471,10 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         # to Retell's mid-call detection on the call row. Drives preferred_language
         # for the new patient and the confirmation SMS language.
         call_language = args.get("language") or (call.language_detected if call else None)
+
+        # Caller ID over anything the agent typed into the phone field, unless
+        # the caller actually dictated a usable number of their own.
+        phone = await _caller_phone(session, retell_call_id, spoken_phone)
 
         # Upsert patient (stores preferred_language on a new patient).
         patient = await _upsert_patient(
@@ -1726,7 +1759,7 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
     one). Re-checks availability for the requested date and shifts the booking,
     writes an audit log, and texts an updated confirmation.
     """
-    phone = args.get("patient_phone", "")
+    spoken_phone = args.get("patient_phone", "")
     new_date = args.get("new_date", "")
     new_window = args.get("new_time_window")
 
@@ -1742,6 +1775,8 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
             }
         await set_tenant(session, practice_id)
 
+        # Caller ID over a number the agent typed into the phone field.
+        phone = await _caller_phone(session, retell_call_id, spoken_phone)
         patient = await _find_patient_by_phone(
             session, practice_id, phone, dob=args.get("patient_dob"),
             first_name=args.get("patient_first_name"),
@@ -1953,7 +1988,7 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
 
 async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
     """Cancel a patient's upcoming appointment (soonest upcoming confirmed one)."""
-    phone = args.get("patient_phone", "")
+    spoken_phone = args.get("patient_phone", "")
     reason = args.get("reason")
 
     async with _app_db.async_session_factory() as session:
@@ -1968,6 +2003,8 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
             }
         await set_tenant(session, practice_id)
 
+        # Caller ID over a number the agent typed into the phone field.
+        phone = await _caller_phone(session, retell_call_id, spoken_phone)
         patient = await _find_patient_by_phone(
             session, practice_id, phone, dob=args.get("patient_dob"),
             first_name=args.get("patient_first_name"),
@@ -2100,7 +2137,7 @@ async def _handle_join_waitlist(retell_call_id: str, args: dict) -> dict:
     """
     first_name = args.get("patient_first_name", "Unknown")
     last_name = args.get("patient_last_name", "")
-    phone = args.get("patient_phone", "")
+    spoken_phone = args.get("patient_phone", "")
     procedure = args.get("procedure")
     preferred_date = args.get("preferred_date")
     preferred_time_window = args.get("preferred_time_window")
@@ -2143,6 +2180,7 @@ async def _handle_join_waitlist(retell_call_id: str, args: dict) -> dict:
             call_internal_id = None
 
         await set_tenant(session, practice_id)
+        phone = await _caller_phone(session, retell_call_id, spoken_phone)
         patient = await _upsert_patient(session, practice_id, first_name, last_name, phone)
         if patient is AMBIGUOUS:
             return {"added": False, "message": ASK_WHICH_PATIENT}
@@ -2362,7 +2400,7 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
     agent uses this to personalize ("Welcome back, Maria") and to pre-fill a
     reschedule/cancel without re-asking everything.
     """
-    phone = args.get("patient_phone", "")
+    spoken_phone = args.get("patient_phone", "")
     not_found = {
         "found": False,
         "message": "No existing record found — proceed as a new patient.",
@@ -2374,6 +2412,8 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
             return not_found
         await set_tenant(session, practice_id)
 
+        # Caller ID over a number the agent typed into the phone field.
+        phone = await _caller_phone(session, retell_call_id, spoken_phone)
         patient = await _find_patient_by_phone(
             session, practice_id, phone, dob=args.get("patient_dob"),
             first_name=args.get("patient_first_name"),
@@ -3018,7 +3058,11 @@ async def retell_inbound_webhook(request: Request, response: Response) -> dict:
     practice = None
     try:
         practice = await _resolve_practice_for_inbound(agent_id, to_number)
-        variables = build_dynamic_variables(practice) if practice else dict(_VAR_FALLBACKS)
+        variables = (
+            build_dynamic_variables(practice, inbound.get("from_number"))
+            if practice
+            else dict(_VAR_FALLBACKS)
+        )
     except Exception:  # noqa: BLE001 — never block call pickup on a lookup bug
         logger.exception("retell inbound webhook: variable build failed")
         variables = dict(_VAR_FALLBACKS)
