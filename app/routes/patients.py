@@ -4,11 +4,11 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from app.models.practice import Practice
 from app.models.user import User
 from app.models.waitlist_entry import WaitlistEntry
 from app.services.sms import send_recall_notice
+from app.utils.crypto import normalize_phone
 from app.utils.redact import redact_name
 
 logger = logging.getLogger("dentiva.routes.patients")
@@ -420,6 +421,12 @@ class PatientDetailResponse(BaseModel):
     # a card they could not act on — no way to ring the person the card is about.
     name: str | None = None
     phone: str | None = None
+    # The fields as the agent filled them, separately, because the card edits
+    # them separately — a joined "name" cannot be typed back apart.
+    first_name: str | None = None
+    last_name: str | None = None
+    date_of_birth: str | None = None
+    preferred_language: str | None = None
     status: str
     last_visit_date: str | None
     next_visit_date: str | None
@@ -506,6 +513,10 @@ async def get_patient_detail(
         phone_masked=_mask_phone(patient.phone),
         name=_full_name(patient),
         phone=patient.phone,
+        first_name=patient.first_name,
+        last_name=patient.last_name,
+        date_of_birth=patient.date_of_birth,
+        preferred_language=patient.preferred_language,
         status=status,
         last_visit_date=last_visit.date().isoformat() if last_visit else None,
         next_visit_date=next_visit.date().isoformat() if next_visit else None,
@@ -543,12 +554,44 @@ async def get_patient_detail(
 class PatientEdit(BaseModel):
     """What the front desk can change on a patient card.
 
-    Only the notes for now: names, phone and date of birth belong to the
-    practice software and are pulled from it — editing them here would put our
-    copy and theirs quietly out of step.
+    Everything the agent collects on a call, because everything it collects can
+    be wrong: a name heard over a bad line, a number the caller corrected after
+    it was written down, a birthday given as a month and a day. The front desk
+    meets these people; it has to be able to fix the record without ringing us.
+
+    Changes land in OUR copy. The practice software keeps its own, and a name or
+    number corrected here is not pushed there — the card says so.
     """
 
+    first_name: str | None = Field(default=None, max_length=80)
+    last_name: str | None = Field(default=None, max_length=80)
+    phone: str | None = Field(default=None, max_length=32)
+    # ISO YYYY-MM-DD. Stored as text because that is what the PMS bridges take.
+    date_of_birth: str | None = Field(default=None, max_length=10)
+    preferred_language: str | None = Field(default=None, pattern="^(en|es)$")
     notes: str | None = Field(default=None, max_length=8000)
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def _a_real_date(cls, v: str | None) -> str | None:
+        """A birthday that is not a date is worse than none: it silences the
+        lookup that uses it to tell two people on one number apart."""
+        if v in (None, ""):
+            return None
+        try:
+            date.fromisoformat(v)
+        except ValueError as exc:
+            raise ValueError("Date of birth must look like 1968-04-09.") from exc
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def _a_reachable_number(cls, v: str | None) -> str | None:
+        if v in (None, ""):
+            return None
+        if normalize_phone(v) is None:
+            raise ValueError("That doesn't look like a phone number.")
+        return v
 
 
 @router.patch("/{patient_id}", response_model=PatientDetailResponse)
@@ -559,11 +602,12 @@ async def edit_patient(
     db: AsyncSession = Depends(get_tenant_db),
     user: User = Depends(require_permission(MANAGE_PATIENTS)),
 ) -> PatientDetailResponse:
-    """Write what the practice learned about a patient after they walked in.
+    """Correct what the call got wrong, and add what it never asked.
 
-    A caller tells the agent one thing and the hygienist finds out another. The
-    card has to hold the second kind too, or the front desk keeps it on a
-    sticky note beside the monitor.
+    A caller tells the agent one thing and the hygienist finds out another; a
+    name comes through a bad line; a number was written down before the caller
+    corrected it. Every field the agent fills is a field that can be wrong, so
+    the front desk edits all of them here rather than ringing us about it.
     """
     patient = (
         await db.execute(

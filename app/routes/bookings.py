@@ -260,7 +260,7 @@ async def update_booking_status(
     practice: Practice = Depends(get_current_practice),
     # RBAC: changing an appointment's status is a scheduling action → staff+
     # (viewers are read-only). Enforced server-side regardless of the UI.
-    _: User = Depends(require_permission(MANAGE_APPOINTMENTS)),
+    user: User = Depends(require_permission(MANAGE_APPOINTMENTS)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> BookingSummary:
     """Update a booking's lifecycle status from the dashboard.
@@ -300,6 +300,11 @@ async def update_booking_status(
             AuditLog(
                 id=uuid.uuid4(),
                 practice_id=practice.id,
+                # Who did it. Dentovox staff can now fix a schedule while
+                # viewing a clinic, so an unattributed row would read as the
+                # clinic having done it — which is the thing that made this
+                # read-only in the first place.
+                user_id=user.id,
                 action=audit_action,
                 resource_type="booking",
                 resource_id=b.id,
@@ -354,7 +359,7 @@ async def edit_booking(
     booking_id: str,
     payload: BookingEdit,
     practice: Practice = Depends(get_current_practice),
-    _: User = Depends(require_permission(MANAGE_APPOINTMENTS)),
+    user: User = Depends(require_permission(MANAGE_APPOINTMENTS)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> BookingSummary:
     """Move or amend an appointment, here and in the practice's own calendar.
@@ -422,6 +427,7 @@ async def edit_booking(
     db.add(AuditLog(
         id=uuid.uuid4(),
         practice_id=practice.id,
+        user_id=user.id,
         action="booking_edited",
         resource_type="booking",
         resource_id=b.id,
