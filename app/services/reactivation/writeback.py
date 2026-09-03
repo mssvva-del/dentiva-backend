@@ -30,7 +30,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.kolla.client import KollaError, KollaUnavailable
-from app.adapters.nexhealth.client import NexHealthError, NexHealthUnavailable
+from app.adapters.nexhealth.client import (
+    NexHealthAlreadyCancelled,
+    NexHealthError,
+    NexHealthUnavailable,
+)
 from app.config import get_settings
 from app.db import set_tenant
 from app.models.booking import Booking
@@ -192,6 +196,12 @@ async def cancel_in_pms(
         return "no_pms"
     try:
         await client.cancel_appointment(booking.pms_external_id)
+    except NexHealthAlreadyCancelled:
+        # Their calendar already holds the state we asked for. Treating it as a
+        # failure left the front desk chasing a disagreement that did not exist.
+        logger.info("already cancelled in the PMS for booking %s", booking.id)
+        await _remember(session, booking, None)
+        return "cancelled"
     except _PMS_UNAVAILABLE as exc:
         logger.warning("cancel deferred (PMS unavailable) for booking %s", booking.id)
         await _remember(session, booking, f"Couldn't reach your practice software: {exc}")
