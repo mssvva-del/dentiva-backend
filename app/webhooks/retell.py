@@ -578,6 +578,7 @@ async def _find_patient_by_phone(
     *,
     first_name: str | None = None,
     dob: str | None = None,
+    lone_match_is_enough: bool = False,
 ) -> Patient | str | None:
     """The patient this number belongs to, ``AMBIGUOUS``, or None.
 
@@ -610,7 +611,26 @@ async def _find_patient_by_phone(
     # identity challenge asks for and is the stronger of the two; the first name
     # is what booking always has.
     if dob:
-        rows = [p for p in rows if _dob_matches(p.date_of_birth, dob)]
+        matched = [p for p in rows if _dob_matches(p.date_of_birth, dob)]
+        # A birthday we never recorded cannot match one. Our own chart holds a
+        # date of birth only for callers who said they were NEW — a returning
+        # patient books without ever being asked — so when they ring back to
+        # cancel, the date they correctly recite matches nothing and they are
+        # told there is no appointment under their number. The chair stays
+        # blocked and the patient believes they are still booked.
+        #
+        # For the tools that only ACT on an existing appointment, one person on
+        # this number is answer enough: caller ID already ties them to it, and
+        # _caller_is_verified still has to agree before anything changes. Never
+        # for booking — there the same fallback would file a child's visit in a
+        # parent's chart.
+        if not (
+            lone_match_is_enough
+            and not matched
+            and len(rows) == 1
+            and not rows[0].date_of_birth  # a birthday we never wrote down
+        ):
+            rows = matched
     elif first_name:
         wanted = first_name.strip().casefold()
         rows = [p for p in rows if (p.first_name or "").strip().casefold() == wanted]
@@ -1716,7 +1736,8 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
         await set_tenant(session, practice_id)
 
         patient = await _find_patient_by_phone(
-            session, practice_id, phone, dob=args.get("patient_dob")
+            session, practice_id, phone, dob=args.get("patient_dob"),
+            lone_match_is_enough=True,
         )
         if patient is AMBIGUOUS:
             return {"rescheduled": False, "message": ASK_WHICH_PATIENT}
@@ -1940,7 +1961,8 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
         await set_tenant(session, practice_id)
 
         patient = await _find_patient_by_phone(
-            session, practice_id, phone, dob=args.get("patient_dob")
+            session, practice_id, phone, dob=args.get("patient_dob"),
+            lone_match_is_enough=True,
         )
         if patient is AMBIGUOUS:
             return {"cancelled": False, "message": ASK_WHICH_PATIENT}
@@ -2344,7 +2366,8 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
         await set_tenant(session, practice_id)
 
         patient = await _find_patient_by_phone(
-            session, practice_id, phone, dob=args.get("patient_dob")
+            session, practice_id, phone, dob=args.get("patient_dob"),
+            lone_match_is_enough=True,
         )
         if patient is None or patient is AMBIGUOUS:
             return not_found
