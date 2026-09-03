@@ -518,8 +518,8 @@ async def _resolve_practice(
 
 AMBIGUOUS = "ambiguous"
 ASK_WHICH_PATIENT = (
-    "There are a couple of people at this number in our records. Could you tell "
-    "me your date of birth so I pull up the right one?"
+    "I have a couple of people at this number. Can I get your first name and "
+    "date of birth so I pull up the right one?"
 )
 
 
@@ -631,7 +631,12 @@ async def _find_patient_by_phone(
             and not rows[0].date_of_birth  # a birthday we never wrote down
         ):
             rows = matched
-    elif first_name:
+    # The name narrows what the birthday could not. It is the only thing a
+    # household of records created BY VOICE can be told apart by: none of them
+    # carries a birthday, so "which of you is it?" used to be a question the
+    # caller could answer and the code could not act on — the agent asked, the
+    # patient said "Ruth", and the tool had nowhere to put it.
+    if first_name and (not dob or len(rows) > 1):
         wanted = first_name.strip().casefold()
         rows = [p for p in rows if (p.first_name or "").strip().casefold() == wanted]
 
@@ -1737,6 +1742,7 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
 
         patient = await _find_patient_by_phone(
             session, practice_id, phone, dob=args.get("patient_dob"),
+            first_name=args.get("patient_first_name"),
             lone_match_is_enough=True,
         )
         if patient is AMBIGUOUS:
@@ -1962,6 +1968,7 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
 
         patient = await _find_patient_by_phone(
             session, practice_id, phone, dob=args.get("patient_dob"),
+            first_name=args.get("patient_first_name"),
             lone_match_is_enough=True,
         )
         if patient is AMBIGUOUS:
@@ -2367,6 +2374,7 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
 
         patient = await _find_patient_by_phone(
             session, practice_id, phone, dob=args.get("patient_dob"),
+            first_name=args.get("patient_first_name"),
             lone_match_is_enough=True,
         )
         if patient is None or patient is AMBIGUOUS:
