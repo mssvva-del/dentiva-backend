@@ -123,20 +123,22 @@ async def test_writes_outside_the_two_repairs_are_refused(staff_role, method):
     assert "admin area" in exc.value.detail
 
 
-@pytest.mark.parametrize("path", [
-    "/api/bookings/8b0f2c1e-0000-0000-0000-000000000000",
-    "/api/bookings/8b0f2c1e-0000-0000-0000-000000000000/status",
-    "/api/patients/8b0f2c1e-0000-0000-0000-000000000000",
+@pytest.mark.parametrize("method,path", [
+    ("PATCH", "/api/bookings/8b0f2c1e-0000-0000-0000-000000000000"),
+    ("PATCH", "/api/bookings/8b0f2c1e-0000-0000-0000-000000000000/status"),
+    ("PATCH", "/api/patients/8b0f2c1e-0000-0000-0000-000000000000"),
+    # Asking the practice's calendar again after it refused a change.
+    ("POST", "/api/bookings/8b0f2c1e-0000-0000-0000-000000000000/resync"),
 ])
 @pytest.mark.asyncio
-async def test_the_two_repairs_a_support_call_needs_go_through(staff_role, path):
+async def test_the_repairs_a_support_call_needs_go_through(staff_role, method, path):
     """A test booking sat in a live clinic's calendar all morning because the
     only person looking at it was viewing the clinic, and viewing could not
     cancel. Both write an audit row carrying the STAFF user's id."""
     staff_role("super_admin")
     target = uuid.uuid4()
     got = await imp.impersonated_practice_id(
-        _request(method="PATCH", view_as=str(target), path=path), _user()
+        _request(method=method, view_as=str(target), path=path), _user()
     )
     assert got == target
 
