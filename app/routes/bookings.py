@@ -35,6 +35,7 @@ from app.services.booking_edits import (
     apply_move,
     slot_is_taken,
 )
+from app.services.push_to_practice import push_booking
 from app.utils.redact import redact_name
 
 
@@ -493,17 +494,30 @@ async def resync_booking(
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND, detail="Booking not found."
         )
-    if not b.pms_external_id:
+    if b.status == "cancelled" and not b.pms_external_id:
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="This appointment was never in your practice calendar.",
         )
 
-    outcome = (
-        await apply_cancellation(db, practice.id, b)
-        if b.status == "cancelled"
-        else await apply_move(db, practice.id, b)
-    )
+    if b.pms_external_id:
+        outcome = (
+            await apply_cancellation(db, practice.id, b)
+            if b.status == "cancelled"
+            else await apply_move(db, practice.id, b)
+        )
+    else:
+        # It never reached them at all. The booking page has said so since the
+        # day it was written — "this appointment is only in Dentovox" — with
+        # nothing anybody could press, and a live clinic noticed their calendar
+        # was missing appointments before we did.
+        patient = (
+            await db.execute(select(Patient).where(Patient.id == b.patient_id))
+        ).scalar_one_or_none()
+        outcome, note = await push_booking(
+            db, practice, b, patient.pms_external_id if patient else None
+        )
+        b.pms_sync_status = note
     db.add(AuditLog(
         id=uuid.uuid4(),
         practice_id=practice.id,
