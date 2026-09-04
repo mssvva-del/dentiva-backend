@@ -221,3 +221,32 @@ async def test_an_ordinary_555_number_is_still_dialled(monkeypatch):
     _patch_settings(monkeypatch)
     client = _FakeClient(_FakeResponse(201, {"sid": "SM7"}))
     assert (await sms.send_sms("+15550001234", "hi", client=client))["sent"] is True
+
+
+def test_every_patient_is_told_they_can_stop():
+    """US carriers require the opt-out to be SAID, not merely honoured. We have
+    obeyed STOP since the first message and never once told a patient it exists —
+    which is the compliance gap and the reason a carrier rejects a campaign: the
+    sample messages they review have to carry it."""
+    from app.services.sms import build_confirmation_body, build_reminder_body
+
+    en = build_confirmation_body(
+        practice_name="Harborside Dental", first_name="Ruth",
+        date="Friday, September 4", time="9:15 AM", provider="Dr. Zimlensky",
+    )
+    assert "Reply STOP to opt out." in en
+
+    es = build_confirmation_body(
+        practice_name="Harborside Dental", first_name="Carmen",
+        date="viernes 4 de septiembre", time="9:15 AM", provider=None,
+        language="es",
+    )
+    # A patient who booked in Spanish is told how to stop in Spanish.
+    assert "Responda STOP" in es
+    assert "Reply STOP" not in es
+
+    reminder = build_reminder_body(
+        practice_name="Harborside Dental", first_name="Ruth",
+        date="Friday, September 4", time="9:15 AM", soon=False,
+    )
+    assert "Reply STOP to opt out." in reminder
