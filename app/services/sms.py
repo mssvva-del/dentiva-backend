@@ -86,6 +86,14 @@ def _norm_lang(language: str | None) -> str:
     return "es" if (language or "en").lower().startswith("es") else "en"
 
 
+# US carriers require the opt-out to be SAID, not merely honoured. We have
+# honoured STOP since the first message went out and never once told a patient
+# it existed — which is both the compliance gap and the reason an A2P campaign
+# gets rejected: the sample messages a carrier reviews must carry it.
+_OPT_OUT_EN = "Reply STOP to opt out."
+_OPT_OUT_ES = "Responda STOP para no recibir más mensajes."
+
+
 def build_confirmation_body(
     *,
     practice_name: str,
@@ -106,14 +114,14 @@ def build_confirmation_body(
         return (
             f"{greeting}su cita en {practice_name} está confirmada para el "
             f"{date} a las {time}{with_provider}. Responda a este mensaje o "
-            f"llámenos si necesita reprogramar."
+            f"llámenos si necesita reprogramar. {_OPT_OUT_ES}"
         )
     greeting = "Hi, " if unknown else f"Hi {first_name}, "
     with_provider = f" with {provider}" if provider else ""
     return (
         f"{greeting}your appointment at {practice_name} is confirmed for "
         f"{date} at {time}{with_provider}. Reply to this text or call us if you "
-        f"need to reschedule."
+        f"need to reschedule. {_OPT_OUT_EN}"
     )
 
 
@@ -155,7 +163,7 @@ def build_reminder_body(
     return (
         f"{greeting}a reminder that your appointment at {practice_name} is {when} "
         f"on {date} at {time}. Reply to this text or call us if you need to "
-        f"reschedule. See you soon!"
+        f"reschedule. See you soon! {_OPT_OUT_EN}"
     )
 
 
