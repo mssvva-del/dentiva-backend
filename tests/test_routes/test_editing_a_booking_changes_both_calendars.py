@@ -324,3 +324,69 @@ async def test_a_pms_we_cannot_reach_does_not_block_a_live_booking(
     })
     assert r.status_code == 200, r.text
     assert r.json().get("booked") is True, "a PMS outage cost the caller a booking"
+
+
+async def test_a_slot_we_just_filled_is_not_offered_again(
+    client, db_session, monkeypatch
+):
+    """The practice's calendar lags on what we wrote to it a minute ago. Its
+    availability endpoint still listed 9:15 while our own book held 9:00–9:45,
+    so the next caller was offered it, told "you're booked", and the write-back
+    was refused as a conflict. Both bookings were ours; one ever existed there."""
+    from app.adapters.open_dental.models import AvailableSlot
+    from app.webhooks import retell as retell_mod
+
+    practice, _ = await _setup(
+        db_session, "z", at=datetime(2099, 10, 5, 13, 0, tzinfo=UTC)  # 09:00 EDT, 45 min
+    )
+    monkeypatch.setattr(retell_mod, "pms_is_connected", lambda _p: True)
+
+    async def _pms_says(*_a, **_kw):
+        return [AvailableSlot(date="2099-10-05", time="09:15", provider="our team"),
+                AvailableSlot(date="2099-10-05", time="10:30", provider="our team")]
+
+    monkeypatch.setattr(retell_mod, "compute_pms_slots", _pms_says)
+
+    r = await client.post("/webhooks/retell", json={
+        "name": "check_availability",
+        "call": {"call_id": f"lag-{uuid.uuid4().hex[:8]}",
+                 "metadata": {"practice_id": str(practice.id)}},
+        "args": {"preferred_date": "2099-10-05", "procedure": "cleaning"},
+    })
+    times = [s["time"] for s in r.json().get("available_slots", [])]
+    assert "09:15" not in times, times   # inside our own 09:00–09:45
+    assert "10:30" in times
+
+
+async def test_the_pre_commit_check_trusts_our_own_book_over_a_lagging_pms(
+    client, db_session, monkeypatch
+):
+    """Even when the practice's calendar still says the slot is open."""
+    from app.adapters.open_dental.models import AvailableSlot
+    from app.webhooks import retell as retell_mod
+
+    practice, _ = await _setup(
+        db_session, "y", at=datetime(2099, 10, 6, 13, 0, tzinfo=UTC)
+    )
+    monkeypatch.setattr(retell_mod, "pms_is_connected", lambda _p: True)
+    offered = AvailableSlot(date="2099-10-06", time="09:15", provider="our team")
+
+    async def _still_open(*_a, **_kw):
+        return [offered]   # the PMS view, lagging
+
+    monkeypatch.setattr(retell_mod, "compute_pms_slots", _still_open)
+    # Reach the pre-commit check directly with the lagging slot: availability
+    # would already have hidden it, but a caller can name a time unprompted.
+    monkeypatch.setattr(retell_mod, "_minus_our_own_book",
+                        retell_mod._minus_our_own_book)  # real one
+
+    r = await client.post("/webhooks/retell", json={
+        "name": "book_appointment",
+        "call": {"call_id": f"lag2-{uuid.uuid4().hex[:8]}",
+                 "metadata": {"practice_id": str(practice.id)}},
+        "args": {"patient_first_name": "Nora", "patient_phone": "+16175550125",
+                 "preferred_date": "2099-10-06", "preferred_time": "09:15",
+                 "procedure": "cleaning"},
+    })
+    assert r.status_code == 200, r.text
+    assert r.json().get("booked") is not True, r.json()
