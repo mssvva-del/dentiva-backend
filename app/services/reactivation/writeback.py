@@ -118,8 +118,14 @@ async def write_back_booking(
 
     try:
         # 1. Anti-double-book: is the slot still open in the PMS right now?
+        # The SAME question availability asked a moment ago: openings of THIS
+        # visit's length. This asked for 60-minute openings regardless, so a
+        # 45-minute cleaning offered at 9:45 — free until the 10:30 next door —
+        # was absent from the 60-minute list and refused as a "conflict". The
+        # caller had already been told they were booked.
         slots = await client.find_appointment_slots(
-            start_date=appt_date, days=1, provider_ids=[provider_id]
+            start_date=appt_date, days=1, provider_ids=[provider_id],
+            slot_length=int(booking.duration_minutes or 60),
         )
         if not _slot_is_free(slots, start, provider_id, operatory_id):
             logger.info("write-back conflict: slot taken in PMS for booking %s", booking.id)
