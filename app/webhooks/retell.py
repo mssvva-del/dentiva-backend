@@ -579,6 +579,42 @@ async def _upsert_patient(
     return patient
 
 
+
+async def _find_patient_for_call(
+    session, practice_id, retell_call_id: str, spoken: str | None, *, dob, first_name
+):
+    """The patient this call is about — by the number the agent gave, and if that
+    finds nobody, by the number the call is actually coming from.
+
+    A live cancellation: the agent read the caller's number back correctly, then
+    sent the tool a different one, and "I couldn't find an appointment under
+    that number" went to a patient whose appointment we had made ten minutes
+    earlier from that very phone. The caller ID was right the whole time. The
+    identity check still runs afterwards, so falling back to it opens nothing:
+    a caller on their own number is exactly who it says they are.
+
+    Only for the tools that ACT on an existing appointment. Booking keeps its
+    own rules — there, a number nobody matched means a new patient.
+    """
+    phone = await _caller_phone(session, retell_call_id, spoken)
+    found = await _find_patient_by_phone(
+        session, practice_id, phone, dob=dob, first_name=first_name,
+        lone_match_is_enough=True,
+    )
+    if found is not None:
+        return phone, found
+    call = (await session.execute(
+        select(Call).where(Call.retell_call_id == retell_call_id)
+    )).scalar_one_or_none()
+    caller_id = (call.from_number if call else None) or ""
+    if not caller_id or normalize_phone(caller_id) == normalize_phone(phone):
+        return phone, None
+    found = await _find_patient_by_phone(
+        session, practice_id, caller_id, dob=dob, first_name=first_name,
+        lone_match_is_enough=True,
+    )
+    return (caller_id if found is not None else phone), found
+
 async def _find_patient_by_phone(
     session,
     practice_id: uuid.UUID,
@@ -837,6 +873,38 @@ async def _handle_call_started(payload: dict) -> dict:
     return {"ok": True}
 
 
+
+# What the agent says when it believes it has booked, in both languages it
+# speaks. Deterministic on purpose: this exists because the model cannot be
+# trusted to have done what it said.
+_BOOKING_CLAIM_RE = re.compile(
+    r"you'?re all set|you are all set|all set for|you'?re booked|i'?ve booked|"
+    r"i have booked|booked you|your appointment is (confirmed|set|booked)|"
+    r"est[aá]s? (agendad|reservad)|tu cita (est[aá]|queda) (confirmada|agendada|reservada)|"
+    r"quedas? (agendad|reservad)|te (he )?(agend|reserv)[eé]",
+    re.IGNORECASE,
+)
+
+
+def _agent_claimed_a_booking(transcript: list[dict] | None) -> bool:
+    """Did the agent tell the caller they were booked?
+
+    A live call: check_availability, the caller picked a time, the agent said
+    "I'm booking you for Thursday at nine — you're all set", the caller said
+    thanks, the call ended. book_appointment was never invoked. The patient left
+    believing an appointment existed and nothing existed anywhere — not in our
+    book, not in the practice's — and no screen would ever have shown it,
+    because there was nothing to show.
+    """
+    if not transcript:
+        return False
+    for turn in transcript:
+        if turn.get("role") not in ("agent", "raw"):
+            continue
+        if _BOOKING_CLAIM_RE.search(turn.get("content") or ""):
+            return True
+    return False
+
 # ---------------------------------------------------------------------------
 # call_ended handler
 # ---------------------------------------------------------------------------
@@ -967,6 +1035,29 @@ async def _handle_call_ended(payload: dict) -> dict:
             select(Booking.id).where(Booking.source_call_id == call.id)
         )
         booking_exists = booking_result.scalar_one_or_none() is not None
+        if not booking_exists and _agent_claimed_a_booking(transcript_jsonb):
+            # The one failure no screen can show: a promise with nothing behind
+            # it. Somebody has to ring this person back before Thursday at nine.
+            record_alert("booking_promised_not_made", f"call={retell_call_id}")
+            logger.error("agent claimed a booking and none exists: call=%s", retell_call_id)
+            already = (await session.execute(
+                select(CallbackRequest.id).where(
+                    CallbackRequest.call_id == call.id,
+                    CallbackRequest.status == "pending",
+                )
+            )).first()
+            if already is None:
+                session.add(CallbackRequest(
+                    id=uuid.uuid4(), practice_id=call.practice_id, call_id=call.id,
+                    phone=call.from_number,
+                    reason=("The receptionist told this caller they were booked, but no "
+                            "appointment was made. Please call them back and book it."),
+                    urgent=True, status="pending",
+                ))
+                await session.flush()
+                await _page_clinic_urgent_callback(
+                    session, call.practice_id, None, call.from_number
+                )
         call.outcome = classify_outcome(
             booking_exists=booking_exists,
             call_status=call_status,
@@ -1783,13 +1874,16 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
             }
         await set_tenant(session, practice_id)
 
-        # Caller ID over a number the agent typed into the phone field.
-        phone = await _caller_phone(session, retell_call_id, spoken_phone)
-        patient = await _find_patient_by_phone(
-            session, practice_id, phone, dob=args.get("patient_dob"),
-            first_name=args.get("patient_first_name"),
-            lone_match_is_enough=True,
+        # Caller ID over a number the agent typed into the phone field — and
+        # caller ID again when that number finds nobody.
+        phone, patient = await _find_patient_for_call(
+            session, practice_id, retell_call_id, spoken_phone,
+            dob=args.get("patient_dob"), first_name=args.get("patient_first_name"),
         )
+        # The identity check reads the phone from the arguments. Make it read the
+        # number the record was actually found by, or a caller rescued by their
+        # own caller ID is challenged for a birthday over the agent's typo.
+        args = {**args, "patient_phone": phone}
         if patient is AMBIGUOUS:
             return {"rescheduled": False, "message": ASK_WHICH_PATIENT}
         if patient is None:
@@ -2011,13 +2105,16 @@ async def _handle_cancel_appointment(retell_call_id: str, args: dict) -> dict:
             }
         await set_tenant(session, practice_id)
 
-        # Caller ID over a number the agent typed into the phone field.
-        phone = await _caller_phone(session, retell_call_id, spoken_phone)
-        patient = await _find_patient_by_phone(
-            session, practice_id, phone, dob=args.get("patient_dob"),
-            first_name=args.get("patient_first_name"),
-            lone_match_is_enough=True,
+        # Caller ID over a number the agent typed into the phone field — and
+        # caller ID again when that number finds nobody.
+        phone, patient = await _find_patient_for_call(
+            session, practice_id, retell_call_id, spoken_phone,
+            dob=args.get("patient_dob"), first_name=args.get("patient_first_name"),
         )
+        # The identity check reads the phone from the arguments. Make it read the
+        # number the record was actually found by, or a caller rescued by their
+        # own caller ID is challenged for a birthday over the agent's typo.
+        args = {**args, "patient_phone": phone}
         if patient is AMBIGUOUS:
             return {"cancelled": False, "message": ASK_WHICH_PATIENT}
         if patient is None:
@@ -2420,13 +2517,16 @@ async def _handle_lookup_patient(retell_call_id: str, args: dict) -> dict:
             return not_found
         await set_tenant(session, practice_id)
 
-        # Caller ID over a number the agent typed into the phone field.
-        phone = await _caller_phone(session, retell_call_id, spoken_phone)
-        patient = await _find_patient_by_phone(
-            session, practice_id, phone, dob=args.get("patient_dob"),
-            first_name=args.get("patient_first_name"),
-            lone_match_is_enough=True,
+        # Caller ID over a number the agent typed into the phone field — and
+        # caller ID again when that number finds nobody.
+        phone, patient = await _find_patient_for_call(
+            session, practice_id, retell_call_id, spoken_phone,
+            dob=args.get("patient_dob"), first_name=args.get("patient_first_name"),
         )
+        # The identity check reads the phone from the arguments. Make it read the
+        # number the record was actually found by, or a caller rescued by their
+        # own caller ID is challenged for a birthday over the agent's typo.
+        args = {**args, "patient_phone": phone}
         if patient is None or patient is AMBIGUOUS:
             return not_found
         call_row = (await session.execute(
