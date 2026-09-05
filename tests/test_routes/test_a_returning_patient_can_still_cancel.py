@@ -290,3 +290,54 @@ async def test_a_chart_with_a_different_birthday_is_not_reached_by_name_either(
         select(Booking).where(Booking.id == bid)
     )).scalar_one()
     assert fresh.status == "confirmed"
+
+
+async def test_a_number_the_agent_got_wrong_does_not_hide_the_appointment(
+    client, db_session
+):
+    """Live cancellation: the agent read the caller's number back correctly,
+    then sent the tool a different one. The caller ID was right the whole time,
+    and the appointment we had made from that phone ten minutes earlier was
+    "not found"."""
+    practice, _, booking = await _clinic(db_session, "w")
+    await _call_from(client, practice, PHONE, "ret-w")
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "ret-w",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": "+15551239001",   # one digit off
+                 "patient_first_name": "Ruth"},
+    })
+    assert r.json().get("cancelled") is True, r.json()
+
+    pid, bid = practice.id, booking.id
+    db_session.expire_all()
+    await set_tenant(db_session, pid)
+    fresh = (await db_session.execute(
+        select(Booking).where(Booking.id == bid)
+    )).scalar_one()
+    assert fresh.status == "cancelled"
+
+
+async def test_the_fallback_is_the_callers_own_number_and_nothing_else(
+    client, db_session
+):
+    """From a different phone, a wrong number is still nobody — the caller ID
+    that would rescue it belongs to someone else's line."""
+    practice, _, booking = await _clinic(db_session, "x")
+    await _call_from(client, practice, "+16175559999", "ret-x")   # not Ruth's phone
+
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": "ret-x",
+        "function_name": "cancel_appointment",
+        "args": {"patient_phone": "+15551239001", "patient_first_name": "Ruth"},
+    })
+    assert r.json().get("cancelled") is False
+
+    pid, bid = practice.id, booking.id
+    db_session.expire_all()
+    await set_tenant(db_session, pid)
+    fresh = (await db_session.execute(
+        select(Booking).where(Booking.id == bid)
+    )).scalar_one()
+    assert fresh.status == "confirmed"
