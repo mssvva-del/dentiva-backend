@@ -128,8 +128,13 @@ async def _taken_intervals(
     tz: ZoneInfo,
     day_from: datetime,
     day_to: datetime,
+    excluding: uuid.UUID | None = None,
 ) -> list[tuple[datetime, datetime]]:
     """Clinic-local [start, end) intervals of confirmed bookings in range.
+
+    ``excluding`` leaves one booking out — the one being moved. Its current
+    slot is not "taken" from its own point of view, and counting it made a
+    reschedule refuse the only opening the practice offered.
 
     We keep the DURATION (not just the start) so a candidate slot is rejected
     whenever it OVERLAPS an existing booking — a 09:00 60-min appointment must
@@ -145,6 +150,7 @@ async def _taken_intervals(
                 # before the window but overlaps into it is still counted.
                 Booking.appointment_at >= (day_from - timedelta(hours=4)).astimezone(UTC),
                 Booking.appointment_at < day_to.astimezone(UTC),
+                *([Booking.id != excluding] if excluding is not None else []),
             )
         )
     ).all()

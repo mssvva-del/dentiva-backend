@@ -45,6 +45,7 @@ from app.models.waitlist_entry import WaitlistEntry
 from app.observability.alerts import record_alert
 from app.services.availability import (
     VOICE_PATIENT_PREFIX,
+    _taken_intervals,
     compute_native_slots,
     compute_pms_slots,
     pms_is_connected,
@@ -1325,7 +1326,44 @@ async def _write_booking_to_pms(
     logger.info("PMS write-back %s for booking %s", status, booking_id)
 
 
-async def _open_slots(session, practice, *, procedure, preferred_date, preferred_window):
+async def _minus_our_own_book(session, practice, slots, *, procedure: str, excluding=None):
+    """Drop PMS openings that overlap an appointment WE already hold.
+
+    The practice's calendar is the honest source for walk-ins and the front
+    desk's own bookings — but it lags on ours. An appointment we wrote to it a
+    minute ago can still be listed as open by its availability endpoint, so the
+    next caller was offered the very slot we had just filled, told "you're
+    booked", and the write-back was then refused as a conflict. Both bookings
+    were ours; only one of them ever existed at the practice.
+    """
+    if not slots:
+        return slots
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(practice.timezone or "UTC")
+    minutes = visit_minutes(practice, procedure)
+    days = sorted({s.date for s in slots})
+    day_from = datetime.strptime(days[0], "%Y-%m-%d").replace(tzinfo=tz)
+    day_to = datetime.strptime(days[-1], "%Y-%m-%d").replace(tzinfo=tz) + timedelta(days=1)
+    taken = await _taken_intervals(
+        session, practice.id, tz, day_from, day_to, excluding=excluding
+    )
+    if not taken:
+        return slots
+    kept = []
+    for slot in slots:
+        start = datetime.strptime(f"{slot.date} {slot.time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+        end = start + timedelta(minutes=minutes)
+        if any(start < t_end and t_start < end for t_start, t_end in taken):
+            continue
+        kept.append(slot)
+    return kept
+
+
+async def _open_slots(
+    session, practice, *, procedure, preferred_date, preferred_window, excluding=None
+):
     """Times we can actually offer — from the clinic's PMS when it has one.
 
     Our own book knows nothing about walk-ins, the front desk booking directly, or
@@ -1341,7 +1379,9 @@ async def _open_slots(session, practice, *, procedure, preferred_date, preferred
             procedure=procedure,
         )
         if pms_slots is not None:
-            return pms_slots
+            return await _minus_our_own_book(
+                session, practice, pms_slots, procedure=procedure, excluding=excluding
+            )
         record_alert("pms_slots_unavailable", f"practice={practice.id}")
     return await compute_native_slots(
         session, practice,
@@ -1445,6 +1485,15 @@ async def _pms_slot_still_free(practice, slot) -> bool:
     if fresh is None:
         return True
     return any(s.date == slot.date and s.time == slot.time for s in fresh)
+
+
+async def _our_book_holds(session, practice, slot, *, procedure: str) -> bool:
+    """Does one of OUR confirmed appointments already cover this slot?
+
+    The practice's calendar lags on what we just wrote to it; ours does not.
+    """
+    remaining = await _minus_our_own_book(session, practice, [slot], procedure=procedure)
+    return not remaining
 
 
 # Numbers a speech model reaches for when it does not know the real one: the
@@ -1632,7 +1681,12 @@ async def _handle_book_appointment(retell_call_id: str, args: dict) -> dict:
         if (
             practice_obj is not None
             and pms_is_connected(practice_obj)
-            and not await _pms_slot_still_free(practice_obj, chosen_slot)
+            and (
+                not await _pms_slot_still_free(practice_obj, chosen_slot)
+                or await _our_book_holds(
+                    session, practice_obj, chosen_slot, procedure=procedure
+                )
+            )
         ):
             others = [s for s in slots if s.time != chosen_slot.time][:2]
             record_alert("pms_slot_taken_while_choosing",
@@ -1972,6 +2026,10 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
                 procedure=procedure,
                 preferred_date=new_date,
                 preferred_window=new_window,
+                # The slot this appointment holds now is not taken from its
+                # own point of view: moving it there again, or into a time
+                # that overlaps it, must stay on offer.
+                excluding=booking.id,
             )
         wanted_time = (args.get("preferred_time") or "").strip()
         chosen = None
