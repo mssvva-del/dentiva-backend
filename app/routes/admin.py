@@ -1655,6 +1655,10 @@ class LeadRow(BaseModel):
     status: str
     notes: str | None
     created_at: datetime
+    landing_page: str | None = None
+    referrer: str | None = None
+    utm: str | None = None
+    submitted_from: str | None = None
 
 
 class LeadUpdate(BaseModel):
@@ -1670,6 +1674,8 @@ def _lead_row(lead: Lead) -> LeadRow:
         id=str(lead.id), name=lead.name, email=lead.email, phone=lead.phone,
         clinic_name=lead.clinic_name, message=lead.message, source=lead.source,
         status=lead.status, notes=lead.notes, created_at=lead.created_at,
+        landing_page=lead.landing_page, referrer=lead.referrer, utm=lead.utm,
+        submitted_from=lead.submitted_from,
     )
 
 

@@ -32,3 +32,9 @@ class Lead(UUIDPKMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="new")
     # Internal sales notes (admin-only).
     notes: Mapped[str | None] = mapped_column(Text)
+    # First-touch attribution, as the site already collects it. Without these
+    # the inbox could say a demo was requested and never which channel earned it.
+    landing_page: Mapped[str | None] = mapped_column(Text)
+    referrer: Mapped[str | None] = mapped_column(Text)
+    utm: Mapped[str | None] = mapped_column(Text)
+    submitted_from: Mapped[str | None] = mapped_column(Text)
