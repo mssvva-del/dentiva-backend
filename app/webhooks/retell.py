@@ -1326,7 +1326,7 @@ async def _write_booking_to_pms(
     logger.info("PMS write-back %s for booking %s", status, booking_id)
 
 
-async def _minus_our_own_book(session, practice, slots, *, procedure: str):
+async def _minus_our_own_book(session, practice, slots, *, procedure: str, excluding=None):
     """Drop PMS openings that overlap an appointment WE already hold.
 
     The practice's calendar is the honest source for walk-ins and the front
@@ -1346,7 +1346,9 @@ async def _minus_our_own_book(session, practice, slots, *, procedure: str):
     days = sorted({s.date for s in slots})
     day_from = datetime.strptime(days[0], "%Y-%m-%d").replace(tzinfo=tz)
     day_to = datetime.strptime(days[-1], "%Y-%m-%d").replace(tzinfo=tz) + timedelta(days=1)
-    taken = await _taken_intervals(session, practice.id, tz, day_from, day_to)
+    taken = await _taken_intervals(
+        session, practice.id, tz, day_from, day_to, excluding=excluding
+    )
     if not taken:
         return slots
     kept = []
@@ -1359,7 +1361,9 @@ async def _minus_our_own_book(session, practice, slots, *, procedure: str):
     return kept
 
 
-async def _open_slots(session, practice, *, procedure, preferred_date, preferred_window):
+async def _open_slots(
+    session, practice, *, procedure, preferred_date, preferred_window, excluding=None
+):
     """Times we can actually offer — from the clinic's PMS when it has one.
 
     Our own book knows nothing about walk-ins, the front desk booking directly, or
@@ -1376,7 +1380,7 @@ async def _open_slots(session, practice, *, procedure, preferred_date, preferred
         )
         if pms_slots is not None:
             return await _minus_our_own_book(
-                session, practice, pms_slots, procedure=procedure
+                session, practice, pms_slots, procedure=procedure, excluding=excluding
             )
         record_alert("pms_slots_unavailable", f"practice={practice.id}")
     return await compute_native_slots(
@@ -2022,6 +2026,10 @@ async def _handle_reschedule_appointment(retell_call_id: str, args: dict) -> dic
                 procedure=procedure,
                 preferred_date=new_date,
                 preferred_window=new_window,
+                # The slot this appointment holds now is not taken from its
+                # own point of view: moving it there again, or into a time
+                # that overlaps it, must stay on offer.
+                excluding=booking.id,
             )
         wanted_time = (args.get("preferred_time") or "").strip()
         chosen = None

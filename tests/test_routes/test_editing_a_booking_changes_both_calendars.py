@@ -390,3 +390,39 @@ async def test_the_pre_commit_check_trusts_our_own_book_over_a_lagging_pms(
     })
     assert r.status_code == 200, r.text
     assert r.json().get("booked") is not True, r.json()
+
+
+async def test_a_reschedule_is_not_blocked_by_the_appointment_it_is_moving(
+    client, db_session, monkeypatch
+):
+    """Subtracting our own book from the practice's openings must leave out the
+    one appointment being moved: its current slot is not taken from its own
+    point of view. Counting it refused the only opening the practice offered."""
+    from app.adapters.open_dental.models import AvailableSlot
+    from app.webhooks import retell as retell_mod
+
+    practice, _ = await _setup(
+        db_session, "v", at=datetime(2099, 10, 7, 13, 0, tzinfo=UTC)  # 09:00 local
+    )
+    monkeypatch.setattr(retell_mod, "pms_is_connected", lambda _p: True)
+
+    async def _pms_says(*_a, **_kw):
+        # The practice offers 09:15 — inside the moving appointment's own span.
+        return [AvailableSlot(date="2099-10-07", time="09:15", provider="our team")]
+
+    monkeypatch.setattr(retell_mod, "compute_pms_slots", _pms_says)
+
+    call_id = f"mv-{uuid.uuid4().hex[:8]}"
+    await client.post("/webhooks/retell", json={
+        "event": "call_started", "call_id": call_id,
+        "call": {"call_id": call_id, "from_number": "+16175550188",
+                 "to_number": practice.phone_number or "+16204559562",
+                 "metadata": {"practice_id": str(practice.id)}},
+    })
+    r = await client.post("/webhooks/retell", json={
+        "event": "function_call", "call_id": call_id,
+        "function_name": "reschedule_appointment",
+        "args": {"patient_phone": "+16175550188", "new_date": "2099-10-07",
+                 "preferred_time": "09:15"},
+    })
+    assert r.json().get("rescheduled") is True, r.json()
