@@ -824,7 +824,12 @@ async def _ensure_call_row(retell_call_id: str, call_obj: dict) -> None:
 
 
 async def _handle_call_started(payload: dict) -> dict:
-    retell_call_id = payload.get("call_id") or payload.get("retell_call_id", "")
+    retell_call_id = (
+        payload.get("call_id")
+        or payload.get("retell_call_id")
+        or (payload.get("call", {}) or {}).get("call_id")
+        or ""
+    )
     call_data = payload.get("call", {}) or {}
     agent_id = call_data.get("agent_id") or payload.get("agent_id")
     from_number = call_data.get("from_number") or payload.get("from_number", "unknown")
@@ -1100,7 +1105,12 @@ async def _handle_call_ended(payload: dict) -> dict:
 
 async def _handle_call_analyzed(payload: dict) -> dict:
     """Store Retell post-call analysis results on the calls row."""
-    retell_call_id = payload.get("call_id") or payload.get("retell_call_id", "")
+    retell_call_id = (
+        payload.get("call_id")
+        or payload.get("retell_call_id")
+        or (payload.get("call", {}) or {}).get("call_id")
+        or ""
+    )
     analysis = payload.get("call_analysis") or payload.get("analysis") or {}
     # Retell puts our configured post-call questions (config.yaml) under
     # ``custom_analysis_data`` — reading them off the top level (the old code) meant
@@ -3159,6 +3169,17 @@ async def retell_webhook(request: Request, response: Response) -> dict:
         )
 
     if event in ("call_started", "call_ended", "call_analyzed"):
+        # Retell delivers every call in the account, including the OTHER leg
+        # of a call we did not answer: a test caller dialling a clinic, or an
+        # agent from an unrelated account. Routed by the number it dialled,
+        # that leg became a second calls row for the same conversation — twice
+        # the minutes metered, and backstops paging the clinic over a
+        # transcript in which "the caller" was our own receptionist. Our own
+        # outbound calls always carry metadata; a bare outbound leg is not ours.
+        lifecycle_call = payload.get("call", {}) or {}
+        if lifecycle_call.get("direction") == "outbound" and not lifecycle_call.get("metadata"):
+            logger.info("ignoring foreign outbound leg for event=%s", event)
+            return {"ok": True, "ignored": "foreign_outbound"}
         handler = {
             "call_started": _handle_call_started,
             "call_ended": _handle_call_ended,
