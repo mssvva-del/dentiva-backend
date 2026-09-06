@@ -10,13 +10,16 @@ from __future__ import annotations
 import logging
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi import status as http_status
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from app.auth.permissions import VIEW_CALLS, require_permission
 from app.config import get_settings
+from app.db import async_session_factory
 from app.dependencies import get_current_practice
+from app.middleware.rate_limit import limit_public
 from app.models.practice import Practice
 from app.models.user import User
 
@@ -60,6 +63,29 @@ async def create_web_call(
     voice demo in the browser (mic). Auth-gated so only signed-in staff can
     spin up a call.
     """
+    return _as_response(await _mint_web_call(_practice))
+
+
+def _as_response(data: dict) -> WebCallResponse:
+    token = data.get("access_token")
+    if not token:
+        raise HTTPException(
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
+            detail="Voice service returned no token.",
+        )
+    return WebCallResponse(
+        access_token=token, call_id=data.get("call_id"), agent_id=data.get("agent_id"),
+    )
+
+
+# The clerk org the seed gives the fictional demo clinic. The website's "talk to
+# the receptionist" button calls THIS practice and no other: it is the one
+# clinic with no patients, no PMS and nothing a stranger could learn.
+DEMO_CLINIC_ORG = "demo_org_dentiva"
+
+
+async def _mint_web_call(practice: Practice) -> dict:
+    """One Retell web call for this clinic; the browser gets a token for it."""
     settings = get_settings()
     if not (settings.retell_api_key and settings.retell_agent_id):
         raise HTTPException(
@@ -72,7 +98,7 @@ async def create_web_call(
         # them the browser demo would SPEAK literal "{{agent_name}}"/KB refs.
         from app.services.llm.dynamic_vars import build_dynamic_variables
 
-        dyn = build_dynamic_variables(_practice)
+        dyn = build_dynamic_variables(practice)
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(
                 f"{RETELL_BASE}/v2/create-web-call",
@@ -84,7 +110,7 @@ async def create_web_call(
                     # webhook can't resolve the clinic from agent_id (it refuses to
                     # guess with 2+ practices). Carry the practice explicitly so the
                     # call logs under THIS clinic instead of an orphan row.
-                    "metadata": {"practice_id": str(_practice.id)},
+                    "metadata": {"practice_id": str(practice.id)},
                 },
             )
         if resp.status_code >= 400:
@@ -98,7 +124,7 @@ async def create_web_call(
                 status_code=http_status.HTTP_502_BAD_GATEWAY,
                 detail=f"Voice demo unavailable (provider returned {resp.status_code}).",
             )
-        data = resp.json()
+        return resp.json()
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -108,14 +134,27 @@ async def create_web_call(
             detail="Voice service unreachable.",
         ) from exc
 
-    token = data.get("access_token")
-    if not token:
+
+@router.post("/public-web-call", response_model=WebCallResponse)
+# Open to the internet and every call costs Retell minutes; a visitor who
+# starts more than two calls a minute is not evaluating the product.
+@limit_public("2/minute")
+async def create_public_web_call(
+    request: Request,
+    response: Response,  # slowapi writes its headers here
+) -> WebCallResponse:
+    """A browser call with the receptionist for a visitor on the marketing site.
+
+    Unauthenticated by design, and pinned to the demo clinic: the visitor is
+    nobody's staff, so they get the one practice that is nobody's either.
+    """
+    async with async_session_factory() as session:
+        practice = (await session.execute(
+            select(Practice).where(Practice.clerk_org_id == DEMO_CLINIC_ORG)
+        )).scalar_one_or_none()
+    if practice is None:
         raise HTTPException(
-            status_code=http_status.HTTP_502_BAD_GATEWAY,
-            detail="Voice service returned no token.",
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The demo isn't available right now.",
         )
-    return WebCallResponse(
-        access_token=token,
-        call_id=data.get("call_id"),
-        agent_id=data.get("agent_id"),
-    )
+    return _as_response(await _mint_web_call(practice))
