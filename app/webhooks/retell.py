@@ -892,6 +892,35 @@ _BOOKING_CLAIM_RE = re.compile(
 )
 
 
+async def _callers_booking_changed_during(session, call: Call) -> bool:
+    """Did one of THIS caller's appointments change while the call was going?
+
+    A reschedule says "you're all set" too, and it touches a booking some
+    earlier call created — nothing carries this call's id, so the backstop
+    below saw a promise with nothing behind it and paged the clinic to ring
+    back a patient who had just been moved. Seen on every live reschedule.
+    The caller is the number they rang from, and their appointment moved
+    after the call began: that is the promise, kept.
+    """
+    # Hashed here rather than read off the row: call_started writes the row
+    # with a core INSERT, which the ORM hook that fills caller_number_hmac
+    # never sees.
+    caller = phone_hmac(call.from_number) if call.from_number else None
+    if not caller or not call.started_at:
+        return False
+    touched = await session.execute(
+        select(Booking.id)
+        .join(Patient, Patient.id == Booking.patient_id)
+        .where(
+            Booking.practice_id == call.practice_id,
+            Patient.phone_hmac == caller,
+            Booking.updated_at >= call.started_at,
+        )
+        .limit(1)
+    )
+    return touched.first() is not None
+
+
 def _agent_claimed_a_booking(transcript: list[dict] | None) -> bool:
     """Did the agent tell the caller they were booked?
 
@@ -1041,7 +1070,8 @@ async def _handle_call_ended(payload: dict) -> dict:
             select(Booking.id).where(Booking.source_call_id == call.id)
         )
         booking_exists = booking_result.scalar_one_or_none() is not None
-        if not booking_exists and _agent_claimed_a_booking(transcript_jsonb):
+        promise_kept = booking_exists or await _callers_booking_changed_during(session, call)
+        if not promise_kept and _agent_claimed_a_booking(transcript_jsonb):
             # The one failure no screen can show: a promise with nothing behind
             # it. Somebody has to ring this person back before Thursday at nine.
             record_alert("booking_promised_not_made", f"call={retell_call_id}")
