@@ -817,14 +817,19 @@ class NexHealthClient(ReactivationSource):
             raise
 
     async def move_appointment(
-        self, appointment_id: str, *, start_time: str, end_time: str | None = None  # noqa: ARG002
+        self, appointment_id: str, *, start_time: str, end_time: str | None = None
     ) -> None:
         """Move it rather than cancelling and rebooking, so the appointment keeps
         its history and a failure cannot leave the patient with nothing.
 
-        UNVERIFIED — see cancel_appointment. ``end_time`` is ignored: NexHealth
-        derives the end from the appointment type.
+        Both ends go in the body. This once sent ``start_time`` alone, on the
+        theory that NexHealth derives the end from the appointment type (true
+        for create, not for update), and the live practice answered every move
+        with ``400 — provide all or none of parameters appt[start_time],
+        appt[end_time]``: the patient heard "you're all set" while the clinic's
+        calendar kept the old time. Seen on Eaglesoft via NexHealth 2026-09-06.
         """
-        await self._patch(
-            f"/appointments/{appointment_id}", {"appt": {"start_time": start_time}}
-        )
+        appt: dict = {"start_time": start_time}
+        if end_time:
+            appt["end_time"] = end_time
+        await self._patch(f"/appointments/{appointment_id}", {"appt": appt})

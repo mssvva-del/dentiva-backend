@@ -108,3 +108,27 @@ async def test_any_other_refusal_is_still_a_failure():
     with pytest.raises(NexHealthError) as caught:
         await _client(handler).cancel_appointment("1")
     assert not isinstance(caught.value, NexHealthAlreadyCancelled)
+
+
+@pytest.mark.asyncio
+async def test_a_move_names_both_ends_of_the_new_time():
+    """The live practice refused every move with "provide all or none of
+    parameters appt[start_time], appt[end_time]" — the caller had already been
+    told they were moved, and the clinic's calendar kept the old time."""
+    import json
+
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/authenticates":
+            return httpx.Response(200, json={"data": {"token": "t"}})
+        if request.method == "PATCH":
+            bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"appt": {"id": 7}}})
+
+    await _client(handler, subdomain="told-us").move_appointment(
+        "7", start_time="2099-10-05T13:00:00Z", end_time="2099-10-05T13:45:00Z",
+    )
+    assert bodies == [{"appt": {
+        "start_time": "2099-10-05T13:00:00Z", "end_time": "2099-10-05T13:45:00Z",
+    }}]
