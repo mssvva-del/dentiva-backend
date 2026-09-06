@@ -210,3 +210,39 @@ async def test_our_own_forgery_probe_is_refused_quietly(client, monkeypatch):
     assert "webhook_signature_rejected" not in kinds, (
         "our own passing self-test must not page"
     )
+
+
+async def test_the_other_leg_of_a_call_is_not_a_second_call(client, db_session):
+    # A test caller dialling the clinic produces two webhook streams: the
+    # inbound call our agent answered and the caller's own outbound leg. Both
+    # name the clinic's number, so the outbound leg used to become a second
+    # calls row with its own metered minutes and its own backstop callbacks.
+    from app.models import Call
+
+    await seed_practice(
+        db_session, name="Twin Dental", clerk_org_id="org_twin", clerk_user_id="user_twin"
+    )
+    for event in ("call_started", "call_ended", "call_analyzed"):
+        resp = await client.post("/webhooks/retell", json={
+            "event": event,
+            "call": {"call_id": "call_outbound_leg", "direction": "outbound",
+                     "to_number": "+15550001111", "from_number": "+15550002222"},
+        })
+        assert resp.status_code == 200
+        assert resp.json().get("ignored") == "foreign_outbound"
+
+    # The inbound leg, and our own outbound calls (which carry metadata), still land.
+    await client.post("/webhooks/retell", json={
+        "event": "call_started",
+        "call": {"call_id": "call_inbound_leg", "direction": "inbound",
+                 "to_number": "+15550001111", "from_number": "+15550002222"},
+    })
+    await client.post("/webhooks/retell", json={
+        "event": "call_started",
+        "call": {"call_id": "call_our_outbound", "direction": "outbound",
+                 "metadata": {"kind": "reactivation"},
+                 "to_number": "+15550002222", "from_number": "+15550001111"},
+    })
+    ids = set((await db_session.execute(select(Call.retell_call_id))).scalars())
+    assert "call_outbound_leg" not in ids
+    assert {"call_inbound_leg", "call_our_outbound"} <= ids
