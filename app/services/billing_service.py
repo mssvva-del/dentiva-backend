@@ -89,7 +89,7 @@ async def set_pilot(
     if sub is None:
         # Pilots default to Starter entitlement so usage limits/UX still work.
         sub = await create_or_update_subscription(
-            session, practice, plan_key="after_hours", status="pilot"
+            session, practice, plan_key="overflow", status="pilot"
         )
     sub.status = "pilot"
     sub.mrr_cents = 0

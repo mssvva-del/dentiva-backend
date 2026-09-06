@@ -84,11 +84,11 @@ async def billing_summary(
         )
     ).scalar_one_or_none()
 
-    included = sub.included_minutes if sub else (get_plan("after_hours").included_minutes)
+    included = sub.included_minutes if sub else (get_plan("overflow").included_minutes)
     overage_rate = (
         (sub.overage_cents_per_min if sub and sub.overage_cents_per_min is not None
          else get_plan(sub.plan).overage_cents_per_min) if sub
-        else get_plan("after_hours").overage_cents_per_min
+        else get_plan("overflow").overage_cents_per_min
     )
     minutes_used = float(usage_row.minutes_used) if usage_row else 0.0
     overage_cents = compute_overage_cents(minutes_used, included, overage_rate)

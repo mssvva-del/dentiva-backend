@@ -1173,7 +1173,7 @@ async def override_subscription(
             )
         ).scalar_one_or_none()
         if sub is None:
-            plan_key = payload.plan or "after_hours"
+            plan_key = payload.plan or "overflow"
             if get_plan(plan_key) is None:
                 raise HTTPException(status_code=422, detail="Unknown plan.")
             plan = get_plan(plan_key)
