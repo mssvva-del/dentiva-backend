@@ -127,7 +127,7 @@ async def _handle_checkout_completed(session, obj: dict) -> str:
         practice.stripe_customer_id = customer
     await set_tenant(session, practice.id)
     meta = obj.get("metadata") or {}
-    plan = meta.get("plan", "after_hours")
+    plan = meta.get("plan", "overflow")
     cycle = meta.get("billing_cycle", "monthly")
     await create_or_update_subscription(
         session, practice, plan_key=plan, billing_cycle=cycle, status="active",
